@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Airelinna project
+Subject: [PATCH] ALTERED SOURCE: omit CS_OWNDC from the main Win32 class
+
+This patch intentionally changes only GLFW's main Win32 window class. The
+upstream helper window class remains unmodified.
+
+---
+diff --git a/src/win32_window.c b/src/win32_window.c
+index 5f30445..5d018d2 100644
+--- a/src/win32_window.c
++++ b/src/win32_window.c
+@@ -1284,7 +1284,7 @@ static int createNativeWindow(_GLFWwindow* window,
+     if (!_glfw.win32.mainWindowClass)
+     {
+         WNDCLASSEXW wc = { sizeof(wc) };
+-        wc.style         = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
++        wc.style         = CS_HREDRAW | CS_VREDRAW;
+         wc.lpfnWndProc   = windowProc;
+         wc.hInstance     = _glfw.win32.instance;
+         wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);

@@ -71,7 +71,8 @@ public:
   // Runtime owners must request stop and retain the job until stop_quiescent(),
   // and must release every WindowsCapturedFrame handed to external/renderer
   // ownership. stop_quiescent() proves only internal callback, mailbox, and
-  // native cleanup; destruction fail-fasts if that internal proof is absent.
+  // native cleanup; once publication starts, destruction fail-fasts if that
+  // internal proof is absent. An inactive factory partial may unwind normally.
   ~WgcCaptureJob();
 
   WgcCaptureJob(const WgcCaptureJob &) = delete;
@@ -82,6 +83,7 @@ public:
   // P3 calls these synchronously from its main-thread tick. Frames and fixed
   // typed signals cross this boundary; callback state, native event tokens,
   // and application events do not.
+  [[nodiscard]] bool has_latest() const noexcept;
   [[nodiscard]] std::optional<WindowsCapturedFrame> take_latest();
   [[nodiscard]] CaptureSignalBatch drain_signals();
   void service_pending_arrival() noexcept;
@@ -93,6 +95,8 @@ public:
   void commit_reconfigure() noexcept;
   void request_stop() noexcept;
   [[nodiscard]] bool stop_quiescent() const noexcept;
+  [[nodiscard]] std::optional<CaptureCleanupFailure>
+  cleanup_failure() const noexcept;
 
 private:
   class Impl;

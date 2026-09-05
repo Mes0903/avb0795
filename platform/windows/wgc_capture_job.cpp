@@ -125,6 +125,8 @@ public:
     return mailbox_.take();
   }
 
+  [[nodiscard]] bool has_latest() const noexcept { return !mailbox_empty(); }
+
   [[nodiscard]] CaptureSignalBatch drain_signals() {
     return policy_.drain_signals();
   }
@@ -320,8 +322,15 @@ public:
     // Releasing a session or pool after uncertain cleanup, or while a callback
     // remains entered, violates the runtime ownership contract. Terminate
     // before member destruction; the runtime must retain the job until its
-    // concrete stop predicate succeeds.
-    detail::enforce_wgc_job_destruction_invariant(stop_quiescent());
+    // concrete stop predicate succeeds. An inactive factory partial has never
+    // opened frame admission and may unwind without a published tick loop.
+    if (publication_.started()) {
+      detail::enforce_wgc_job_destruction_invariant(stop_quiescent());
+    }
+  }
+
+  [[nodiscard]] bool has_latest() const noexcept {
+    return frame_state_->has_latest();
   }
 
   [[nodiscard]] std::optional<WindowsCapturedFrame> take_latest() {
@@ -424,6 +433,11 @@ public:
                                       frame_state_->mailbox_closed_and_empty());
   }
 
+  [[nodiscard]] std::optional<CaptureCleanupFailure>
+  cleanup_failure() const noexcept {
+    return stop_state_.cleanup_failure();
+  }
+
 private:
   WindowsCaptureSource &source_;
   Direct3DDevice direct3d_device_{nullptr};
@@ -494,6 +508,10 @@ std::optional<WindowsCapturedFrame> WgcCaptureJob::take_latest() {
   return implementation_->take_latest();
 }
 
+bool WgcCaptureJob::has_latest() const noexcept {
+  return implementation_->has_latest();
+}
+
 CaptureSignalBatch WgcCaptureJob::drain_signals() {
   return implementation_->drain_signals();
 }
@@ -528,6 +546,11 @@ void WgcCaptureJob::request_stop() noexcept { implementation_->request_stop(); }
 
 bool WgcCaptureJob::stop_quiescent() const noexcept {
   return implementation_->stop_quiescent();
+}
+
+std::optional<CaptureCleanupFailure>
+WgcCaptureJob::cleanup_failure() const noexcept {
+  return implementation_->cleanup_failure();
 }
 
 } // namespace airelinna::platform::windows

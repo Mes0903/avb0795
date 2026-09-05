@@ -12,6 +12,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(cmake/Dependencies.cmake)
 include(cmake/VerifySourceBoundaries.cmake)
 
+if(WIN32)
+  add_subdirectory(shaders)
+endif()
+
 add_subdirectory(src)
 
 airelinna_assert_target_boundaries()

@@ -61,4 +61,47 @@ if(WIN32)
   )
 
   target_compile_features(airelinna_windows PUBLIC cxx_std_23)
+
+  add_library(airelinna_windows_graphics
+    ${PROJECT_SOURCE_DIR}/render/bridge_policy.cpp
+    ${PROJECT_SOURCE_DIR}/render/graphics_retry_policy.cpp
+    ${PROJECT_SOURCE_DIR}/render/render_math.cpp
+    ${PROJECT_SOURCE_DIR}/render/windows_render_stack.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/detail/overlay_policy.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/overlay_window.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/win32_overlay_adapter.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/windows_replica_runtime.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/windows_runtime_factory.cpp
+    ${AIRELINNA_REPLICA_SHADER_SOURCE}
+  )
+
+  add_dependencies(airelinna_windows_graphics airelinna_replica_shaders)
+
+  target_include_directories(airelinna_windows_graphics
+    PUBLIC
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/include
+    PRIVATE
+      ${PROJECT_BINARY_DIR}/generated
+  )
+
+  target_link_libraries(airelinna_windows_graphics
+    PRIVATE
+      airelinna_core
+      airelinna_app
+      airelinna_windows
+      glfw
+      Vulkan::Vulkan
+      d3d11
+      dxgi
+      user32
+  )
+
+  target_compile_definitions(airelinna_windows_graphics
+    PRIVATE
+      NOMINMAX
+      WIN32_LEAN_AND_MEAN
+  )
+
+  target_compile_features(airelinna_windows_graphics PUBLIC cxx_std_23)
 endif()
