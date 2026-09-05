@@ -11,97 +11,97 @@
 
 namespace airelinna::platform::windows {
 
-namespace detail {
-class ItemObservationState;
-struct WindowsSourceRegistryControl;
+  namespace detail {
+    class ItemObservationState;
+    struct WindowsSourceRegistryControl;
 
-class WindowsSourceIdGeneration final {
-public:
-  WindowsSourceIdGeneration();
+    class WindowsSourceIdGeneration final {
+    public:
+      WindowsSourceIdGeneration();
 
-  [[nodiscard]] core::SourceId issue();
-  void advance();
-  [[nodiscard]] std::expected<void, core::AppError>
-  validate(const core::SourceId &id) const noexcept;
+      [[nodiscard]] core::SourceId issue();
+      void advance();
+      [[nodiscard]] std::expected<void, core::AppError>
+      validate(const core::SourceId &id) const noexcept;
 
-private:
-  void rebuild_prefix();
+    private:
+      void rebuild_prefix();
 
-  std::uint64_t generation_{};
-  std::uint64_t next_ordinal_{};
-  std::string prefix_;
-};
+      std::uint64_t generation_{};
+      std::uint64_t next_ordinal_{};
+      std::string prefix_;
+    };
 
-} // namespace detail
+  }    // namespace detail
 
-class WindowsCaptureSource;
+  class WindowsCaptureSource;
 
-class WindowsSourceLease final {
-public:
-  ~WindowsSourceLease();
-
-  WindowsSourceLease(const WindowsSourceLease &) = delete;
-  WindowsSourceLease &operator=(const WindowsSourceLease &) = delete;
-  WindowsSourceLease(WindowsSourceLease &&other) noexcept;
-  WindowsSourceLease &operator=(WindowsSourceLease &&other) noexcept;
-
-private:
-  friend class WindowsCaptureSource;
-  friend class WindowsSourceRegistry;
-  [[nodiscard]] detail::ItemObservationState &observation() const noexcept;
-  WindowsSourceLease(
-      std::shared_ptr<detail::WindowsSourceRegistryControl> control,
-      std::shared_ptr<detail::ItemObservationState> observation) noexcept;
-  void release() noexcept;
-
-  std::shared_ptr<detail::WindowsSourceRegistryControl> control_;
-  std::shared_ptr<detail::ItemObservationState> observation_;
-};
-
-class WindowsSourceRegistry final {
-public:
-  class Refresh final {
+  class WindowsSourceLease final {
   public:
-    ~Refresh();
+    ~WindowsSourceLease();
 
-    Refresh(const Refresh &) = delete;
-    Refresh &operator=(const Refresh &) = delete;
-    Refresh(Refresh &&other) noexcept;
-    Refresh &operator=(Refresh &&other) noexcept;
-
-    [[nodiscard]] std::expected<std::vector<core::SourceId>, core::AppError>
-    commit(std::vector<std::shared_ptr<detail::ItemObservationState>>
-               observations);
+    WindowsSourceLease(const WindowsSourceLease &) = delete;
+    WindowsSourceLease &operator=(const WindowsSourceLease &) = delete;
+    WindowsSourceLease(WindowsSourceLease &&other) noexcept;
+    WindowsSourceLease &operator=(WindowsSourceLease &&other) noexcept;
 
   private:
+    friend class WindowsCaptureSource;
     friend class WindowsSourceRegistry;
-    explicit Refresh(WindowsSourceRegistry &owner) noexcept;
-    void cancel() noexcept;
+    [[nodiscard]] detail::ItemObservationState &observation() const noexcept;
+    WindowsSourceLease(
+      std::shared_ptr<detail::WindowsSourceRegistryControl> control,
+      std::shared_ptr<detail::ItemObservationState> observation) noexcept;
+    void release() noexcept;
 
-    WindowsSourceRegistry *owner_{};
+    std::shared_ptr<detail::WindowsSourceRegistryControl> control_;
+    std::shared_ptr<detail::ItemObservationState> observation_;
   };
 
-  WindowsSourceRegistry();
-  ~WindowsSourceRegistry();
+  class WindowsSourceRegistry final {
+  public:
+    class Refresh final {
+    public:
+      ~Refresh();
 
-  WindowsSourceRegistry(const WindowsSourceRegistry &) = delete;
-  WindowsSourceRegistry &operator=(const WindowsSourceRegistry &) = delete;
-  WindowsSourceRegistry(WindowsSourceRegistry &&) = delete;
-  WindowsSourceRegistry &operator=(WindowsSourceRegistry &&) = delete;
+      Refresh(const Refresh &) = delete;
+      Refresh &operator=(const Refresh &) = delete;
+      Refresh(Refresh &&other) noexcept;
+      Refresh &operator=(Refresh &&other) noexcept;
 
-  [[nodiscard]] std::expected<Refresh, core::AppError> begin_refresh();
-  [[nodiscard]] std::expected<WindowsSourceLease, core::AppError>
-  resolve(const core::SourceId &id) const;
+      [[nodiscard]] std::expected<std::vector<core::SourceId>, core::AppError>
+      commit(std::vector<std::shared_ptr<detail::ItemObservationState>>
+               observations);
 
-private:
-  [[nodiscard]] std::expected<std::vector<core::SourceId>, core::AppError>
-  commit_refresh(
+    private:
+      friend class WindowsSourceRegistry;
+      explicit Refresh(WindowsSourceRegistry &owner) noexcept;
+      void cancel() noexcept;
+
+      WindowsSourceRegistry *owner_{};
+    };
+
+    WindowsSourceRegistry();
+    ~WindowsSourceRegistry();
+
+    WindowsSourceRegistry(const WindowsSourceRegistry &) = delete;
+    WindowsSourceRegistry &operator=(const WindowsSourceRegistry &) = delete;
+    WindowsSourceRegistry(WindowsSourceRegistry &&) = delete;
+    WindowsSourceRegistry &operator=(WindowsSourceRegistry &&) = delete;
+
+    [[nodiscard]] std::expected<Refresh, core::AppError> begin_refresh();
+    [[nodiscard]] std::expected<WindowsSourceLease, core::AppError>
+    resolve(const core::SourceId &id) const;
+
+  private:
+    [[nodiscard]] std::expected<std::vector<core::SourceId>, core::AppError>
+    commit_refresh(
       std::vector<std::shared_ptr<detail::ItemObservationState>> observations);
-  void cancel_refresh() noexcept;
+    void cancel_refresh() noexcept;
 
-  std::shared_ptr<detail::WindowsSourceRegistryControl> control_;
-};
+    std::shared_ptr<detail::WindowsSourceRegistryControl> control_;
+  };
 
-} // namespace airelinna::platform::windows
+}    // namespace airelinna::platform::windows
 
-#endif // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP
+#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP

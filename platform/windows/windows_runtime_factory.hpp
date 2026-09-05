@@ -9,26 +9,26 @@
 
 namespace airelinna::platform::windows {
 
-class WindowsRuntimeFactory final : public app::IReplicaRuntimeFactory {
-public:
-  using WakeMainLoop = std::function<void()>;
+  class WindowsRuntimeFactory final : public app::IReplicaRuntimeFactory {
+  public:
+    using WakeMainLoop = std::function<void()>;
 
-  WindowsRuntimeFactory(WindowsSourceRegistry &registry,
-                        WakeMainLoop wake_main_loop,
-                        render::WindowsBridgePreference bridge_preference =
+    WindowsRuntimeFactory(WindowsSourceRegistry &registry,
+                          WakeMainLoop wake_main_loop,
+                          render::WindowsBridgePreference bridge_preference =
                             render::WindowsBridgePreference::Automatic);
 
-  [[nodiscard]] std::expected<std::unique_ptr<app::IReplicaRuntime>,
-                              core::AppError>
-  create(const core::SourceDescriptor &source,
-         const core::ReplicaSettings &settings) override;
+    [[nodiscard]] std::expected<std::unique_ptr<app::IReplicaRuntime>,
+                                core::AppError>
+    create(const core::SourceDescriptor &source,
+           const core::ReplicaSettings &settings) override;
 
-private:
-  WindowsSourceRegistry &registry_;
-  WakeMainLoop wake_main_loop_;
-  render::WindowsBridgePreference bridge_preference_;
-};
+  private:
+    WindowsSourceRegistry &registry_;
+    WakeMainLoop wake_main_loop_;
+    render::WindowsBridgePreference bridge_preference_;
+  };
 
-} // namespace airelinna::platform::windows
+}    // namespace airelinna::platform::windows
 
-#endif // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_RUNTIME_FACTORY_HPP
+#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_RUNTIME_FACTORY_HPP

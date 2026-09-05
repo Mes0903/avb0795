@@ -9,13 +9,13 @@
 
 namespace airelinna::core {
 
-[[nodiscard]] std::expected<HotkeyChord, AppError>
-parse_hotkey_chord(std::string_view text) noexcept;
+  [[nodiscard]] std::expected<HotkeyChord, AppError>
+  parse_hotkey_chord(std::string_view text) noexcept;
 
-[[nodiscard]] std::string serialize_hotkey_chord(const HotkeyChord &chord);
+  [[nodiscard]] std::string serialize_hotkey_chord(const HotkeyChord &chord);
 
-[[nodiscard]] std::string hotkey_display_text(const HotkeyChord &chord);
+  [[nodiscard]] std::string hotkey_display_text(const HotkeyChord &chord);
 
-} // namespace airelinna::core
+}    // namespace airelinna::core
 
-#endif // AIRELINNA_CORE_HOTKEY_HPP
+#endif    // AIRELINNA_CORE_HOTKEY_HPP

@@ -1,0 +1,49 @@
+BasedOnStyle: Chromium
+Language: Cpp
+MaxEmptyLinesToKeep: 3
+IndentCaseLabels: false
+AllowShortIfStatementsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: true
+AllowShortEnumsOnASingleLine: true
+AllowShortLambdasOnASingleLine: true
+AllowShortFunctionsOnASingleLine: true
+DerivePointerAlignment: false
+PointerAlignment: Right
+SpaceAfterCStyleCast: true
+TabWidth: 2
+UseTab: Never
+IndentWidth: 2
+AlignConsecutiveAssignments: false
+IndentGotoLabels: true
+AccessModifierOffset: -2
+AlignConsecutiveMacros: false
+AlignTrailingComments: false
+SpacesInParentheses: false
+SpacesBeforeTrailingComments: 4
+SpaceBeforeParens: ControlStatements
+SpaceBeforeAssignmentOperators: true
+SortIncludes: false
+ContinuationIndentWidth: 2
+BinPackArguments: true
+ColumnLimit: 0
+AllowAllParametersOfDeclarationOnNextLine: true
+BreakBeforeBraces: Custom
+NamespaceIndentation: All
+ForEachMacros:
+  - foreach
+  - Q_FOREACH
+  - BOOST_FOREACH
+BraceWrapping:
+  AfterClass: false
+  AfterStruct: false
+  AfterControlStatement: false
+  AfterEnum: false
+  AfterFunction: true
+  AfterObjCDeclaration: false
+  AfterUnion: false
+  BeforeCatch: false
+  BeforeElse: true
+  IndentBraces: false
+  SplitEmptyRecord: false
