@@ -1,3 +1,7 @@
+/// @file
+/// @brief Value-only Win32 hit-test, aspect, DPI, and work-area geometry policies.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/detail/overlay_policy.hpp"
 
 #include <algorithm>
@@ -13,6 +17,7 @@ namespace airelinna::platform::windows::detail {
       if (value <= 0 || numerator == 0 || denominator == 0) {
         return value;
       }
+      // Widen multiplication and round before narrowing to native coordinate limits.
       const auto scaled =
         static_cast<std::uint64_t>(value) * numerator + denominator / 2U;
       return static_cast<std::int64_t>(
@@ -87,6 +92,7 @@ namespace airelinna::platform::windows::detail {
     if (mode == core::OverlayMode::PassThrough) {
       return HitZone::Transparent;
     }
+    // Native chrome keeps its standard hit testing; custom bands serve borderless mode.
     if (border == core::BorderPreference::Bordered) {
       return HitZone::Delegate;
     }
@@ -97,6 +103,7 @@ namespace airelinna::platform::windows::detail {
     const auto height =
       (std::max) (static_cast<std::int64_t>(window.bottom) - window.top,
                   std::int64_t{0});
+    // Small windows cannot have overlapping resize bands wider than half either dimension.
     const auto band = (std::min) ({width / 2, height / 2,
                                    static_cast<std::int64_t>(resize_band)});
     const bool left = static_cast<std::int64_t>(cursor.x) < window.left + band;
@@ -158,6 +165,7 @@ namespace airelinna::platform::windows::detail {
       return proposed;
     }
 
+    // Apply aspect to content, not the outer rectangle containing DPI-dependent borders.
     auto result = proposed;
     const auto horizontal_frame =
       (std::max) (static_cast<std::int64_t>(insets.left) + insets.right,
@@ -165,6 +173,7 @@ namespace airelinna::platform::windows::detail {
     const auto vertical_frame =
       (std::max) (static_cast<std::int64_t>(insets.top) + insets.bottom,
                   std::int64_t{0});
+    // Choose the user's dragged dimension as authoritative and preserve the opposite anchor.
     if (is_vertical_edge(edge)) {
       const auto content_height =
         (std::max) (proposed_height - vertical_frame, std::int64_t{1});

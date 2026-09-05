@@ -1,3 +1,7 @@
+/// @file
+/// @brief Move-only WGC frame checkout ownership and borrowed D3D texture access.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/windows_captured_frame.hpp"
 
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -35,6 +39,7 @@ namespace airelinna::platform::windows {
       return *this;
     }
 
+    // Return the previous checkout before adopting a different pool buffer.
     close_checkout();
     sequence_ = other.sequence_;
     resource_generation_ = other.resource_generation_;
@@ -84,6 +89,7 @@ namespace airelinna::platform::windows {
       throw winrt::hresult_illegal_method_call{};
     }
 
+    // A COM texture view is not permission to return the WGC checkout early.
     const auto surface_access = frame_.Surface()
                                   .as<::Windows::Graphics::DirectX::Direct3D11::
                                         IDirect3DDxgiInterfaceAccess>();
@@ -95,6 +101,7 @@ namespace airelinna::platform::windows {
 
   void WindowsCapturedFrame::close_checkout() noexcept
   {
+    // Clear ownership before Close so a moved/destructed wrapper cannot close it twice.
     auto frame = std::exchange(frame_, nullptr);
     if (!frame) {
       return;

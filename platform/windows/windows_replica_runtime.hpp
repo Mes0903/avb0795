@@ -1,3 +1,7 @@
+/// @file
+/// @brief Main-thread replica aggregate, native progress, and ordered safe teardown.
+/// Native implementation details remain below the portable application ports.
+
 #ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_REPLICA_RUNTIME_HPP
 #define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_REPLICA_RUNTIME_HPP
 
@@ -22,6 +26,7 @@ namespace airelinna::platform::windows {
   class WindowsCaptureSource;
   class WindowsRuntimeFactory;
 
+  /// Snapshot of concrete native work counters; no owning handles escape.
   struct WindowsRuntimeDiagnostics final {
     core::Extent allocation;
     std::uint64_t resource_generation{};
@@ -34,10 +39,13 @@ namespace airelinna::platform::windows {
     bool presentation_suspended{};
   };
 
+  /// Main-thread owner of one replica and its native cleanup order.
+  /// Converts capture/render facts to portable events without choosing lifecycle precedence.
   class WindowsReplicaRuntime final : public app::IReplicaRuntime {
   public:
     using WakeMainLoop = std::function<void()>;
 
+    /// Published instances must have emitted safe Stopped before destruction.
     ~WindowsReplicaRuntime() noexcept override;
 
     WindowsReplicaRuntime(const WindowsReplicaRuntime &) = delete;
@@ -45,11 +53,16 @@ namespace airelinna::platform::windows {
     WindowsReplicaRuntime(WindowsReplicaRuntime &&) = delete;
     WindowsReplicaRuntime &operator=(WindowsReplicaRuntime &&) = delete;
 
+    /// Apply native mode/border/geometry transactionally; scheduler commits last.
     [[nodiscard]] std::expected<void, core::AppError>
     apply(const core::ReplicaSettings &settings) noexcept override;
+    /// Advance bounded capture, rendering, recovery, and drain on the main thread.
+    /// Return value-only facts and the earliest required future observation.
     [[nodiscard]] app::RuntimeTickResult
     tick(std::chrono::steady_clock::time_point now) noexcept override;
+    /// Initiate retained-owner teardown; never synchronously wait for a callback/GPU.
     void request_stop() noexcept override;
+    /// Read counters while the render stack exists; unavailable after its release.
     [[nodiscard]] std::optional<WindowsRuntimeDiagnostics>
     diagnostics() const noexcept;
 
@@ -69,6 +82,7 @@ namespace airelinna::platform::windows {
   public:
     // Passkey-gated so std::make_unique can construct the aggregate while only
     // WindowsRuntimeFactory can create a ConstructionToken.
+    /// Adopt the complete inactive aggregate; only the factory can issue the passkey.
     WindowsReplicaRuntime(
       ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, core::ReplicaSettings settings, core::Extent allocation, core::CaptureExclusionStatus capture_exclusion, render::WindowsBridgePreference bridge_preference, std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop) noexcept;
 
@@ -112,6 +126,7 @@ namespace airelinna::platform::windows {
     core::FrameScheduler scheduler_;
     core::ReplicaSettings settings_;
     core::Extent allocation_;
+    // This counter belongs to the stable runtime, not a rebuilt device/stack.
     std::uint64_t resource_generation_{1};
     const render::WindowsBridgePreference bridge_preference_;
     const std::uint32_t pool_buffer_count_;
@@ -131,6 +146,7 @@ namespace airelinna::platform::windows {
     std::optional<std::chrono::steady_clock::time_point>
       device_recovery_started_at_;
     bool replacement_awaiting_present_{};
+    // These independent facts select different native retirement permissions.
     bool vulkan_device_lost_{};
     bool d3_device_removed_{};
     bool source_disconnected_{};
@@ -141,6 +157,7 @@ namespace airelinna::platform::windows {
     bool stopped_{};
     bool published_{};
     render::RenderTickResult last_render_result_;
+    // One timer covers capture, adapter, source wake, and graphics uncertainty.
     detail::RuntimeDrainState drain_state_;
   };
 

@@ -1,3 +1,5 @@
+/// @file
+/// Bounded recovery and no-progress timing; concrete owners perform all actions.
 #include "render/graphics_retry_policy.hpp"
 
 #include <algorithm>
@@ -15,6 +17,7 @@ namespace airelinna::render {
     constexpr auto ownership_poll_interval = 50ms;
     constexpr auto stalled_threshold = 10s;
 
+    /// Only completed ownership facts restart the drain clock; retries/polls do not.
     [[nodiscard]] constexpr bool
     is_drain_progress(const DrainProgress progress) noexcept
     {
@@ -56,6 +59,7 @@ namespace airelinna::render {
       return {};
     }
 
+    // Delays are offsets within one episode, not an added sleep after each error.
     const auto elapsed = std::max(input.elapsed_no_progress, 0ms);
     const auto deadline = retry_deadlines[input.attempt];
     return {.action = action,
@@ -77,6 +81,7 @@ namespace airelinna::render {
     }
 
     const auto elapsed = std::max(input.elapsed_no_progress, 0ms);
+    // Stalled is a retained-ownership diagnosis, never permission to destroy.
     if (elapsed >= stalled_threshold) {
       return {.status = core::RuntimeDrainStatus::Stalled,
               .poll_after = ownership_poll_interval};

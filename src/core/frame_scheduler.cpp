@@ -1,3 +1,4 @@
+/// @file Demand-latched FPS policy driven by externally supplied steady-clock time.
 #include "airelinna/core/frame_scheduler.hpp"
 
 #include <cstdint>
@@ -14,6 +15,7 @@ namespace airelinna::core {
 
   FrameSchedule FrameScheduler::poll(Clock::time_point now, bool has_new_frame, bool redraw_requested) noexcept
   {
+    // A one-time arrival must survive later polls that report no new frame.
     pending_work_ = pending_work_ || has_new_frame || redraw_requested;
     if (!pending_work_) {
       return {};
@@ -28,6 +30,8 @@ namespace airelinna::core {
       return {.render = false, .next_wake = next_deadline_};
     }
 
+    // Preserve the deadline grid but skip every elapsed slot: render newest work
+    // once, never build a catch-up burst after a delayed main-thread tick.
     const auto missed_periods = ((now - *next_deadline_) / period_) + 1;
     *next_deadline_ += period_ * missed_periods;
     pending_work_ = false;

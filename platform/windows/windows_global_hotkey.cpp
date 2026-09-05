@@ -1,3 +1,7 @@
+/// @file
+/// @brief Owner-thread hotkey registration, rollback, and command-only dispatch.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/windows_global_hotkey.hpp"
 
 #include <cstdint>
@@ -225,6 +229,7 @@ namespace airelinna::platform::windows {
         return;
       }
 
+      // Ignore stale WM_HOTKEY payloads left from a replaced binding.
       const auto confirmed_native =
         map_hotkey_to_native(*registration_state_.confirmed_chord);
       if (!confirmed_native ||
@@ -297,6 +302,7 @@ namespace airelinna::platform::windows {
           app_error(core::AppErrorCode::HotkeyCleanupFailure))};
       }
 
+      // Test availability before unregistering a usable old primary chord.
       const auto probe_registration =
         register_hotkey(probe_hotkey_id, *native_hotkey);
       if (!probe_registration.succeeded) {
@@ -315,6 +321,7 @@ namespace airelinna::platform::windows {
       state.probe = FixedHotkeyState::Free;
       state.probe_cleanup_diagnostic.reset();
 
+      // Preserve rollback input separately from the dispatch-visible confirmed binding.
       const auto previous_chord = state.confirmed_chord;
       if (previous_chord) {
         const auto primary_cleanup = unregister_hotkey(primary_hotkey_id);
@@ -351,6 +358,7 @@ namespace airelinna::platform::windows {
         return std::unexpected{
           app_error(core::AppErrorCode::HotkeyRegistrationLost)};
       }
+      // A failed replacement is ordinary only if the previous registration is restored.
       const auto rollback =
         register_hotkey(primary_hotkey_id, *previous_native_hotkey);
       if (rollback.succeeded) {
@@ -371,6 +379,7 @@ namespace airelinna::platform::windows {
         return;
       }
       auto &state = dispatch_state_->mutable_registration_state();
+      // Disable dispatch before cleanup; uncertain native registrations must remain inert.
       state.confirmed_chord.reset();
 
       const auto previous_primary = state.primary;
@@ -432,6 +441,7 @@ namespace airelinna::platform::windows {
       }
     }
 
+    // Window user data owns shared dispatch lifetime, not a raw pointer to the service wrapper.
     struct HotkeyWindowContext {
       std::shared_ptr<HotkeyDispatchState> dispatch_state;
     };
@@ -459,6 +469,7 @@ namespace airelinna::platform::windows {
         if (message == WM_HOTKEY) {
           if (context != nullptr &&
               word_parameter == static_cast<WPARAM>(primary_hotkey_id)) {
+            // A command sink may destroy the wrapper/window; keep dispatch alive until return.
             const auto dispatch_state = context->dispatch_state;
             dispatch_state->dispatch_hotkey(primary_hotkey_id, long_parameter);
           }
@@ -483,6 +494,7 @@ namespace airelinna::platform::windows {
       if (!dispatch_state->is_owner_thread()) {
         return std::unexpected{thread_affinity_error()};
       }
+      // Construct callback-visible ownership before CreateWindowEx sends WM_NCCREATE.
       auto context = std::make_unique<HotkeyWindowContext>(HotkeyWindowContext{
         .dispatch_state = std::move(dispatch_state),
       });
@@ -559,6 +571,7 @@ namespace airelinna::platform::windows {
         if (previous == 0 && GetLastError() != ERROR_SUCCESS) {
           std::terminate();
         }
+        // GWLP_USERDATA was cleared successfully before callback-owned state is released.
         context_.reset();
 
         if (DestroyWindow(window_) == FALSE) {
@@ -631,6 +644,7 @@ namespace airelinna::platform::windows {
       if (!dispatch_state->is_owner_thread()) {
         std::terminate();
       }
+      // Unregister while the message target still exists, then detach/destroy that target.
       clear();
       window.reset();
     }

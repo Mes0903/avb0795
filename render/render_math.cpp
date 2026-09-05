@@ -1,3 +1,5 @@
+/// @file
+/// Integer aspect fit and explicit SDR/low-latency presentation choices.
 #include "render/render_math.hpp"
 
 #include <algorithm>
@@ -13,6 +15,8 @@ namespace airelinna::render {
       return std::nullopt;
     }
 
+    // Cross multiplication chooses the limiting axis without a floating-point
+    // ratio; 64-bit products cover all pairs of 32-bit input dimensions.
     const auto destination_by_source_height =
       static_cast<std::uint64_t>(destination.width) * source.height;
     const auto destination_by_source_width =
@@ -47,6 +51,22 @@ namespace airelinna::render {
       return VK_PRESENT_MODE_MAILBOX_KHR;
     }
     return VK_PRESENT_MODE_FIFO_KHR;
+  }
+
+  std::optional<VkSurfaceFormatKHR> select_sdr_surface_format(
+    const std::span<const VkSurfaceFormatKHR> advertised) noexcept
+  {
+    // UNORM capture samples already contain SDR-encoded values. An SRGB
+    // attachment would encode the passthrough shader's output a second time.
+    const auto preferred = std::ranges::find_if(
+      advertised, [](const VkSurfaceFormatKHR &format) noexcept {
+        return format.format == VK_FORMAT_B8G8R8A8_UNORM &&
+               format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+      });
+    if (preferred == advertised.end()) {
+      return std::nullopt;
+    }
+    return *preferred;
   }
 
 }    // namespace airelinna::render

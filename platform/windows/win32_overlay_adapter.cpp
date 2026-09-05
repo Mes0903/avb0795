@@ -1,3 +1,7 @@
+/// @file
+/// @brief Win32 overlay subclass, input-transparency transactions, and DPI geometry.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/win32_overlay_adapter.hpp"
 
 #include "platform/windows/detail/overlay_callback.hpp"
@@ -101,6 +105,7 @@ namespace airelinna::platform::windows {
       };
     }
 
+    // Concrete Win32 operations provide checked zero-return/last-error semantics to policies.
     class Win32StyleOperations final {
     public:
       explicit Win32StyleOperations(const HWND window) noexcept : window_{window} {}
@@ -247,6 +252,7 @@ namespace airelinna::platform::windows {
 
   }    // namespace
 
+  // Prepare queries and geometry before committing callback-visible state or native output.
   struct Win32OverlayAdapter::PreparedWindowMessage final {
     enum class Kind { Result,
                       Sizing,
@@ -352,6 +358,7 @@ namespace airelinna::platform::windows {
   Win32OverlayAdapter::Win32OverlayAdapter(ConstructionToken, const HWND window, const core::OverlayMode mode, const core::BorderPreference border, const core::Extent source_extent, const std::uint32_t dpi) noexcept
       : window_{window}, mode_{mode}, border_{border}, source_extent_{source_extent}, dpi_{dpi} {}
 
+  // A live subclass/property cannot point into a destroyed adapter, even on failure.
   Win32OverlayAdapter::~Win32OverlayAdapter() noexcept
   {
     if (attached_ || window_destruction_required_) {
@@ -373,6 +380,7 @@ namespace airelinna::platform::windows {
     }
 
     SetLastError(ERROR_SUCCESS);
+    // Layered input policy is invalid on CS_OWNDC/CS_CLASSDC: verify the patched class.
     const auto class_style = GetClassLongPtrW(window_, GCL_STYLE);
     if (class_style == 0 && GetLastError() != ERROR_SUCCESS) {
       return std::unexpected{last_platform_error()};
@@ -410,6 +418,7 @@ namespace airelinna::platform::windows {
                              : core::AppErrorCode::RuntimeStateLost);
     };
 
+    // Preserve GLFW's original procedure and publish stable context before replacing it.
     const auto saved_proc = read_window_long(window_, GWLP_WNDPROC);
     if (!saved_proc) {
       return std::unexpected{attachment_failure(true)};
@@ -427,9 +436,11 @@ namespace airelinna::platform::windows {
       return std::unexpected{attachment_failure(true)};
     }
 
+    // Subclass install is the final fallible attachment step; callbacks now see complete state.
     const auto installed = write_window_long(
       window_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&window_proc));
     if (!installed) {
+      // A failed setter does not prove the old procedure survived; inspect before freeing state.
       const auto observed_proc = read_window_long(window_, GWLP_WNDPROC);
       auto procedure = detail::FailedWndProcInstallObservation::Unavailable;
       if (observed_proc && *observed_proc == *saved_proc) {
@@ -475,6 +486,7 @@ namespace airelinna::platform::windows {
     if (window_ == nullptr || saved_window_proc_ == nullptr) {
       return std::unexpected{adapter_error(core::AppErrorCode::RuntimeStateLost)};
     }
+    // If restoration cannot be proven, the runtime destroys HWND with this object still alive.
     DetachOperations operations{.adapter = *this};
     return detail::detach_overlay_subclass(operations);
   }
@@ -519,6 +531,7 @@ namespace airelinna::platform::windows {
       mode_ = mode;
       return {};
     }
+    // Leaving transparency requires the exact entry snapshot, not clearing guessed bits.
     if (!pass_through_snapshot_) {
       return std::unexpected{adapter_error(core::AppErrorCode::RuntimeStateLost)};
     }
@@ -656,6 +669,7 @@ namespace airelinna::platform::windows {
       return PreparedWindowMessage{.kind = PreparedWindowMessage::Kind::Result,
                                    .result = hit_zone_result(zone)};
     }
+    // Constrain content aspect after subtracting the current native frame insets.
     if (message == WM_SIZING) {
       const auto edge = sizing_edge(word_parameter);
       auto *const rect = reinterpret_cast<RECT *>(long_parameter);
@@ -695,6 +709,7 @@ namespace airelinna::platform::windows {
       }
       *message.target_rect = win32_rect(message.rect);
       return message.result;
+      // Publish new DPI only after SetWindowPos accepts the OS-suggested rectangle.
     case PreparedWindowMessage::Kind::Dpi:
       if (message.target_rect == nullptr) {
         return std::nullopt;
@@ -725,6 +740,7 @@ namespace airelinna::platform::windows {
                            long_parameter);
   }
 
+  // Called after forwarded WM_NCDESTROY so no native message can reach freed state.
   void Win32OverlayAdapter::clear_native_binding() noexcept
   {
     if (window_ != nullptr && GetPropW(window_, overlay_adapter_property) ==

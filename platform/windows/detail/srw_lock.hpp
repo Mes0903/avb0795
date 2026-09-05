@@ -1,3 +1,7 @@
+/// @file
+/// @brief Small exclusive SRW guard for short callback-state critical sections.
+/// Native implementation details remain below the portable application ports.
+
 #ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_SRW_LOCK_HPP
 #define AIRELINNA_PLATFORM_WINDOWS_DETAIL_SRW_LOCK_HPP
 
@@ -5,6 +9,8 @@
 
 namespace airelinna::platform::windows::detail {
 
+  /// Nonrecursive lock used only for short state transitions, never native intake.
+  /// Do not invoke wake callbacks or potentially reentrant WinRT calls while held.
   class ExclusiveSrwLock final {
   public:
     ExclusiveSrwLock() noexcept = default;
@@ -12,6 +18,7 @@ namespace airelinna::platform::windows::detail {
     ExclusiveSrwLock(const ExclusiveSrwLock &) = delete;
     ExclusiveSrwLock &operator=(const ExclusiveSrwLock &) = delete;
 
+    /// Immovable stack guard pairing each acquisition with one release.
     class Guard final {
     public:
       ~Guard() noexcept { ReleaseSRWLockExclusive(lock_); }
@@ -31,6 +38,7 @@ namespace airelinna::platform::windows::detail {
       PSRWLOCK lock_;
     };
 
+    /// Return a lexical guard; the protected owner must outlive its scope.
     [[nodiscard]] Guard acquire() noexcept { return Guard{&lock_}; }
 
   private:

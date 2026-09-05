@@ -1,3 +1,4 @@
+/// @file Domain transition guards; no operation acquires or releases native owners.
 #include "airelinna/core/replica_session.hpp"
 
 #include <utility>
@@ -61,6 +62,7 @@ namespace airelinna::core {
   {
     const bool allowed = lifecycle_ == SessionLifecycle::Capturing ||
                          lifecycle_ == SessionLifecycle::Interrupted;
+    // Graphics can repair while the retained source remains disconnected.
     const auto target = lifecycle_ == SessionLifecycle::Interrupted
                           ? SessionLifecycle::Interrupted
                           : SessionLifecycle::RecoveringGraphics;
@@ -70,6 +72,7 @@ namespace airelinna::core {
   std::expected<void, AppError>
   ReplicaSession::complete_graphics_recovery() noexcept
   {
+    // Successful graphics repair is not evidence that source capture resumed.
     const bool allowed = lifecycle_ == SessionLifecycle::RecoveringGraphics ||
                          lifecycle_ == SessionLifecycle::Interrupted;
     const auto target = lifecycle_ == SessionLifecycle::Interrupted
@@ -96,6 +99,8 @@ namespace airelinna::core {
 
   std::expected<void, AppError> ReplicaSession::complete_stop() noexcept
   {
+    // Selection/settings survive ordinary stop; Error-preserving cleanup is
+    // handled by Application without routing through this Stopping-only edge.
     return transition_to(SessionLifecycle::Idle,
                          lifecycle_ == SessionLifecycle::Stopping);
   }

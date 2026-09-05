@@ -1,3 +1,7 @@
+/// @file
+/// @brief Verified native-state transactions and factory-local attachment cleanup.
+/// Native implementation details remain below the portable application ports.
+
 #ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_TRANSACTIONS_HPP
 #define AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_TRANSACTIONS_HPP
 
@@ -11,23 +15,27 @@
 
 namespace airelinna::platform::windows::detail {
 
+  /// Observed property cleanup result; missing and still-bound are different failures.
   enum class OverlayPropertyRemoval {
     RemovedExpected,
     AbsentUnexpected,
     StillPresent,
   };
 
+  /// Which procedure remains installed after a failed subclass installation attempt.
   enum class FailedWndProcInstallObservation {
     Original,
     Custom,
     Unavailable,
   };
 
+  /// Whether callback reachability is safe or HWND must die while adapter state lives.
   struct FailedAttachmentCleanup final {
     bool native_binding_safe{};
     bool destroy_with_adapter_alive{};
   };
 
+  /// Select conservative failure cleanup from actual procedure/property observations.
   [[nodiscard]] constexpr FailedAttachmentCleanup
   failed_attachment_cleanup(const FailedWndProcInstallObservation procedure,
                             const OverlayPropertyRemoval property) noexcept
@@ -42,6 +50,7 @@ namespace airelinna::platform::windows::detail {
     };
   }
 
+  /// Exact restorable color-key/alpha/flags snapshot for an existing layered window.
   struct LayeredAttributes final {
     std::uint32_t color_key{};
     std::uint8_t alpha{};
@@ -57,6 +66,7 @@ namespace airelinna::platform::windows::detail {
     .flags = layered_alpha_flag,
   };
 
+  /// Full extended style plus layered attributes, not only the bits Airelinna modifies.
   struct NativeWindowState final {
     std::uintptr_t extended_style{};
     std::optional<LayeredAttributes> layered_attributes;
@@ -65,12 +75,14 @@ namespace airelinna::platform::windows::detail {
                            const NativeWindowState &) = default;
   };
 
+  /// Construct fixed-size failure data suitable for callback/no-throw paths.
   [[nodiscard]] constexpr core::AppError
   overlay_transaction_error(const core::AppErrorCode code) noexcept
   {
     return {.code = code};
   }
 
+  /// Commit the new DPI only after the suggested physical rectangle was applied.
   template <class ApplyRectangle>
   [[nodiscard]] bool apply_dpi_change_transaction(
     std::uint32_t &current_dpi, const std::uint32_t observed_dpi, const NativeRect rectangle, ApplyRectangle &&apply_rectangle) noexcept
@@ -95,6 +107,7 @@ namespace airelinna::platform::windows::detail {
     return true;
   }
 
+  /// Reject an unreadable layered snapshot before making any style mutation.
   template <class Operations>
   [[nodiscard]] std::expected<NativeWindowState, core::AppError>
   capture_native_window_state(Operations &operations) noexcept
@@ -119,6 +132,7 @@ namespace airelinna::platform::windows::detail {
     }
   }
 
+  /// Apply the complete snapshot, including opaque attributes when layered.
   template <class Operations>
   [[nodiscard]] bool
   apply_native_window_state(Operations &operations,
@@ -140,6 +154,7 @@ namespace airelinna::platform::windows::detail {
     }
   }
 
+  /// Read native state back; a successful setter alone is not transaction proof.
   template <class Operations>
   [[nodiscard]] bool
   native_window_state_matches(Operations &operations,
@@ -149,6 +164,7 @@ namespace airelinna::platform::windows::detail {
     return observed && *observed == expected;
   }
 
+  /// Distinguish verified rollback from RuntimeStateLost after unverified recovery.
   template <class Operations>
   [[nodiscard]] core::AppError
   rollback_native_window_state(Operations &operations,
@@ -161,6 +177,7 @@ namespace airelinna::platform::windows::detail {
                 : core::AppErrorCode::RuntimeStateLost);
   }
 
+  /// Save exact original state, apply opaque layered transparency, and verify it.
   template <class Operations>
   [[nodiscard]] std::expected<NativeWindowState, core::AppError>
   enter_pass_through(Operations &operations) noexcept
@@ -181,6 +198,7 @@ namespace airelinna::platform::windows::detail {
     return *snapshot;
   }
 
+  /// Restore the entry snapshot; if that fails, verify restoration of the current mode.
   template <class Operations>
   [[nodiscard]] std::expected<void, core::AppError>
   leave_pass_through(Operations &operations,
@@ -197,6 +215,7 @@ namespace airelinna::platform::windows::detail {
     return {};
   }
 
+  /// Apply mode/border/geometry as one transaction and commit scheduler settings last.
   template <class Operations>
   [[nodiscard]] std::expected<void, core::AppError>
   apply_settings_transaction(Operations &operations) noexcept
@@ -234,6 +253,7 @@ namespace airelinna::platform::windows::detail {
     }
   }
 
+  /// Restore WndProc before clearing its property and publishing detached state.
   template <class Operations>
   [[nodiscard]] std::expected<void, core::AppError>
   detach_overlay_subclass(Operations &operations) noexcept
@@ -269,6 +289,8 @@ namespace airelinna::platform::windows::detail {
     }
   }
 
+  /// Stack-local guard for partial factory owners; no published drain loop is required.
+  /// Failed restoration destroys the overlay while the callback adapter still exists.
   template <class Operations>
   class FactoryOverlayAttachmentGuard final {
   public:
@@ -315,7 +337,9 @@ namespace airelinna::platform::windows::detail {
     FactoryOverlayAttachmentGuard &
     operator=(FactoryOverlayAttachmentGuard &&) = delete;
 
+    /// Arm immediately after subclass installation, before any later fallible step.
     void arm() noexcept { armed_ = true; }
+    /// Transfer cleanup responsibility only after the complete runtime is published.
     void disarm() noexcept { armed_ = false; }
 
   private:

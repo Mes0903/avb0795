@@ -1,0 +1,34 @@
+# Configure with `cmake --preset windows-clangd` before starting clangd.
+# This database preserves each target's SDK paths, defines and C++23 mode.
+CompileFlags:
+  CompilationDatabase: build/clangd
+
+# Required for navigation/references across translation units, not just the
+# currently open file. No external index server is used.
+Index:
+  Background: Build
+  StandardLibrary: true
+
+Diagnostics:
+  UnusedIncludes: Strict
+  Includes:
+    # Keep SDK/WinRT umbrella headers out of automatic unused-include guesses.
+    # Standard-library and quoted project headers are still checked.
+    AnalyzeAngledIncludes: false
+
+---
+If:
+  PathMatch: ['build/[^/]+/(_deps|_offline-src)/.*', 'third_party/.*']
+# Dependency headers remain available when parsing our translation units.
+# Avoid independently indexing dependency .cpp files from the same database.
+Index:
+  Background: Skip
+Diagnostics:
+  UnusedIncludes: None
+
+---
+If:
+  PathMatch: '.*\.rc'
+# CMake also exports Windows resource-compiler commands; these are not C++.
+Index:
+  Background: Skip

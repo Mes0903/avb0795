@@ -1,3 +1,7 @@
+/// @file
+/// @brief Main-thread GLFW overlay ownership and decoration changes.
+/// Native implementation details remain below the portable application ports.
+
 #ifndef AIRELINNA_PLATFORM_WINDOWS_OVERLAY_WINDOW_HPP
 #define AIRELINNA_PLATFORM_WINDOWS_OVERLAY_WINDOW_HPP
 
@@ -17,6 +21,8 @@ namespace airelinna::platform::windows {
   class Win32OverlayAdapter;
   class WindowsRuntimeFactory;
 
+  /// Main-thread owner of the floating GLFW_NO_API replica window.
+  /// Owns GLFW decoration only; native transparency/subclass policy lives in the adapter.
   class OverlayWindow final {
   private:
     struct Impl;
@@ -27,6 +33,7 @@ namespace airelinna::platform::windows {
     };
 
   public:
+    /// Create a Vulkan-compatible floating window with the requested border.
     [[nodiscard]] static std::expected<std::unique_ptr<OverlayWindow>,
                                        core::AppError>
     create(core::Extent initial_extent, core::BorderPreference border);
@@ -40,16 +47,24 @@ namespace airelinna::platform::windows {
     OverlayWindow(OverlayWindow &&) = delete;
     OverlayWindow &operator=(OverlayWindow &&) = delete;
 
+    /// Change GLFW_DECORATED; the runtime coordinates client-geometry restoration.
     [[nodiscard]] std::expected<void, core::AppError>
     set_border(core::BorderPreference border) noexcept;
+    /// Return the owner's confirmed border preference.
     [[nodiscard]] core::BorderPreference border() const noexcept;
+    /// Verify the actual GLFW attribute rather than trusting only cached settings.
     [[nodiscard]] bool
     border_matches(core::BorderPreference border) const noexcept;
 
+    /// Observe native user close intent without destroying the runtime-owned window.
     [[nodiscard]] bool close_requested() const noexcept;
+    /// Update close intent while shutdown remains controlled by the runtime.
     void set_close_requested(bool requested) noexcept;
+    /// Return physical framebuffer pixels; zero extent suspends presentation.
     [[nodiscard]] core::Extent framebuffer_extent() const noexcept;
 
+    /// Explicitly destroy after render/surface drain and safe subclass handling.
+    /// A failed detach requires the adapter to remain alive through WM_NCDESTROY.
     void destroy() noexcept;
 
   private:

@@ -1,3 +1,7 @@
+/// @file
+/// @brief Main-thread replica aggregate, native progress, and ordered safe teardown.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/windows_replica_runtime.hpp"
 
 #include "platform/windows/overlay_window.hpp"
@@ -44,6 +48,7 @@ namespace airelinna::platform::windows {
 
   }    // namespace
 
+  // Collect native facts independently; the use-case orchestrator ranks lifecycle outcomes.
   struct WindowsReplicaRuntime::TickCandidates final {
     std::optional<render::BridgeSelection> bridge;
     std::optional<core::CaptureExclusionStatus> capture_exclusion;
@@ -56,6 +61,7 @@ namespace airelinna::platform::windows {
     bool stopped{};
   };
 
+  // Bind concrete owners to the small transaction algorithm without exposing another port.
   struct WindowsReplicaRuntime::SettingsOperations final {
     using Snapshot = core::ReplicaSettings;
 
@@ -150,6 +156,7 @@ namespace airelinna::platform::windows {
              (!geometry || owner.adapter_->client_geometry_matches(*geometry));
     }
 
+    // FPS scheduling/in-memory settings change only after native settings have verified.
     void commit_scheduler() noexcept
     {
       owner.scheduler_ = core::FrameScheduler{requested.fps_cap, now};
@@ -198,6 +205,8 @@ namespace airelinna::platform::windows {
       if (!started) {
         return std::unexpected{started.error()};
       }
+      // No failure path remains: it is now safe to expose the borrowed host wake binding.
+      source_->activate_runtime_wake();
       published_ = true;
       return {};
     } catch (const core::AppError &error) {
@@ -232,6 +241,7 @@ namespace airelinna::platform::windows {
     return detail::apply_settings_transaction(operations);
   }
 
+  // Stop is initiation only; later ticks retain each owner until its users are proven safe.
   void WindowsReplicaRuntime::request_stop() noexcept
   {
     if (stop_requested_ || stopped_) {
@@ -262,6 +272,7 @@ namespace airelinna::platform::windows {
     }
   }
 
+  // Keep source/overlay identity stable and track Vulkan loss separately from D3 removal.
   void WindowsReplicaRuntime::begin_device_recovery(
     const render::DeviceLossKind kind, const Clock::time_point now) noexcept
   {
@@ -294,6 +305,7 @@ namespace airelinna::platform::windows {
       return;
     }
 
+    // Collapse immediately-ready barrier stages, but keep per-tick transition work bounded.
     for (int step{}; step < 4; ++step) {
       const auto action = detail::next_source_reconfiguration_action(
         {.phase = reconfiguration_phase_,
@@ -305,6 +317,7 @@ namespace airelinna::platform::windows {
       case detail::SourceReconfigurationAction::None:
       case detail::SourceReconfigurationAction::Wait:
         return;
+        // No old callback can publish after quiescence; discard its final mailbox checkout.
       case detail::SourceReconfigurationAction::DiscardFinalFrame:
         static_cast<void>(capture_job_->take_latest());
         reconfiguration_phase_ =
@@ -340,6 +353,7 @@ namespace airelinna::platform::windows {
         progress = render::DrainProgress::ProvenSafeRelease;
         continue;
       }
+        // The policy rechecked source openness before this no-throw prepared-epoch commit.
       case detail::SourceReconfigurationAction::Commit:
         capture_job_->commit_reconfigure();
         allocation_ = *pending_allocation_;
@@ -396,20 +410,22 @@ namespace airelinna::platform::windows {
       render::GraphicsRecoveryObservation::ConstructionAttempted);
     std::optional<core::AppError> failure;
     try {
+      // Rebuild locally; failed partial owners never replace the stable runtime aggregate.
       auto replacement_render = std::make_unique<render::WindowsRenderStack>(
         *overlay_, *decision.candidate_generation, bridge_preference_);
-      const auto slots = replacement_render->rebuild_capture_slots(
-        *decision.candidate_generation, allocation_,
-        DXGI_FORMAT_B8G8R8A8_UNORM);
-      if (!slots) {
-        failure = slots.error();
+      auto replacement_job = WgcCaptureJob::create_inactive(
+        *source_, replacement_render->capture_device(),
+        *decision.candidate_generation, pool_buffer_count_, wake_main_loop_);
+      if (!replacement_job) {
+        failure = replacement_job.error();
       }
       else {
-        auto replacement_job = WgcCaptureJob::create_inactive(
-          *source_, replacement_render->capture_device(),
-          *decision.candidate_generation, pool_buffer_count_, wake_main_loop_);
-        if (!replacement_job) {
-          failure = replacement_job.error();
+        const auto allocation = (*replacement_job)->initial_allocation();
+        const auto slots = replacement_render->rebuild_capture_slots(
+          *decision.candidate_generation, allocation,
+          DXGI_FORMAT_B8G8R8A8_UNORM);
+        if (!slots) {
+          failure = slots.error();
         }
         else {
           const auto started = (*replacement_job)->start_for_publication();
@@ -419,12 +435,15 @@ namespace airelinna::platform::windows {
           else {
             render_stack_ = std::move(replacement_render);
             capture_job_ = std::move(*replacement_job);
+            allocation_ = allocation;
+            adapter_->update_source_extent(allocation_);
             last_render_result_ = {};
             resource_generation_ = *decision.candidate_generation;
             device_recovery_phase_ = DeviceRecoveryPhase::Inactive;
             source_job_stopping_ = false;
             vulkan_device_lost_ = false;
             d3_device_removed_ = false;
+            // Construction alone does not reset the retry episode; a present must follow.
             replacement_awaiting_present_ = true;
             device_recovery_episode_ = render::advance_graphics_recovery_episode(
               device_recovery_episode_,
@@ -521,6 +540,7 @@ namespace airelinna::platform::windows {
     attempt_device_rebuild(now, candidates, progress, deadline);
   }
 
+  // Dependency order is job -> graphics -> adapter/window -> stable source wake lease.
   void WindowsReplicaRuntime::progress_stop(
     const render::RenderTickResult &render_result, TickCandidates &candidates, render::DrainProgress &progress) noexcept
   {
@@ -528,6 +548,7 @@ namespace airelinna::platform::windows {
       return;
     }
 
+    // Job-internal safety and render-held frame/presentation retirement are separate proofs.
     const bool job_safe = !capture_job_ || capture_job_->stop_quiescent();
     const bool render_safe = !render_stack_ || render_result.drain_complete;
     if (capture_job_ && job_safe && render_safe) {
@@ -549,6 +570,7 @@ namespace airelinna::platform::windows {
       overlay_.reset();
       progress = render::DrainProgress::ProvenSafeRelease;
     }
+    // Keep the borrowed wake target alive through any final admitted source callback.
     if (source_ && !overlay_ && source_->callbacks_quiescent()) {
       source_.reset();
       progress = render::DrainProgress::ProvenSafeRelease;
@@ -640,6 +662,7 @@ namespace airelinna::platform::windows {
       std::optional<Clock::time_point> deadline;
       render::DrainProgress progress{render::DrainProgress::None};
 
+      // Service callback-local state synchronously before scheduling new render intake.
       const bool source_closed_edge = source_ && source_->consume_closed_edge();
       CaptureSignalBatch capture_signals;
       if (capture_job_) {
@@ -704,6 +727,7 @@ namespace airelinna::platform::windows {
         }
       }
 
+      // Even without a new frame, advance pending copies, presentations, and retirement.
       render::RenderTickResult render_result{.drain_complete =
                                                render_stack_ == nullptr};
       if (render_stack_) {
@@ -729,6 +753,7 @@ namespace airelinna::platform::windows {
           device_recovery_started_at_.reset();
         }
 
+        // Neither loss fact authorizes cleanup of resources owned by the other API.
         const bool new_vulkan_loss =
           render_result.vulkan_device_lost && !vulkan_device_lost_;
         const bool new_d3_removal =
@@ -812,6 +837,7 @@ namespace airelinna::platform::windows {
         progress_stop(render_result, candidates, progress);
       }
 
+      // Include callback/native cleanup in the same bounded observation deadline as graphics.
       const auto drain = detail::advance_runtime_drain(
         drain_state_,
         cleanup_pending(render_stack_ && render_result.cleanup_pending),
@@ -863,6 +889,7 @@ namespace airelinna::platform::windows {
       }
       return result;
     } catch (...) {
+      // Discard a partial event batch and retain all owners after an unexpected exception.
       result = {};
       const auto exception = detail::observe_runtime_exception(
         drain_state_,

@@ -1,0 +1,38 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-clangd",
+      "displayName": "Windows clangd compilation database",
+      "description": "Run from an x64 VS developer shell with LLVM, Ninja and the Vulkan SDK available. Does not alter another build tree.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/clangd",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "AIRELINNA_BUILD_TESTS": false,
+        "AIRELINNA_ENABLE_WINDOWS_INTEGRATION": true
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "clangd-generated",
+      "displayName": "Generate shader declarations for clangd",
+      "configurePreset": "windows-clangd",
+      "targets": ["airelinna_replica_shaders"]
+    }
+  ]
+}

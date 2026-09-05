@@ -1,3 +1,5 @@
+/// @file Static user and diagnostic labels for the portable error taxonomy.
+/// Keeping text here lets no-throw runtime events carry only fixed-size AppError values.
 #include "airelinna/core/types.hpp"
 
 namespace airelinna::core {

@@ -1,3 +1,7 @@
+/// @file
+/// @brief Construction and publication of the complete Windows replica aggregate.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/windows_runtime_factory.hpp"
 
 #include "platform/windows/capture_exclusion.hpp"
@@ -7,6 +11,7 @@
 #include "platform/windows/win32_overlay_adapter.hpp"
 #include "platform/windows/windows_capture_source.hpp"
 #include "platform/windows/windows_replica_runtime.hpp"
+#include "render/windows_render_stack.hpp"
 
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
@@ -102,12 +107,14 @@ namespace airelinna::platform::windows {
       if (!lease) {
         return std::unexpected{factory_error(lease.error())};
       }
+      // Resolve once: every later job borrows this same catalog-published identity.
       auto source_owner =
         WindowsCaptureSource::create(std::move(*lease), wake_main_loop_);
       if (!source_owner) {
         return std::unexpected{factory_error(source_owner.error())};
       }
 
+      // HWND must precede adapter/subclass and Vulkan surface construction.
       auto overlay = OverlayWindow::create(overlay_extent, settings.border);
       if (!overlay) {
         return std::unexpected{factory_error(overlay.error())};
@@ -125,20 +132,17 @@ namespace airelinna::platform::windows {
       std::unique_ptr<WindowsReplicaRuntime> runtime;
       AttachmentCleanupOperations cleanup{.overlay = overlay->get(),
                                           .adapter = adapter->get()};
+      // Cleanup follows the partial pair into runtime without adding a long-lived service.
       detail::FactoryOverlayAttachmentGuard guard{cleanup};
       const auto attached = (*adapter)->attach();
       if (!attached) {
         return std::unexpected{factory_error(attached.error())};
       }
+      // Guard ownership follows subclass installation before any later fallible step.
       guard.arm();
 
       auto render_stack = std::make_unique<render::WindowsRenderStack>(
         **overlay, initial_resource_generation, bridge_preference_);
-      const auto slots = render_stack->rebuild_capture_slots(
-        initial_resource_generation, source.extent, DXGI_FORMAT_B8G8R8A8_UNORM);
-      if (!slots) {
-        return std::unexpected{factory_error(slots.error())};
-      }
       auto capture_job = WgcCaptureJob::create_inactive(
         **source_owner, render_stack->capture_device(),
         initial_resource_generation, capture_pool_buffer_count,
@@ -146,18 +150,28 @@ namespace airelinna::platform::windows {
       if (!capture_job) {
         return std::unexpected{factory_error(capture_job.error())};
       }
+      // Descriptor extent may be stale; render slots must match the actual pool allocation.
+      const auto allocation = (*capture_job)->initial_allocation();
+      const auto slots = render_stack->rebuild_capture_slots(
+        initial_resource_generation, allocation, DXGI_FORMAT_B8G8R8A8_UNORM);
+      if (!slots) {
+        return std::unexpected{factory_error(slots.error())};
+      }
+      (*adapter)->update_source_extent(allocation);
 
       runtime = std::make_unique<WindowsReplicaRuntime>(
         WindowsReplicaRuntime::ConstructionToken{}, std::move(*source_owner),
         std::move(*overlay), std::move(*adapter), std::move(render_stack),
-        std::move(*capture_job), settings, source.extent, exclusion,
+        std::move(*capture_job), settings, allocation, exclusion,
         bridge_preference_, capture_pool_buffer_count, wake_main_loop_);
+      // The complete aggregate exists before the last fallible StartCapture operation.
       const auto activated = runtime->activate_for_publication();
       if (!activated) {
         runtime->cleanup_unpublished_activation_failure();
         return std::unexpected{factory_error(activated.error())};
       }
 
+      // Only no-throw ownership transfer remains after native publication succeeds.
       std::unique_ptr<app::IReplicaRuntime> published{runtime.release()};
       guard.disarm();
       return published;

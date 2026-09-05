@@ -1,3 +1,4 @@
+/// @file One-slot owning handoff with replacement instead of a frame backlog.
 #ifndef AIRELINNA_CORE_LATEST_VALUE_MAILBOX_HPP
 #define AIRELINNA_CORE_LATEST_VALUE_MAILBOX_HPP
 
@@ -8,21 +9,31 @@
 
 namespace airelinna::core {
 
+  /// Mutex-protected newest-value handoff; supports move-only owning payloads.
+  /// The mailbox owns at most one pending value. Destruction of displaced payload
+  /// owners happens after unlocking; moved-from values are reset under the lock.
+  /// Callers must keep this object alive until all concurrent operations finish.
   template <typename T>
   class LatestValueMailbox final {
   public:
+    /// BecameReady identifies the empty-to-ready edge a producer may use to wake
+    /// its consumer. Replacement need not repeatedly wake a capped scheduler.
     enum class SubmitResult { BecameReady,
                               ReplacedPending,
                               Closed };
 
+    /// Accepted submissions, overwrites, and successful takes; closed rejects are excluded.
     struct Counters {
       std::uint64_t submitted{};
       std::uint64_t replaced{};
       std::uint64_t taken{};
     };
 
+    /// Take ownership by value, replacing older work or discarding it when closed.
+    /// Payload move operations may throw; no generic no-throw guarantee is imposed.
     [[nodiscard]] SubmitResult submit(T value)
     {
+      // Keep the displaced owner outside the critical section for its final release.
       std::optional<T> replaced;
       SubmitResult result{SubmitResult::Closed};
 
@@ -46,6 +57,7 @@ namespace airelinna::core {
       return result;
     }
 
+    /// Transfer the newest pending value to the consumer, leaving the slot empty.
     [[nodiscard]] std::optional<T> take()
     {
       std::optional<T> value;
@@ -62,6 +74,8 @@ namespace airelinna::core {
       return value;
     }
 
+    /// Permanently reject future submissions and release any pending payload.
+    /// This does not join producers or prove that external callbacks have quiesced.
     void close()
     {
       std::optional<T> pending;
@@ -76,6 +90,7 @@ namespace airelinna::core {
       }
     }
 
+    /// Copy one coherent counter snapshot while holding the mailbox mutex.
     [[nodiscard]] Counters counters() const
     {
       const std::lock_guard lock{mutex_};

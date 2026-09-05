@@ -1,3 +1,7 @@
+/// @file
+/// @brief Exception-contained overlay message dispatch and final native detachment.
+/// Native implementation details remain below the portable application ports.
+
 #ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_CALLBACK_HPP
 #define AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_CALLBACK_HPP
 
@@ -5,6 +9,8 @@
 
 namespace airelinna::platform::windows::detail {
 
+  /// Prepare before mutating adapter state; failures fall back to the saved WndProc.
+  /// WM_NCDESTROY always forwards first and then clears callback reachability.
   template <class Operations>
   [[nodiscard]] LRESULT
   dispatch_overlay_callback(Operations &operations, const UINT message, const WPARAM word_parameter, const LPARAM long_parameter) noexcept

@@ -1,3 +1,4 @@
+/// @file Strict V1 JSON preferences with default recovery and temporary-file replacement.
 #include "airelinna/app/config_store.hpp"
 
 #include "airelinna/core/hotkey.hpp"
@@ -22,9 +23,11 @@ namespace airelinna::app {
       return core::AppError{core::AppErrorCode::ConfigReadFailure};
     }
 
-    [[nodiscard]] core::AppError write_failure() noexcept
+    [[nodiscard]] core::AppError write_failure(
+      std::optional<std::int64_t> native_detail = std::nullopt) noexcept
     {
-      return core::AppError{core::AppErrorCode::ConfigWriteFailure};
+      return core::AppError{core::AppErrorCode::ConfigWriteFailure,
+                            native_detail};
     }
 
     [[nodiscard]] std::filesystem::path
@@ -96,6 +99,8 @@ namespace airelinna::app {
       return {};
     }
 
+    // Reject extra keys as well as omissions: the persistence boundary excludes
+    // source identities, titles, pixel data, window geometry and session mode.
     [[nodiscard]] bool has_exact_keys(const nlohmann::json &document)
     {
       return document.is_object() && document.size() == 4 &&
@@ -114,6 +119,7 @@ namespace airelinna::app {
         return std::nullopt;
       }
 
+      // V1 has no migration path; an unknown schema is handled as defaults.
       const auto version = document.at("version").get<std::int64_t>();
       if (version != config_version) {
         return std::nullopt;
@@ -155,6 +161,7 @@ namespace airelinna::app {
     if (!input.is_open()) {
       std::error_code error;
       const bool exists = std::filesystem::exists(path, error);
+      // First run is not a read error. An existing but unreadable path is.
       if (!error && !exists) {
         return UserConfig{};
       }
@@ -178,12 +185,16 @@ namespace airelinna::app {
       }
     }
 
+    // Detect growth after file_size as well as the short reads checked above;
+    // do not accept a partial snapshot of a file that changed during the read.
     char extra{};
     input.read(&extra, 1);
     if (input.gcount() != 0 || input.bad() || !input.eof()) {
       return std::unexpected{read_failure()};
     }
 
+    // Syntax/schema/value failures recover to defaults. Observable filesystem
+    // failures take the separate ConfigReadFailure route above.
     const auto document = nlohmann::json::parse(contents, nullptr, false);
     if (document.is_discarded()) {
       return UserConfig{};
@@ -213,6 +224,8 @@ namespace airelinna::app {
       return std::unexpected{write_failure()};
     }
 
+    // Serialize before touching disk. The destination remains untouched until
+    // the injected replace operation receives a fully flushed and closed file.
     const auto temporary_path = temporary_path_for(path);
     std::ofstream output{temporary_path, std::ios::binary | std::ios::trunc};
     if (!output.is_open()) {
@@ -230,13 +243,16 @@ namespace airelinna::app {
       return std::unexpected{write_failure()};
     }
 
-    bool replaced{};
     try {
-      replaced = atomic_replace_(temporary_path, path);
+      // Keep OS replacement policy below the portable store; normalize its
+      // error code but retain numeric detail for diagnostics.
+      const auto replaced = atomic_replace_(temporary_path, path);
+      if (!replaced) {
+        const auto native_detail = replaced.error().native_detail;
+        remove_temporary(temporary_path);
+        return std::unexpected{write_failure(native_detail)};
+      }
     } catch (...) {
-      replaced = false;
-    }
-    if (!replaced) {
       remove_temporary(temporary_path);
       return std::unexpected{write_failure()};
     }

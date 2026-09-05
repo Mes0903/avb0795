@@ -10,8 +10,53 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+set(imgui_patch_arguments)
 if(WIN32)
   find_package(Git REQUIRED)
+  set(imgui_patch_arguments
+    PATCH_COMMAND
+      "${CMAKE_COMMAND}" -E chdir "${PROJECT_SOURCE_DIR}"
+      "${GIT_EXECUTABLE}" apply --verbose --unsafe-paths
+      "--directory=<SOURCE_DIR>"
+      "${PROJECT_SOURCE_DIR}/third_party/patches/imgui-1.92.9-vulkan-safe-failure.patch"
+  )
+endif()
+
+FetchContent_Declare(
+  imgui
+  URL https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9.tar.gz
+  URL_HASH SHA256=af97ed649182c39314320514a672b82008ab462b9293fe23d37b30bfa5d05519
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  ${imgui_patch_arguments}
+  EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(imgui)
+unset(imgui_patch_arguments)
+
+add_library(imgui STATIC
+  "${imgui_SOURCE_DIR}/imgui.cpp"
+  "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+  "${imgui_SOURCE_DIR}/imgui_tables.cpp"
+  "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
+)
+
+target_include_directories(imgui
+  PUBLIC
+    $<BUILD_INTERFACE:${imgui_SOURCE_DIR}>
+)
+
+if(WIN32)
+  file(SHA256
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp"
+    imgui_vulkan_backend_hash
+  )
+  if(NOT imgui_vulkan_backend_hash STREQUAL
+      "435e04fba9de28ff2c88e3cccb883c24ae387d4cea052648b0a0447921027ec0")
+    message(FATAL_ERROR
+      "Dear ImGui 1.92.9 Vulkan backend is missing Airelinna's safe-failure patch")
+  endif()
+  unset(imgui_vulkan_backend_hash)
+
   find_package(Vulkan 1.3 REQUIRED COMPONENTS glslc)
 
   if(NOT TARGET Vulkan::glslc)

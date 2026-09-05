@@ -1,3 +1,7 @@
+/// @file
+/// @brief Value-only runtime event coalescing, resize barriers, and drain observation.
+/// Native implementation details remain below the portable application ports.
+
 #ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP
 #define AIRELINNA_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP
 
@@ -10,11 +14,13 @@
 
 namespace airelinna::platform::windows::detail {
 
+  /// Published/pending bridge selection, so unchanged status does not emit duplicate events.
   struct RuntimeBridgeEventState final {
     std::optional<render::BridgeSelection> published;
     std::optional<render::BridgeSelection> pending;
   };
 
+  /// Coalesce an observed selection against the last published value.
   [[nodiscard]] constexpr RuntimeBridgeEventState
   observe_runtime_bridge_selection(
     RuntimeBridgeEventState state,
@@ -27,6 +33,7 @@ namespace airelinna::platform::windows::detail {
     return state;
   }
 
+  /// Commit only after the runtime actually adds the pending event to its result.
   [[nodiscard]] constexpr RuntimeBridgeEventState
   commit_runtime_bridge_selection(RuntimeBridgeEventState state) noexcept
   {
@@ -37,18 +44,21 @@ namespace airelinna::platform::windows::detail {
     return state;
   }
 
+  /// Preserve causal started/completed facts until a runtime tick publishes them.
   struct RuntimeRecoveryEventState final {
     bool published_active{};
     bool pending_started{};
     bool pending_completed{};
   };
 
+  /// Native recovery observations, including a newer episode superseding completion.
   struct RuntimeRecoveryObservations final {
     bool started{};
     bool completed{};
     bool completion_superseded{};
   };
 
+  /// Coalesce edges without deciding portable lifecycle priority.
   [[nodiscard]] constexpr RuntimeRecoveryEventState
   observe_runtime_recovery_events(
     RuntimeRecoveryEventState state,
@@ -67,6 +77,7 @@ namespace airelinna::platform::windows::detail {
     return state;
   }
 
+  /// Update publication state after the event batch has accepted the causal pair.
   [[nodiscard]] constexpr RuntimeRecoveryEventState
   commit_runtime_recovery_events(RuntimeRecoveryEventState state) noexcept
   {
@@ -81,18 +92,21 @@ namespace airelinna::platform::windows::detail {
     return state;
   }
 
+  /// Synchronous capture facts for the runtime's native stop/resize decisions.
   struct RuntimeCaptureFacts final {
     bool source_closed{};
     bool capture_failed{};
     std::optional<core::Extent> resize;
   };
 
+  /// A retained revoke/Close failure forbids claiming safe native teardown.
   [[nodiscard]] constexpr bool capture_cleanup_is_uncertain(
     const std::optional<CaptureCleanupFailure> &failure) noexcept
   {
     return failure.has_value();
   }
 
+  /// Combine sticky source and job facts without exposing callback-owned resources.
   [[nodiscard]] constexpr RuntimeCaptureFacts
   merge_runtime_capture_signals(const bool source_closed,
                                 const CaptureSignalBatch &signals) noexcept
@@ -102,6 +116,7 @@ namespace airelinna::platform::windows::detail {
             .resize = signals.resize};
   }
 
+  /// Main-thread barrier phases separating callback retirement from render retirement.
   enum class SourceReconfigurationPhase {
     Inactive,
     WaitingForCallbacks,
@@ -109,6 +124,7 @@ namespace airelinna::platform::windows::detail {
     Prepared,
   };
 
+  /// Next concrete action; the policy itself never calls WGC or renderer APIs.
   enum class SourceReconfigurationAction {
     None,
     Wait,
@@ -118,6 +134,7 @@ namespace airelinna::platform::windows::detail {
     Cancel,
   };
 
+  /// Inputs needed to reject resize on source loss/fatal and preserve owner ordering.
   struct SourceReconfigurationFacts final {
     SourceReconfigurationPhase phase{SourceReconfigurationPhase::Inactive};
     bool callbacks_quiescent{};
@@ -126,6 +143,7 @@ namespace airelinna::platform::windows::detail {
     bool capture_failed{};
   };
 
+  /// Require callback quiescence, then old render idleness, before prepare/commit.
   [[nodiscard]] constexpr SourceReconfigurationAction
   next_source_reconfiguration_action(
     const SourceReconfigurationFacts facts) noexcept
@@ -152,12 +170,14 @@ namespace airelinna::platform::windows::detail {
     return SourceReconfigurationAction::Cancel;
   }
 
+  /// One aggregate no-progress clock for all retained native owners, not just graphics.
   struct RuntimeDrainState final {
     std::optional<std::chrono::steady_clock::time_point> no_progress_since;
     core::RuntimeDrainStatus published_status{core::RuntimeDrainStatus::Normal};
     bool ownership_uncertain{};
   };
 
+  /// Drain status edge, release permission, and the next bounded observation deadline.
   struct RuntimeDrainUpdate final {
     RuntimeDrainState state;
     std::optional<core::RuntimeDrainStatus> status_change;
@@ -165,6 +185,8 @@ namespace airelinna::platform::windows::detail {
     std::optional<std::chrono::steady_clock::time_point> next_deadline;
   };
 
+  /// Polling/retrying is not forward progress; only retirement/proven release resets time.
+  /// Uncertainty remains sticky until a safe empty-owner observation proves completion.
   [[nodiscard]] inline RuntimeDrainUpdate advance_runtime_drain(
     RuntimeDrainState state, const bool pending_ownership, const bool ownership_uncertain, const render::DrainProgress progress, const std::chrono::steady_clock::time_point now) noexcept
   {
@@ -209,15 +231,18 @@ namespace airelinna::platform::windows::detail {
                                : std::nullopt};
   }
 
+  /// Exceptions while stopping must not reintroduce pre-stop lifecycle failures.
   enum class RuntimeExceptionPhase { Running,
                                      Stopping };
 
+  /// No-throw fallback retaining owners and keeping future drain observation scheduled.
   struct RuntimeExceptionObservation final {
     bool emit_failure{};
     bool retain_owners{true};
     RuntimeDrainUpdate drain;
   };
 
+  /// Convert an unexpected exception to existing failure/drain facts without allocation.
   [[nodiscard]] inline RuntimeExceptionObservation observe_runtime_exception(
     RuntimeDrainState state, const RuntimeExceptionPhase phase, const std::chrono::steady_clock::time_point now) noexcept
   {

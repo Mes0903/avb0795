@@ -1,3 +1,7 @@
+/// @file
+/// @brief Generation-scoped source IDs, runtime leases, and shared Closed observations.
+/// Native implementation details remain below the portable application ports.
+
 #ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP
 #define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP
 
@@ -15,12 +19,16 @@ namespace airelinna::platform::windows {
     class ItemObservationState;
     struct WindowsSourceRegistryControl;
 
+    /// Produces opaque IDs whose prefix rejects selections from an old refresh.
     class WindowsSourceIdGeneration final {
     public:
       WindowsSourceIdGeneration();
 
+      /// Issue the next ID in this snapshot; native handles are never encoded.
       [[nodiscard]] core::SourceId issue();
+      /// Invalidate every previous ID before accepting another snapshot.
       void advance();
+      /// Validate the generation only; the registry separately checks existence.
       [[nodiscard]] std::expected<void, core::AppError>
       validate(const core::SourceId &id) const noexcept;
 
@@ -36,6 +44,8 @@ namespace airelinna::platform::windows {
 
   class WindowsCaptureSource;
 
+  /// Move-only runtime lease on the exact catalog-published item observation.
+  /// The shared control block prevents refresh while any lease is retained.
   class WindowsSourceLease final {
   public:
     ~WindowsSourceLease();
@@ -58,8 +68,11 @@ namespace airelinna::platform::windows {
     std::shared_ptr<detail::ItemObservationState> observation_;
   };
 
+  /// Owns one source snapshot; refresh and lookup are serialized by its control.
+  /// COM identities stay here rather than being reconstructed from recycled HWNDs.
   class WindowsSourceRegistry final {
   public:
+    /// Exclusive refresh transaction; destruction cancels an uncommitted refresh.
     class Refresh final {
     public:
       ~Refresh();
@@ -69,6 +82,7 @@ namespace airelinna::platform::windows {
       Refresh(Refresh &&other) noexcept;
       Refresh &operator=(Refresh &&other) noexcept;
 
+      /// Publish observations and return matching IDs in their input order.
       [[nodiscard]] std::expected<std::vector<core::SourceId>, core::AppError>
       commit(std::vector<std::shared_ptr<detail::ItemObservationState>>
                observations);
@@ -89,7 +103,9 @@ namespace airelinna::platform::windows {
     WindowsSourceRegistry(WindowsSourceRegistry &&) = delete;
     WindowsSourceRegistry &operator=(WindowsSourceRegistry &&) = delete;
 
+    /// Reject refresh while a runtime lease or another refresh is active.
     [[nodiscard]] std::expected<Refresh, core::AppError> begin_refresh();
+    /// Resolve a current ID into an owning lease without recreating its item.
     [[nodiscard]] std::expected<WindowsSourceLease, core::AppError>
     resolve(const core::SourceId &id) const;
 

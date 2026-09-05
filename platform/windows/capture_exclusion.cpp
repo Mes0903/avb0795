@@ -1,5 +1,12 @@
+/// @file
+/// @brief Best-effort capture exclusion and validation of the patched GLFW window class.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/capture_exclusion.hpp"
 
+#include "platform/windows/detail/overlay_policy.hpp"
+
+#include <cstdint>
 #include <optional>
 
 namespace airelinna::platform::windows {
@@ -53,6 +60,7 @@ namespace airelinna::platform::windows {
   {
     using core::CaptureExclusionStatus;
 
+    // Affinity applies only to a live top-level HWND owned by this process/thread.
     const auto identity = owned_top_level_window_identity(window);
     if (!identity) {
       return CaptureExclusionStatus::Failed;
@@ -74,6 +82,7 @@ namespace airelinna::platform::windows {
       set_affinity(window, WDA_EXCLUDEFROMCAPTURE) != FALSE;
     const DWORD error = set_succeeded ? ERROR_SUCCESS : GetLastError();
 
+    // HWND values can be reused; revalidate owner identity after the native operation.
     const auto current_identity = owned_top_level_window_identity(window);
     if (!current_identity || *current_identity != *identity) {
       return CaptureExclusionStatus::Failed;
@@ -85,6 +94,35 @@ namespace airelinna::platform::windows {
       return CaptureExclusionStatus::Unsupported;
     }
     return CaptureExclusionStatus::Failed;
+  }
+
+  std::expected<core::CaptureExclusionStatus, core::AppError>
+  prepare_controller_window(HWND window) noexcept
+  {
+    if (window == nullptr || IsWindow(window) == FALSE) {
+      return std::unexpected{core::AppError{
+        core::AppErrorCode::RuntimeConstructionFailure,
+        static_cast<std::int64_t>(ERROR_INVALID_WINDOW_HANDLE)}};
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    const auto class_style = GetClassLongPtrW(window, GCL_STYLE);
+    const auto query_error = GetLastError();
+    if (class_style == 0 && query_error != ERROR_SUCCESS) {
+      return std::unexpected{core::AppError{
+        core::AppErrorCode::RuntimeConstructionFailure,
+        static_cast<std::int64_t>(query_error)}};
+    }
+
+    // Reject incompatible class styles before advertising a usable overlay input policy.
+    if (!detail::is_overlay_class_style_supported(
+          static_cast<std::uintptr_t>(class_style))) {
+      return std::unexpected{core::AppError{
+        core::AppErrorCode::UnsupportedWindowClass,
+        static_cast<std::int64_t>(class_style)}};
+    }
+
+    return attempt_capture_exclusion(window);
   }
 
 }    // namespace airelinna::platform::windows

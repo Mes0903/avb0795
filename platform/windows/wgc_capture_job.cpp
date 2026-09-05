@@ -1,5 +1,10 @@
+/// @file
+/// @brief One WGC session/pool generation, contained intake, and nonblocking stop.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/wgc_capture_job.hpp"
 
+#include "platform/windows/detail/frame_intake_gate.hpp"
 #include "platform/windows/detail/wgc_capture_state.hpp"
 
 #include "airelinna/core/latest_value_mailbox.hpp"
@@ -74,6 +79,8 @@ namespace airelinna::platform::windows {
               .Height = static_cast<std::int32_t>(extent.height)};
     }
 
+    // Shared callback state owns the pool before mailbox/checkouts in declaration order.
+    // Late delegates weak-lock this state rather than a destroyed job or runtime.
     class FrameCallbackState final
         : public std::enable_shared_from_this<FrameCallbackState> {
     public:
@@ -86,6 +93,7 @@ namespace airelinna::platform::windows {
 
       [[nodiscard]] winrt::event_token register_arrival()
       {
+        // Capture the registration epoch; revoked/replaced delegates cannot retarget.
         const auto epoch = policy_.current_epoch();
         const std::weak_ptr<FrameCallbackState> weak_state{shared_from_this()};
         return frame_pool_.FrameArrived(
@@ -107,12 +115,13 @@ namespace airelinna::platform::windows {
         if (!admission) {
           return;
         }
+        // Early matching arrivals preserve one bit without touching the native sender/pool.
         if (!admission->is_open()) {
           admission->record_pending();
           admission->wake_if_open();
           return;
         }
-        static_cast<void>(intake_one());
+        static_cast<void>(intake_one(*admission));
       }
 
       void service_pending_arrival() noexcept
@@ -120,9 +129,14 @@ namespace airelinna::platform::windows {
         if (!policy_.claim_pending_arrival()) {
           return;
         }
+        auto admission = policy_.enter(policy_.current_epoch());
+        if (!admission || !admission->is_open()) {
+          return;
+        }
+        // Bound each service pass even when new native frames keep arriving.
         for (std::uint32_t index = 0; index < policy_.pool_buffer_count();
              ++index) {
-          if (!intake_one()) {
+          if (!intake_one(*admission)) {
             break;
           }
         }
@@ -196,6 +210,7 @@ namespace airelinna::platform::windows {
       }
 
     private:
+      // Own immediately after TryGetNextFrame, before metadata projection can throw.
       class PendingFrameCheckout final {
       public:
         explicit PendingFrameCheckout(
@@ -245,6 +260,7 @@ namespace airelinna::platform::windows {
 
       [[nodiscard]] std::optional<AcquiredFrame> try_take_native_frame()
       {
+        // Gate ownership spans this pull through publication to preserve frame order.
         auto raw_frame = frame_pool_.TryGetNextFrame();
         if (!raw_frame) {
           return std::nullopt;
@@ -279,7 +295,24 @@ namespace airelinna::platform::windows {
                           .surface_format = observed_format}};
       }
 
-      [[nodiscard]] bool intake_one() noexcept
+      [[nodiscard]] bool
+      intake_one(detail::FrameCallbackPolicy::Admission &admission) noexcept
+      {
+        // Contention is remembered atomically; no callback waits for another native pull.
+        if (!intake_gate_.try_claim()) {
+          return false;
+        }
+        const auto accepted = intake_claimed_frame();
+        if (intake_gate_.release()) {
+          // Release before rearming so main-loop service can make progress.
+          // The admission still protects the borrowed wake target here.
+          admission.record_pending();
+          admission.wake_if_open();
+        }
+        return accepted;
+      }
+
+      [[nodiscard]] bool intake_claimed_frame() noexcept
       {
         try {
           auto acquired = try_take_native_frame();
@@ -291,6 +324,7 @@ namespace airelinna::platform::windows {
             discard_latest();
             return false;
           }
+          // Replacement returns the stale checkout; only readiness/signal edges need wake.
           const auto result = mailbox_.submit(std::move(acquired->checkout));
           if (observed.signal_edge ||
               result == FrameMailbox::SubmitResult::BecameReady) {
@@ -316,9 +350,11 @@ namespace airelinna::platform::windows {
         }
       }
 
+      // Reverse member destruction releases the mailbox before the owning frame pool.
       using FrameMailbox = core::LatestValueMailbox<WindowsCapturedFrame>;
       FramePool frame_pool_{nullptr};
       detail::FrameCallbackPolicy policy_;
+      detail::FrameIntakeGate intake_gate_;
       FrameMailbox mailbox_;
       const std::uint32_t buffer_count_;
       std::uint64_t generation_{};
@@ -328,6 +364,7 @@ namespace airelinna::platform::windows {
 
   }    // namespace
 
+  // Runtime retains this owner through stop; only inactive construction may unwind early.
   class WgcCaptureJob::Impl final {
   public:
     Impl(WindowsCaptureSource &source, Direct3DDevice direct3d_device, winrt::Windows::Graphics::Capture::GraphicsCaptureSession session, std::shared_ptr<FrameCallbackState> frame_state, const winrt::event_token frame_arrived_token)
@@ -444,6 +481,7 @@ namespace airelinna::platform::windows {
         return;
       }
       stopping_ = true;
+      // Close admission/mailbox before revoke/Close races already-entered delegates.
       frame_state_->request_terminal_stop();
       stop_state_.request_stop(
         [this] {
@@ -502,6 +540,7 @@ namespace airelinna::platform::windows {
     try {
       auto direct3d_device = make_direct3d_device(d3d_device);
       const auto allocation = checked_extent(source.item().Size());
+      // Free-threaded dispatch needs explicit admission, intake, and ownership guards.
       auto frame_pool = FramePool::CreateFreeThreaded(
         direct3d_device, pool_format,
         static_cast<std::int32_t>(pool_buffer_count),
@@ -515,7 +554,7 @@ namespace airelinna::platform::windows {
         source, std::move(direct3d_device), std::move(session),
         std::move(frame_state), token);
       return std::unique_ptr<WgcCaptureJob>{
-        new WgcCaptureJob{std::move(implementation)}};
+        new WgcCaptureJob{std::move(implementation), allocation}};
     } catch (const winrt::hresult_error &error) {
       const auto native_detail = error.code().value;
       return std::unexpected{detail::classify_wgc_construction_failure(
@@ -529,8 +568,13 @@ namespace airelinna::platform::windows {
     }
   }
 
-  WgcCaptureJob::WgcCaptureJob(std::unique_ptr<Impl> implementation) noexcept
-      : implementation_{std::move(implementation)} {}
+  WgcCaptureJob::WgcCaptureJob(std::unique_ptr<Impl> implementation, const core::Extent initial_allocation) noexcept
+      : implementation_{std::move(implementation)}, initial_allocation_{initial_allocation} {}
+
+  core::Extent WgcCaptureJob::initial_allocation() const noexcept
+  {
+    return initial_allocation_;
+  }
 
   WgcCaptureJob::~WgcCaptureJob() = default;
 

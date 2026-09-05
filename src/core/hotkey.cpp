@@ -1,3 +1,4 @@
+/// @file Allocation-free chord validation and canonical owned text formatting.
 #include "airelinna/core/hotkey.hpp"
 
 #include <cstddef>
@@ -6,6 +7,7 @@
 namespace airelinna::core {
   namespace {
 
+    // Hotkey grammar is ASCII and independent of the process/user locale.
     [[nodiscard]] constexpr char ascii_upper(char character) noexcept
     {
       if (character >= 'a' && character <= 'z') {
@@ -120,6 +122,7 @@ namespace airelinna::core {
         return std::unexpected{invalid_value()};
       }
 
+      // Point only into the local chord to share duplicate detection across modifiers.
       bool *modifier{};
       if (token_equals(token, "Ctrl")) {
         modifier = &chord.modifiers.control;
@@ -158,6 +161,7 @@ namespace airelinna::core {
       token_start = separator + 1;
     }
 
+    // Modifiers alone cannot name a recover-to-editable hotkey binding.
     if (!has_key) {
       return std::unexpected{invalid_value()};
     }

@@ -1,3 +1,4 @@
+/// @file Generation validation delegates every accepted operation to one session.
 #include "airelinna/core/application_state.hpp"
 
 #include <limits>
@@ -28,6 +29,7 @@ namespace airelinna::core {
   std::expected<SessionId, AppError>
   ApplicationState::replace_session(ReplicaSession replacement)
   {
+    // Never wrap and accidentally make an ancient queued token valid again.
     if (current_session_id_.value == std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(AppError{AppErrorCode::InvalidValue});
     }
@@ -37,6 +39,8 @@ namespace airelinna::core {
     return current_session_id_;
   }
 
+  // These forwarding methods validate before mutation. Runtime availability,
+  // transactional apply and error notices remain Application responsibilities.
   std::expected<void, AppError>
   ApplicationState::select_source(SessionId session_id, SourceDescriptor source)
   {

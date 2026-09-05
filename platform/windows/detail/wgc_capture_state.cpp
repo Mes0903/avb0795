@@ -1,3 +1,7 @@
+/// @file
+/// @brief Capture admission epochs, bounded latches, publication, and stop proofs.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/detail/wgc_capture_state.hpp"
 
 #include <algorithm>
@@ -88,6 +92,7 @@ namespace airelinna::platform::windows::detail {
   std::optional<FrameCallbackPolicy::Admission>
   FrameCallbackPolicy::enter(const std::uint64_t registered_epoch) noexcept
   {
+    // Count matching handlers before rechecking whether native intake is open.
     const auto admission_guard = callback_admission_lock_.acquire();
     if (!epoch_matches(registered_epoch)) {
       return std::nullopt;
@@ -106,12 +111,15 @@ namespace airelinna::platform::windows::detail {
       if (terminal()) {
         return;
       }
+      // Unpublished failures must never send a final borrowed-host wake during unwind.
+      ever_opened_ = true;
       admission_open_.store(true, std::memory_order_seq_cst);
       if (callbacks_in_flight_ == 0) {
         quiescence_wake_requested_ = false;
         final_quiescence_wake_claimed_ = false;
       }
     }
+    // Never clear here: callback set/recheck and opener store/read cover both races.
     if (arrival_pending()) {
       wake_noexcept();
     }
@@ -131,6 +139,7 @@ namespace airelinna::platform::windows::detail {
     if (terminal()) {
       return {};
     }
+    // Immutable allocation/generation/format contracts are separate from ContentSize.
     if (frame.resource_generation != resource_generation_ ||
         frame.allocation_extent != allocation_ || frame.content_size.width == 0 ||
         frame.content_size.height == 0 ||
@@ -195,7 +204,8 @@ namespace airelinna::platform::windows::detail {
   std::uint64_t FrameCallbackPolicy::close_for_reconfigure() noexcept
   {
     const auto admission_guard = callback_admission_lock_.acquire();
-    quiescence_wake_requested_ = true;
+    // A final wake belongs only to an owner that reached active publication.
+    quiescence_wake_requested_ = ever_opened_;
     admission_open_.store(false, std::memory_order_seq_cst);
     arrival_pending_.store(false, std::memory_order_seq_cst);
     return epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -223,6 +233,7 @@ namespace airelinna::platform::windows::detail {
         return std::unexpected{
           core::AppError{.code = core::AppErrorCode::InvalidCommand}};
       }
+      // Closed admission and callback quiescence permit replacing generation metadata.
       allocation_ = allocation;
       resource_generation_ = resource_generation;
       resize_.reset();
@@ -242,7 +253,7 @@ namespace airelinna::platform::windows::detail {
         return;
       }
       admission_open_.store(false, std::memory_order_seq_cst);
-      quiescence_wake_requested_ = true;
+      quiescence_wake_requested_ = ever_opened_;
       arrival_pending_.store(false, std::memory_order_seq_cst);
       epoch_.fetch_add(1, std::memory_order_acq_rel);
     }
@@ -272,7 +283,6 @@ namespace airelinna::platform::windows::detail {
       if (callbacks_in_flight_ == 1 && quiescence_wake_requested_ &&
           !final_quiescence_wake_claimed_) {
         final_quiescence_wake_claimed_ = true;
-        --callbacks_in_flight_;
       }
       else {
         --callbacks_in_flight_;
@@ -280,7 +290,10 @@ namespace airelinna::platform::windows::detail {
       }
     }
 
+    // Keep admission counted while the borrowed target runs, outside the lock.
     wake_noexcept();
+    const auto admission_guard = callback_admission_lock_.acquire();
+    --callbacks_in_flight_;
   }
 
   void FrameCallbackPolicy::record_pending(const std::uint64_t epoch) noexcept

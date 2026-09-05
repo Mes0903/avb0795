@@ -1,3 +1,6 @@
+/// @file
+/// Replica-only native graphics owner. Main-thread ticks advance a bounded
+/// D3-to-Vulkan ring and independent WSI retirement without synchronous waits.
 #include "render/windows_render_stack.hpp"
 
 #include "airelinna/render/replica_shaders.hpp"
@@ -44,6 +47,8 @@ namespace airelinna::render {
     constexpr std::uint32_t bytes_per_pixel = 4;
     constexpr auto pending_poll_interval = 2ms;
 
+    /// Move-only owner of a temporary NT sharing handle; importing native APIs
+    /// retain their own resource references, so the handle can close afterward.
     class UniqueWin32Handle final {
     public:
       UniqueWin32Handle() noexcept = default;
@@ -70,6 +75,7 @@ namespace airelinna::render {
         return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
       }
 
+      /// Close a valid NT handle once and leave the wrapper empty.
       void reset() noexcept
       {
         if (*this) {
@@ -94,6 +100,7 @@ namespace airelinna::render {
 #define AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT 1
 #endif
 
+    /// Feature/entry-point pair enabled on this concrete Vulkan device.
     enum class MaintenanceVariant { None,
                                     Khr,
                                     Ext };
@@ -123,6 +130,7 @@ namespace airelinna::render {
       return value.width == 0 || value.height == 0;
     }
 
+    /// Validate allocation arithmetic before buffer sizes, row offsets or maps.
     [[nodiscard]] std::optional<VkDeviceSize>
     checked_pixel_bytes(const core::Extent extent) noexcept
     {
@@ -143,6 +151,7 @@ namespace airelinna::render {
       return bytes;
     }
 
+    /// Merge independent completion/recovery deadlines without delaying a user.
     template <typename Value>
     void earlier_deadline(std::optional<Value> &current, const Value candidate)
     {
@@ -161,6 +170,7 @@ namespace airelinna::render {
         });
     }
 
+    /// Intersect compatible memory bits with required flags before preferences.
     [[nodiscard]] std::optional<std::uint32_t>
     memory_type_index(const VkPhysicalDeviceMemoryProperties &properties,
                       std::uint32_t bits,
@@ -188,16 +198,22 @@ namespace airelinna::render {
 
   }    // namespace
 
+  /// Canonical owner for one replica graphics generation. The runtime owns this
+  /// aggregate and its borrowed overlay; callbacks never enter this data plane.
   class WindowsRenderStack::Impl final {
   public:
     using SlotPhase = RenderSlotPhase;
 
+    /// One of three stable ring slots, with CPU or imported-GPU destination.
+    /// frame owns only the WGC source-copy lease; sampled images survive that
+    /// checkout and can remain as safe redraw content after submission retires.
     struct CaptureSlot final {
       ComPtr<ID3D11Texture2D> readback_texture;
       ComPtr<ID3D11Query> copy_query;
       std::optional<platform::windows::WindowsCapturedFrame> frame;
       core::Extent content{};
       SlotPhase phase{SlotPhase::Empty};
+      std::uint64_t content_sequence{};
 
       VkBuffer upload_buffer{VK_NULL_HANDLE};
       VkDeviceMemory upload_memory{VK_NULL_HANDLE};
@@ -231,6 +247,8 @@ namespace airelinna::render {
       bool query_completion{};
     };
 
+    /// Independent presentation lease: semaphore and WSI outlive the submission
+    /// record until the attached maintenance1 present fence proves retirement.
     struct PresentRecord final {
       VkFence fence{VK_NULL_HANDLE};
       VkSemaphore wait_semaphore{VK_NULL_HANDLE};
@@ -240,6 +258,8 @@ namespace airelinna::render {
       bool uncertain{};
     };
 
+    /// Active or retired WSI aggregate. Moving to retired does not destroy any
+    /// image views, framebuffer, pipeline or outstanding presentation resource.
     struct SwapchainState final {
       VkSwapchainKHR handle{VK_NULL_HANDLE};
       VkFormat format{VK_FORMAT_UNDEFINED};
@@ -252,55 +272,78 @@ namespace airelinna::render {
       bool recovery_candidate{};
     };
 
+    /// Owner-local construction budget, retained until a replacement presents.
     struct RecoveryEpisode final {
       GraphicsFailureCategory category{GraphicsFailureCategory::Swapchain};
       GraphicsRecoveryEpisodeState state{};
       std::chrono::steady_clock::time_point started_at{};
     };
 
+    /// Construct device and WSI owners around a borrowed overlay on the main
+    /// thread; partial setup enqueues no work and can unwind immediately.
     Impl(GLFWwindow *native_window, std::uint64_t resource_generation, core::Extent initial_framebuffer, WindowsBridgePreference bridge_preference);
+    /// Require established native-use or matching device-loss proof; never wait.
     ~Impl() noexcept;
 
     Impl(const Impl &) = delete;
     Impl &operator=(const Impl &) = delete;
 
+    /// Borrow the D3 device while this graphics generation remains owned.
     [[nodiscard]] ID3D11Device &capture_device() const noexcept
     {
       return *d3_device_.Get();
     }
 
+    /// Check admission and bounded ring capacity without pulling a WGC frame.
     [[nodiscard]] bool ready_for_frame() const noexcept;
+    /// Adopt a matching checkout and enqueue its D3 copy on the main thread.
+    /// Retain the checkout until query/fence completion or confirmed D3 removal.
     void submit(platform::windows::WindowsCapturedFrame &&frame);
+    /// Poll native proof and WSI recovery without waiting; contain failures into
+    /// fixed result values while preserving possibly referenced owners.
     [[nodiscard]] RenderTickResult
     tick(core::Extent framebuffer,
          std::chrono::steady_clock::time_point now) noexcept;
+    /// Prove old slot allocations have no D3/submission users. Ready content
+    /// has no native work and can be discarded during the rebuild barrier.
     [[nodiscard]] bool render_allocation_idle() const noexcept;
+    /// Rebuild three slots after the runtime's old-allocation barrier; probe real
+    /// NT-handle memory compatibility, otherwise construct the CPU ring.
     [[nodiscard]] std::expected<void, core::AppError>
     rebuild_capture_slots(std::uint64_t generation, core::Extent allocation, DXGI_FORMAT format);
+    /// Record physical extent; a nonzero change requests swapchain recreation.
     void resize(core::Extent framebuffer) noexcept;
+    /// Close new-copy admission and discard ready content; later ticks retire users.
     void begin_drain() noexcept;
+    /// Apply a confirmed loss to only its matching API's cleanup obligations.
     void begin_device_recovery_drain(DeviceLossKind kind) noexcept;
+    /// Return the runtime-supplied generation, never an independently chosen epoch.
     [[nodiscard]] std::uint64_t generation() const noexcept
     {
       return generation_;
     }
+    /// Return concrete capability facts without querying the driver again.
     [[nodiscard]] BridgeCapabilityFacts bridge_capability_facts() const noexcept
     {
       return bridge_facts_;
     }
+    /// Return the canonical bridge choice after slot construction selects it.
     [[nodiscard]] std::optional<BridgeSelection>
     bridge_selection() const noexcept
     {
       return bridge_selection_;
     }
+    /// Report the transport implemented by the currently owned slot ring.
     [[nodiscard]] core::BridgeMode active_bridge_mode() const noexcept
     {
       return active_bridge_mode_;
     }
+    /// Count enqueued interop submissions for concrete-path diagnostics.
     [[nodiscard]] std::uint64_t gpu_interop_frames_submitted() const noexcept
     {
       return gpu_interop_frames_submitted_;
     }
+    /// Consume one pending bridge selection for edge-driven runtime events.
     [[nodiscard]] std::optional<BridgeSelection>
     take_bridge_mode_change() noexcept
     {
@@ -308,89 +351,171 @@ namespace airelinna::render {
     }
 
   private:
+    /// Create the hardware BGRA device used by WGC and all source copies.
     void create_d3_device();
+    /// Enable GLFW surface and mandatory maintenance1 requirements before use.
     void create_vulkan_instance();
+    /// Create WSI against the borrowed overlay, whose window must outlive the stack.
     void create_surface();
+    /// Prefer the D3 adapter LUID, then require presentation/maintenance1 support.
+    /// A LUID mismatch may use CPU copy without bypassing the WSI safety floor.
     void select_physical_device();
+    /// Create queues and resolve enabled maintenance/import procedures; optional
+    /// interop support must not weaken required presentation safety.
     void create_vulkan_device();
+    /// Query real LUID, external-image, D3 interface and timeline-import facts;
+    /// per-slot NT-handle compatibility is established separately.
     void collect_bridge_capabilities() noexcept;
+    /// Permanently import the shared D3 fence as a Vulkan timeline semaphore;
+    /// close the temporary NT handle after import while keeping both fence owners.
     [[nodiscard]] bool create_interop_timeline() noexcept;
+    /// Create device-scoped pools, layouts and sampler before any submission.
     void create_vulkan_common_resources();
+    /// Build a compatible SDR replacement; retire active before using oldSwapchain.
+    /// A failed create leaves that old owner retired instead of reactivating it.
     [[nodiscard]] std::expected<void, core::AppError>
     create_swapchain(core::Extent requested);
+    /// Build candidate views, render pass, shader pipeline and framebuffers;
+    /// the caller releases the candidate if any allocation fails.
     [[nodiscard]] std::expected<void, core::AppError>
     create_swapchain_render_resources(SwapchainState &state);
+    /// Construct CPU staging/query, mapped upload and sampled-image resources.
     [[nodiscard]] std::expected<void, core::AppError>
     create_capture_slot(CaptureSlot &slot);
+    /// Create a shared D3 texture and query its NT handle's Vulkan memory-type
+    /// intersection; device-level capability alone does not prove a handle usable.
     [[nodiscard]] std::expected<bool, core::AppError>
     query_interop_slot(CaptureSlot &slot);
+    /// Import a proven-compatible handle and create its sampling resources;
+    /// this slot becomes the canonical owner of the imported Vulkan allocation.
     [[nodiscard]] std::expected<void, core::AppError>
     finish_interop_slot(CaptureSlot &slot);
+    /// Create descriptor, command buffer and unsignaled synchronization for a
+    /// slot's sampled view; this setup enqueues no GPU work.
     [[nodiscard]] std::expected<void, core::AppError>
     create_slot_presentation_resources(CaptureSlot &slot, VkImageView view, VkImageLayout layout);
+    /// Release Vulkan imports before the D3 texture, after native-use/loss proof.
     void destroy_interop_slot(CaptureSlot &slot) noexcept;
+    /// Close copy admission and latch fallback without destroying active users.
     void request_interop_fallback() noexcept;
+    /// Observe complete interop copy/submission/present retirement, then replace
+    /// the ring with CPU resources and emit one bridge result.
     void progress_interop_fallback(RenderTickResult &result);
 
+    /// Release a proven-safe slot while preserving its reusable command buffer.
     void destroy_capture_slot(CaptureSlot &slot) noexcept;
+    /// Invalidate the borrowed redraw slot and release all safe slot allocations.
     void destroy_capture_slots() noexcept;
+    /// Release present fences/semaphores only with retirement or Vulkan-loss
+    /// proof; submission completion alone does not establish presentation safety.
     void destroy_present_records() noexcept;
+    /// Destroy one WSI record after its image users and presents are safe.
     void destroy_swapchain_state(SwapchainState &state) noexcept;
+    /// Release active WSI during safe teardown or never-submitted partial startup.
     void destroy_swapchain() noexcept;
+    /// Release all retired WSI records after teardown safety has been established.
     void destroy_retired_swapchains() noexcept;
+    /// Release device-wide pools/layouts after their dependent children.
     void destroy_vulkan_common_resources() noexcept;
 
+    /// Check outstanding D3 and healthy Vulkan obligations before destruction.
+    /// Confirmed Vulkan loss never masks a still-pending healthy D3 copy.
     [[nodiscard]] bool has_unsafe_native_work() const noexcept;
+    /// Derive image-use, present-fence and release-retention facts for one handle.
     [[nodiscard]] SwapchainOwnershipFacts
     swapchain_ownership(VkSwapchainKHR handle) const noexcept;
+    /// Count nonempty proof phases, excluding a safe retained redraw image.
     [[nodiscard]] std::size_t slots_in_flight() const noexcept;
+    /// Count independent present records, not ordinary queue submissions.
     [[nodiscard]] std::size_t presentations_in_flight() const noexcept;
+    /// Prefer non-retained empty storage while keeping all three slots reusable.
     [[nodiscard]] CaptureSlot *empty_slot() noexcept;
+    /// Choose the newest eligible sequence or one requested retained redraw;
+    /// older ready content can be dropped because its D3 checkout has retired.
     [[nodiscard]] CaptureSlot *ready_slot() noexcept;
+    /// Reserve one of three bounded present records before starting an acquire.
     [[nodiscard]] PresentRecord *empty_present_record() noexcept;
 
+    /// Latch Vulkan loss and stop new work without claiming D3 removal.
     void mark_vulkan_device_lost(RenderTickResult &result) noexcept;
+    /// Latch D3 removal without claiming healthy Vulkan work is retired.
     void mark_d3_device_removed(RenderTickResult &result) noexcept;
+    /// Stop admission and retain uncertainty for the runtime's safe stop path.
     void set_terminal(VkResult result, RenderTickResult &tick_result) noexcept;
+    /// Provide a strictly future observation deadline for pending native work.
     void schedule_poll(RenderTickResult &result,
                        std::chrono::steady_clock::time_point now) const noexcept;
+    /// Poll present fences separately from submission fences; release their
+    /// wait semaphores and count only successful retired presentations.
     void progress_present_records(RenderTickResult &result,
                                   std::chrono::steady_clock::time_point now);
+    /// Destroy records only after image-use and present proof; clear retained
+    /// failed-release slots after their swapchain has been legally destroyed.
     void progress_retired_swapchains(RenderTickResult &result);
+    /// Advance each slot through the nonblocking proof required by its phase.
     void progress_slots(RenderTickResult &result,
                         std::chrono::steady_clock::time_point now);
+    /// Poll D3 completion before checking in WGC. CPU then maps rows into upload
+    /// storage; GPU becomes ready only with an already-satisfiable timeline wait.
     void progress_d3_copy(CaptureSlot &slot, RenderTickResult &result, std::chrono::steady_clock::time_point now);
+    /// Poll acquire or submission proof by phase, then recycle or release the
+    /// acquired image that was never handed to presentation.
     void progress_submission(CaptureSlot &slot, RenderTickResult &result, std::chrono::steady_clock::time_point now);
+    /// Invoke the enabled maintenance1 variant for one proven-unused image.
     [[nodiscard]] VkResult
     release_swapchain_image(VkSwapchainKHR swapchain,
                             std::uint32_t image_index) noexcept;
+    /// Classify release without clearing image ownership on failure; completed
+    /// unconsumed binary signals have their own safe-destruction proof.
     void release_acquired_image(CaptureSlot &slot, RenderTickResult &result);
+    /// Recycle synchronization after proven completion and retain the newest
+    /// completed sampled image when a future redraw may reuse it.
     void reset_slot_after_vulkan(CaptureSlot &slot);
+    /// Record upload or external ownership transfer and the aspect-fit draw.
+    /// Retained CPU redraw skips upload; GPU redraw reacquires EXTERNAL ownership.
     [[nodiscard]] VkResult record_commands(CaptureSlot &slot,
                                            std::uint32_t image_index) noexcept;
+    /// Acquire at timeout zero, classify submit/present independently, and move
+    /// the render-finished semaphore into an enqueued present's record.
     void try_present(CaptureSlot &slot, PresentRecord &record, RenderTickResult &result, std::chrono::steady_clock::time_point now);
+    /// Advance bounded active/retired WSI recovery. Surface recovery preserves
+    /// capture, D3, slot resources and the runtime-owned generation.
     void progress_recreation(RenderTickResult &result,
                              std::chrono::steady_clock::time_point now);
+    /// Recycle failed-release slots only after their owning swapchain was legally
+    /// destroyed; a release error itself never proves image ownership ended.
     void clear_release_retained_after_swapchain_destroy(VkSwapchainKHR handle);
+    /// Move active WSI into the retired set before attempting replacement.
     void retire_active_swapchain();
+    /// Start/promote a WSI episode and invalidate obsolete success markers.
     void begin_recovery_episode(GraphicsFailureCategory category,
                                 std::chrono::steady_clock::time_point now);
+    /// Account for failed construction and schedule bounded retry; confirmed
+    /// device loss instead enters runtime-owned device recovery.
     void note_recovery_failure(const core::AppError &error,
                                RenderTickResult &result,
                                std::chrono::steady_clock::time_point now);
+    /// Reset retries only after a replacement's successful present retires.
     void reset_recovery_after_present(VkSwapchainKHR handle) noexcept;
 
+    /// Choose compatible required flags and prefer optional flags when available.
     [[nodiscard]] std::optional<std::uint32_t>
     find_memory_type(std::uint32_t bits, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred = 0) const noexcept;
+    /// Create mapped host-visible upload storage and retain its allocation/coherency
+    /// facts for later flushes and teardown.
     [[nodiscard]] std::expected<void, core::AppError>
     create_buffer_memory(CaptureSlot &slot, VkDeviceSize size);
+    /// Create the CPU path's device-local UNORM sampled image and view.
     [[nodiscard]] std::expected<void, core::AppError>
     create_image_memory(CaptureSlot &slot);
+    /// Allocate a fresh unsignaled semaphore after the old one moved to a present.
     [[nodiscard]] std::expected<void, core::AppError>
     recreate_render_finished(CaptureSlot &slot);
+    /// Replace a completed unconsumed acquire signal instead of reusing it signaled.
     [[nodiscard]] std::expected<void, core::AppError>
     recreate_acquire_semaphore(CaptureSlot &slot);
 
+    // Borrowed window outlives all surfaces; generation is supplied by runtime.
     GLFWwindow *window_{};
     std::uint64_t generation_{};
     WindowsBridgePreference bridge_preference_{};
@@ -398,12 +523,14 @@ namespace airelinna::render {
     core::Extent capture_allocation_{};
     DXGI_FORMAT capture_format_{DXGI_FORMAT_UNKNOWN};
 
+    // D3 source-copy owners are independent of Vulkan device-loss evidence.
     ComPtr<ID3D11Device> d3_device_;
     ComPtr<ID3D11DeviceContext> d3_context_;
     ComPtr<ID3D11Device5> d3_device5_;
     ComPtr<ID3D11DeviceContext4> d3_context4_;
     ComPtr<ID3D11Fence> interop_fence_;
 
+    // WSI and graphics ownership belongs only to this replica, not the controller.
     VkInstance instance_{VK_NULL_HANDLE};
     VkSurfaceKHR surface_{VK_NULL_HANDLE};
     VkPhysicalDevice physical_device_{VK_NULL_HANDLE};
@@ -434,7 +561,14 @@ namespace airelinna::render {
     VkCommandPool command_pool_{VK_NULL_HANDLE};
     VkSampler sampler_{VK_NULL_HANDLE};
     VkSemaphore interop_timeline_{VK_NULL_HANDLE};
+    // Stable addresses permit one borrowed retained_slot_ without another owner.
     std::array<CaptureSlot, cpu_slot_count> slots_{};
+    // Borrowed from the stable ring; Empty still means there is no native work.
+    // Prefer another empty slot for capture, but keep all three reusable.
+    CaptureSlot *retained_slot_{};
+    std::uint64_t last_submitted_sequence_{};
+    bool redraw_requested_{};
+    // Present records are bounded independently of reusable source-copy slots.
     std::array<std::optional<PresentRecord>, present_record_count>
       present_records_{};
     std::optional<SwapchainState> swapchain_;
@@ -518,6 +652,8 @@ namespace airelinna::render {
 
   WindowsRenderStack::Impl::~Impl() noexcept
   {
+    // A destructor cannot manufacture completion. The runtime must keep ticking
+    // this aggregate, or choose non-unwinding process abandonment if it stalls.
     if (fully_constructed_ && has_unsafe_native_work()) {
       std::terminate();
     }
@@ -653,10 +789,12 @@ namespace airelinna::render {
         static_cast<std::uint32_t>(enabled_extensions.size()),
       .ppEnabledExtensionNames = enabled_extensions.data(),
     };
-    result = vkCreateInstance(&create_info, nullptr, &instance_);
+    VkInstance created_instance{VK_NULL_HANDLE};
+    result = vkCreateInstance(&create_info, nullptr, &created_instance);
     if (result != VK_SUCCESS) {
       throw vulkan_error(vulkan_instance_create_error_code(result), result);
     }
+    instance_ = created_instance;
   }
 
   void WindowsRenderStack::Impl::create_surface()
@@ -953,11 +1091,13 @@ namespace airelinna::render {
       .ppEnabledExtensionNames = extensions.data(),
       .pEnabledFeatures = nullptr,
     };
+    VkDevice created_device{VK_NULL_HANDLE};
     const auto result =
-      vkCreateDevice(physical_device_, &create_info, nullptr, &device_);
+      vkCreateDevice(physical_device_, &create_info, nullptr, &created_device);
     if (result != VK_SUCCESS) {
       throw vulkan_error(core::AppErrorCode::UnsupportedGraphics, result);
     }
+    device_ = created_device;
     vkGetDeviceQueue(device_, graphics_queue_family_, 0, &graphics_queue_);
     vkGetDeviceQueue(device_, present_queue_family_, 0, &present_queue_);
     auto release_function_loaded = false;
@@ -1126,10 +1266,12 @@ namespace airelinna::render {
       .pNext = &timeline_info,
       .flags = 0,
     };
+    VkSemaphore created_timeline{VK_NULL_HANDLE};
     if (vkCreateSemaphore(device_, &semaphore_info, nullptr,
-                          &interop_timeline_) != VK_SUCCESS) {
+                          &created_timeline) != VK_SUCCESS) {
       return false;
     }
+    interop_timeline_ = created_timeline;
 
     HANDLE raw_handle{};
     const auto shared = interop_fence_->CreateSharedHandle(nullptr, GENERIC_ALL,
@@ -1174,11 +1316,13 @@ namespace airelinna::render {
       .bindingCount = 1,
       .pBindings = &binding,
     };
-    auto result = vkCreateDescriptorSetLayout(device_, &descriptor_info, nullptr,
-                                              &descriptor_layout_);
+    VkDescriptorSetLayout created_descriptor_layout{VK_NULL_HANDLE};
+    auto result = vkCreateDescriptorSetLayout(
+      device_, &descriptor_info, nullptr, &created_descriptor_layout);
     if (result != VK_SUCCESS) {
       throw vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result);
     }
+    descriptor_layout_ = created_descriptor_layout;
 
     const VkPushConstantRange push_constant{
       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
@@ -1194,11 +1338,13 @@ namespace airelinna::render {
       .pushConstantRangeCount = 1,
       .pPushConstantRanges = &push_constant,
     };
+    VkPipelineLayout created_pipeline_layout{VK_NULL_HANDLE};
     result = vkCreatePipelineLayout(device_, &pipeline_layout_info, nullptr,
-                                    &pipeline_layout_);
+                                    &created_pipeline_layout);
     if (result != VK_SUCCESS) {
       throw vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result);
     }
+    pipeline_layout_ = created_pipeline_layout;
 
     const VkDescriptorPoolSize pool_size{
       .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1212,11 +1358,13 @@ namespace airelinna::render {
       .poolSizeCount = 1,
       .pPoolSizes = &pool_size,
     };
-    result =
-      vkCreateDescriptorPool(device_, &pool_info, nullptr, &descriptor_pool_);
+    VkDescriptorPool created_descriptor_pool{VK_NULL_HANDLE};
+    result = vkCreateDescriptorPool(device_, &pool_info, nullptr,
+                                    &created_descriptor_pool);
     if (result != VK_SUCCESS) {
       throw vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result);
     }
+    descriptor_pool_ = created_descriptor_pool;
 
     const VkCommandPoolCreateInfo command_pool_info{
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1224,11 +1372,13 @@ namespace airelinna::render {
       .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
       .queueFamilyIndex = graphics_queue_family_,
     };
-    result =
-      vkCreateCommandPool(device_, &command_pool_info, nullptr, &command_pool_);
+    VkCommandPool created_command_pool{VK_NULL_HANDLE};
+    result = vkCreateCommandPool(device_, &command_pool_info, nullptr,
+                                 &created_command_pool);
     if (result != VK_SUCCESS) {
       throw vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result);
     }
+    command_pool_ = created_command_pool;
 
     std::array<VkCommandBuffer, cpu_slot_count> command_buffers{};
     const VkCommandBufferAllocateInfo command_allocate_info{
@@ -1267,10 +1417,12 @@ namespace airelinna::render {
       .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
       .unnormalizedCoordinates = VK_FALSE,
     };
-    result = vkCreateSampler(device_, &sampler_info, nullptr, &sampler_);
+    VkSampler created_sampler{VK_NULL_HANDLE};
+    result = vkCreateSampler(device_, &sampler_info, nullptr, &created_sampler);
     if (result != VK_SUCCESS) {
       throw vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result);
     }
+    sampler_ = created_sampler;
   }
 
   void WindowsRenderStack::Impl::destroy_vulkan_common_resources() noexcept
@@ -1343,15 +1495,10 @@ namespace airelinna::render {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
-    auto selected_format = formats.front();
-    const auto preferred = std::ranges::find_if(
-      formats, [](const VkSurfaceFormatKHR &format) noexcept {
-        return (format.format == VK_FORMAT_B8G8R8A8_UNORM ||
-                format.format == VK_FORMAT_B8G8R8A8_SRGB) &&
-               format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-      });
-    if (preferred != formats.end()) {
-      selected_format = *preferred;
+    const auto selected_format = select_sdr_surface_format(formats);
+    if (!selected_format) {
+      return std::unexpected{vulkan_error(
+        core::AppErrorCode::UnsupportedGraphics, VK_ERROR_FORMAT_NOT_SUPPORTED)};
     }
 
     std::uint32_t mode_count{};
@@ -1431,8 +1578,8 @@ namespace airelinna::render {
       .flags = 0,
       .surface = surface_,
       .minImageCount = image_count,
-      .imageFormat = selected_format.format,
-      .imageColorSpace = selected_format.colorSpace,
+      .imageFormat = selected_format->format,
+      .imageColorSpace = selected_format->colorSpace,
       .imageExtent = extent,
       .imageArrayLayers = 1,
       .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
@@ -1448,7 +1595,7 @@ namespace airelinna::render {
     };
 
     SwapchainState candidate;
-    candidate.format = selected_format.format;
+    candidate.format = selected_format->format;
     candidate.extent = extent;
     if (create_plan.retire_active_before_create) {
       retire_active_swapchain();
@@ -1569,12 +1716,14 @@ namespace airelinna::render {
       .dependencyCount = 1,
       .pDependencies = &dependency,
     };
+    VkRenderPass created_render_pass{VK_NULL_HANDLE};
     result = vkCreateRenderPass(device_, &render_pass_info, nullptr,
-                                &state.render_pass);
+                                &created_render_pass);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    state.render_pass = created_render_pass;
 
     const auto create_shader = [this](const std::span<const std::uint32_t> words,
                                       VkShaderModule &module) noexcept {
@@ -1585,7 +1734,13 @@ namespace airelinna::render {
         .codeSize = words.size_bytes(),
         .pCode = words.data(),
       };
-      return vkCreateShaderModule(device_, &info, nullptr, &module);
+      VkShaderModule created_module{VK_NULL_HANDLE};
+      const auto result =
+        vkCreateShaderModule(device_, &info, nullptr, &created_module);
+      if (result == VK_SUCCESS) {
+        module = created_module;
+      }
+      return result;
     };
     VkShaderModule vertex{};
     VkShaderModule fragment{};
@@ -1714,14 +1869,16 @@ namespace airelinna::render {
       .basePipelineHandle = VK_NULL_HANDLE,
       .basePipelineIndex = -1,
     };
+    VkPipeline created_pipeline{VK_NULL_HANDLE};
     result = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info,
-                                       nullptr, &state.pipeline);
+                                       nullptr, &created_pipeline);
     vkDestroyShaderModule(device_, fragment, nullptr);
     vkDestroyShaderModule(device_, vertex, nullptr);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    state.pipeline = created_pipeline;
 
     state.framebuffers.reserve(state.views.size());
     for (const auto view : state.views) {
@@ -1819,12 +1976,14 @@ namespace airelinna::render {
       .queueFamilyIndexCount = 0,
       .pQueueFamilyIndices = nullptr,
     };
+    VkBuffer created_upload_buffer{VK_NULL_HANDLE};
     auto result =
-      vkCreateBuffer(device_, &buffer_info, nullptr, &slot.upload_buffer);
+      vkCreateBuffer(device_, &buffer_info, nullptr, &created_upload_buffer);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.upload_buffer = created_upload_buffer;
 
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(device_, slot.upload_buffer, &requirements);
@@ -1846,24 +2005,28 @@ namespace airelinna::render {
       .allocationSize = requirements.size,
       .memoryTypeIndex = *memory_index,
     };
-    result =
-      vkAllocateMemory(device_, &allocation_info, nullptr, &slot.upload_memory);
+    VkDeviceMemory allocated_upload_memory{VK_NULL_HANDLE};
+    result = vkAllocateMemory(device_, &allocation_info, nullptr,
+                              &allocated_upload_memory);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.upload_memory = allocated_upload_memory;
     result =
       vkBindBufferMemory(device_, slot.upload_buffer, slot.upload_memory, 0);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    void *mapped_upload{};
     result = vkMapMemory(device_, slot.upload_memory, 0, VK_WHOLE_SIZE, 0,
-                         &slot.mapped_upload);
+                         &mapped_upload);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.mapped_upload = mapped_upload;
     return {};
   }
 
@@ -1892,12 +2055,14 @@ namespace airelinna::render {
       .pQueueFamilyIndices = nullptr,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
+    VkImage created_sampled_image{VK_NULL_HANDLE};
     auto result =
-      vkCreateImage(device_, &image_info, nullptr, &slot.sampled_image);
+      vkCreateImage(device_, &image_info, nullptr, &created_sampled_image);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.sampled_image = created_sampled_image;
     VkMemoryRequirements requirements{};
     vkGetImageMemoryRequirements(device_, slot.sampled_image, &requirements);
     const auto memory_index = find_memory_type(
@@ -1912,12 +2077,14 @@ namespace airelinna::render {
       .allocationSize = requirements.size,
       .memoryTypeIndex = *memory_index,
     };
+    VkDeviceMemory allocated_sampled_memory{VK_NULL_HANDLE};
     result = vkAllocateMemory(device_, &allocation_info, nullptr,
-                              &slot.sampled_memory);
+                              &allocated_sampled_memory);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.sampled_memory = allocated_sampled_memory;
     result =
       vkBindImageMemory(device_, slot.sampled_image, slot.sampled_memory, 0);
     if (result != VK_SUCCESS) {
@@ -1941,11 +2108,14 @@ namespace airelinna::render {
           .layerCount = 1,
         },
     };
-    result = vkCreateImageView(device_, &view_info, nullptr, &slot.sampled_view);
+    VkImageView created_sampled_view{VK_NULL_HANDLE};
+    result =
+      vkCreateImageView(device_, &view_info, nullptr, &created_sampled_view);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.sampled_view = created_sampled_view;
     return {};
   }
 
@@ -1961,12 +2131,14 @@ namespace airelinna::render {
       .pNext = nullptr,
       .flags = 0,
     };
-    const auto result = vkCreateSemaphore(device_, &info, nullptr,
-                                          &slot.render_finished_semaphore);
+    VkSemaphore created_render_finished_semaphore{VK_NULL_HANDLE};
+    const auto result = vkCreateSemaphore(
+      device_, &info, nullptr, &created_render_finished_semaphore);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.render_finished_semaphore = created_render_finished_semaphore;
     return {};
   }
 
@@ -1982,12 +2154,14 @@ namespace airelinna::render {
       .pNext = nullptr,
       .flags = 0,
     };
+    VkSemaphore created_acquire_semaphore{VK_NULL_HANDLE};
     const auto result =
-      vkCreateSemaphore(device_, &info, nullptr, &slot.acquire_semaphore);
+      vkCreateSemaphore(device_, &info, nullptr, &created_acquire_semaphore);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.acquire_semaphore = created_acquire_semaphore;
     return {};
   }
 
@@ -2002,12 +2176,14 @@ namespace airelinna::render {
       .descriptorSetCount = 1,
       .pSetLayouts = &descriptor_layout_,
     };
+    VkDescriptorSet allocated_descriptor{VK_NULL_HANDLE};
     auto result =
-      vkAllocateDescriptorSets(device_, &descriptor_info, &slot.descriptor);
+      vkAllocateDescriptorSets(device_, &descriptor_info, &allocated_descriptor);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.descriptor = allocated_descriptor;
     const VkDescriptorImageInfo image_info{
       .sampler = sampler_,
       .imageView = view,
@@ -2032,15 +2208,23 @@ namespace airelinna::render {
       .pNext = nullptr,
       .flags = 0,
     };
-    result = vkCreateFence(device_, &fence_info, nullptr, &slot.acquire_fence);
-    if (result == VK_SUCCESS) {
-      result =
-        vkCreateFence(device_, &fence_info, nullptr, &slot.submission_fence);
-    }
+    VkFence created_acquire_fence{VK_NULL_HANDLE};
+    result =
+      vkCreateFence(device_, &fence_info, nullptr, &created_acquire_fence);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.acquire_fence = created_acquire_fence;
+
+    VkFence created_submission_fence{VK_NULL_HANDLE};
+    result =
+      vkCreateFence(device_, &fence_info, nullptr, &created_submission_fence);
+    if (result != VK_SUCCESS) {
+      return std::unexpected{
+        vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
+    }
+    slot.submission_fence = created_submission_fence;
     if (auto created = recreate_acquire_semaphore(slot); !created) {
       return created;
     }
@@ -2118,12 +2302,14 @@ namespace airelinna::render {
       .pQueueFamilyIndices = nullptr,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
+    VkImage created_interop_image{VK_NULL_HANDLE};
     auto result =
-      vkCreateImage(device_, &image_info, nullptr, &slot.interop_image);
+      vkCreateImage(device_, &image_info, nullptr, &created_interop_image);
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.interop_image = created_interop_image;
 
     VkMemoryDedicatedRequirements dedicated_requirements{
       .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS,
@@ -2149,7 +2335,10 @@ namespace airelinna::render {
     texture_info.SampleDesc.Count = 1;
     texture_info.Usage = D3D11_USAGE_DEFAULT;
     texture_info.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    texture_info.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+    // NT handles select the handle type, not shared storage. Synchronization
+    // stays with the existing shared fence; this is not a keyed-mutex texture.
+    texture_info.MiscFlags =
+      D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
     auto d3_result = d3_device_->CreateTexture2D(
       &texture_info, nullptr, slot.interop_texture.GetAddressOf());
     if (FAILED(d3_result)) {
@@ -2232,13 +2421,15 @@ namespace airelinna::render {
       .allocationSize = slot.interop_memory_requirements.size,
       .memoryTypeIndex = slot.interop_memory_type_index,
     };
+    VkDeviceMemory allocated_interop_memory{VK_NULL_HANDLE};
     const auto result = vkAllocateMemory(device_, &allocation_info, nullptr,
-                                         &slot.interop_memory);
+                                         &allocated_interop_memory);
     slot.interop_handle.reset();
     if (result != VK_SUCCESS) {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
+    slot.interop_memory = allocated_interop_memory;
     auto next_result =
       vkBindImageMemory(device_, slot.interop_image, slot.interop_memory, 0);
     if (next_result != VK_SUCCESS) {
@@ -2262,12 +2453,14 @@ namespace airelinna::render {
           .layerCount = 1,
         },
     };
+    VkImageView created_interop_view{VK_NULL_HANDLE};
     next_result =
-      vkCreateImageView(device_, &view_info, nullptr, &slot.interop_view);
+      vkCreateImageView(device_, &view_info, nullptr, &created_interop_view);
     if (next_result != VK_SUCCESS) {
       return std::unexpected{vulkan_error(
         core::AppErrorCode::RuntimeConstructionFailure, next_result)};
     }
+    slot.interop_view = created_interop_view;
     if (auto created = create_slot_presentation_resources(
           slot, slot.interop_view, VK_IMAGE_LAYOUT_GENERAL);
         !created) {
@@ -2346,6 +2539,7 @@ namespace airelinna::render {
 
   void WindowsRenderStack::Impl::destroy_capture_slots() noexcept
   {
+    retained_slot_ = nullptr;
     for (auto &slot : slots_) {
       destroy_capture_slot(slot);
     }
@@ -2534,10 +2728,15 @@ namespace airelinna::render {
   WindowsRenderStack::Impl::CaptureSlot *
   WindowsRenderStack::Impl::empty_slot() noexcept
   {
-    const auto found = std::ranges::find_if(slots_, [](const CaptureSlot &slot) {
-      return slot.phase == SlotPhase::Empty;
+    const auto found = std::ranges::find_if(slots_, [this](const CaptureSlot &slot) {
+      return slot.phase == SlotPhase::Empty && &slot != retained_slot_;
     });
-    return found == slots_.end() ? nullptr : &*found;
+    if (found != slots_.end()) {
+      return &*found;
+    }
+    return retained_slot_ && retained_slot_->phase == SlotPhase::Empty
+             ? retained_slot_
+             : nullptr;
   }
 
   void WindowsRenderStack::Impl::submit(
@@ -2579,6 +2778,11 @@ namespace airelinna::render {
       .bottom = content.height,
       .back = 1,
     };
+    if (slot == retained_slot_) {
+      retained_slot_ = nullptr;
+    }
+    // Keep the pool checkout alive across asynchronous D3 access. A texture
+    // interface alone would not prevent WGC from recycling its pool buffer.
     slot->frame.emplace(std::move(frame));
     slot->content = content;
     slot->gpu_copy = active_bridge_mode_ == core::BridgeMode::GpuInterop;
@@ -2622,6 +2826,7 @@ namespace airelinna::render {
     }
     slot->phase = SlotPhase::D3CopyPending;
     ++captured_frames_;
+    slot->content_sequence = captured_frames_;
   }
 
   bool WindowsRenderStack::Impl::has_unsafe_native_work() const noexcept
@@ -2696,11 +2901,25 @@ namespace airelinna::render {
   WindowsRenderStack::Impl::CaptureSlot *
   WindowsRenderStack::Impl::ready_slot() noexcept
   {
-    const auto found = std::ranges::find_if(slots_, [](const CaptureSlot &slot) {
-      return slot.phase == SlotPhase::CpuReady ||
-             slot.phase == SlotPhase::GpuReady;
-    });
-    return found == slots_.end() ? nullptr : &*found;
+    std::array<RenderFrameCandidate, cpu_slot_count> candidates{};
+    for (std::size_t index{}; index < slots_.size(); ++index) {
+      const auto &slot = slots_[index];
+      candidates[index] = {slot.phase, slot.content_sequence,
+                           &slot == retained_slot_};
+    }
+    const auto selected = select_render_frame(
+      candidates, last_submitted_sequence_, redraw_requested_);
+    auto *const newest = selected ? &slots_[*selected] : nullptr;
+    for (auto &slot : slots_) {
+      if (&slot != newest && (slot.phase == SlotPhase::CpuReady ||
+                              slot.phase == SlotPhase::GpuReady)) {
+        // D3 completion has already checked in the WGC frame, and Vulkan has
+        // not used this slot. Dropping stale ready content needs no native wait.
+        slot.phase = SlotPhase::Empty;
+        ++dropped_frames_;
+      }
+    }
+    return newest;
   }
 
   WindowsRenderStack::Impl::PresentRecord *
@@ -2834,6 +3053,8 @@ namespace airelinna::render {
   {
     accepting_frames_ = false;
     draining_ = true;
+    retained_slot_ = nullptr;
+    redraw_requested_ = false;
     for (auto &slot : slots_) {
       if (slot.phase == SlotPhase::CpuReady ||
           slot.phase == SlotPhase::GpuReady) {
@@ -2849,6 +3070,8 @@ namespace airelinna::render {
   {
     accepting_frames_ = false;
     draining_ = true;
+    retained_slot_ = nullptr;
+    redraw_requested_ = false;
     if (kind == DeviceLossKind::VulkanDeviceLost) {
       vulkan_device_lost_ = true;
       progress_pending_ = progress_pending_ || presentations_in_flight() != 0;
@@ -3131,7 +3354,7 @@ namespace airelinna::render {
       return result;
     }
 
-    if (!slot.gpu_copy) {
+    if (!slot.gpu_copy && &slot != retained_slot_) {
       const VkImageMemoryBarrier before_copy{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -3208,7 +3431,7 @@ namespace airelinna::render {
                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
                            0, nullptr, 1, &before_sampling);
     }
-    else {
+    else if (slot.gpu_copy) {
       const VkImageMemoryBarrier acquire_external{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -3315,12 +3538,11 @@ namespace airelinna::render {
     // Every caller reaches here only after native use was proven complete (or
     // after the owning swapchain was legally destroyed). A synchronization
     // reset/allocation failure therefore makes the slot unusable, not in flight.
+    const bool completed_content = slot.phase == SlotPhase::Submitted;
     slot.acquired_image = false;
     slot.owning_swapchain = VK_NULL_HANDLE;
     slot.phase = SlotPhase::Empty;
-    slot.gpu_copy = false;
     slot.query_completion = false;
-    slot.d3_fence_target = 0;
     const std::array fences{slot.acquire_fence, slot.submission_fence};
     const auto reset_result = vkResetFences(
       device_, static_cast<std::uint32_t>(fences.size()), fences.data());
@@ -3338,6 +3560,15 @@ namespace airelinna::render {
         throw core::AppError{.code = core::AppErrorCode::RuntimeStateLost,
                              .native_detail = created.error().native_detail};
       }
+    }
+    if (completed_content && !draining_ && !terminal_error_ &&
+        !interop_fallback_pending_ &&
+        (!retained_slot_ ||
+         slot.content_sequence >= retained_slot_->content_sequence)) {
+      // Retain only our completed sampled image, never a WGC checkout. GPU
+      // replay reacquires it from EXTERNAL and waits on the same completed D3
+      // timeline value; no D3 writer touches this slot before it is reused.
+      retained_slot_ = &slot;
     }
   }
 
@@ -3558,6 +3789,8 @@ namespace airelinna::render {
       .signalSemaphoreCount = 1,
       .pSignalSemaphores = &slot.render_finished_semaphore,
     };
+    // The D3 timeline target has already completed before this submission is
+    // attempted; no external wait can depend on later main-loop progress.
     const auto submit_result =
       vkQueueSubmit(graphics_queue_, 1, &submit_info, slot.submission_fence);
     const auto submit = classify_submit_result(submit_result);
@@ -3577,6 +3810,7 @@ namespace airelinna::render {
       schedule_poll(result, now);
       return;
     case SubmitOutcome::Enqueued:
+      last_submitted_sequence_ = slot.content_sequence;
       if (gpu_submit) {
         ++gpu_interop_frames_submitted_;
       }
@@ -3665,10 +3899,15 @@ namespace airelinna::render {
     }
 
     record.fence = present_fence;
+    // Submission completion permits the slot to recycle; presentation owns the
+    // consumed semaphore until its separate fence retires the queue operation.
     record.wait_semaphore = slot.render_finished_semaphore;
     record.swapchain = swapchain_handle;
     record.counts_as_presented =
       present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR;
+    if (record.counts_as_presented) {
+      redraw_requested_ = false;
+    }
     record.confirms_recovery = swapchain_->recovery_candidate;
     record.uncertain = present.ownership == PresentOwnership::Uncertain;
     slot.render_finished_semaphore = VK_NULL_HANDLE;
@@ -3987,6 +4226,7 @@ namespace airelinna::render {
       recovery_episode_->state,
       GraphicsRecoveryObservation::ReplacementConstructed);
     swapchain_->recovery_candidate = true;
+    redraw_requested_ = true;
     recovery_last_error_.reset();
     swapchain_recreate_pending_ = false;
 

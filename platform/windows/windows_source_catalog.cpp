@@ -1,3 +1,7 @@
+/// @file
+/// @brief Native candidate filtering and descriptor publication with stable item identity.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/windows_source_catalog.hpp"
 
 #include "platform/windows/detail/item_observation_state.hpp"
@@ -52,11 +56,13 @@ namespace airelinna::platform::windows {
     using GraphicsCaptureItem =
       winrt::Windows::Graphics::Capture::GraphicsCaptureItem;
 
+    // Descriptor and canonical item travel together until one registry commit assigns IDs.
     struct PendingSource {
       core::SourceDescriptor descriptor;
       std::shared_ptr<detail::ItemObservationState> observation;
     };
 
+    // This refresh-local DXGI snapshot never escapes as a native handle in portable UI.
     struct OutputColorSnapshot {
       HMONITOR monitor{};
       RECT desktop_coordinates{};
@@ -78,6 +84,7 @@ namespace airelinna::platform::windows {
       return overlap_width * overlap_height;
     }
 
+    // Missing DXGI/output6 support leaves color Unknown instead of failing source discovery.
     class DxgiColorReader final {
     public:
       DxgiColorReader() { refresh(); }
@@ -96,6 +103,7 @@ namespace airelinna::platform::windows {
       [[nodiscard]] std::optional<DXGI_COLOR_SPACE_TYPE>
       for_window(const RECT &bounds) const noexcept
       {
+        // A spanning window uses the greatest-overlap output for this snapshot only.
         const OutputColorSnapshot *best{};
         std::int64_t greatest_overlap{};
         for (const auto &output : outputs_) {
@@ -163,6 +171,7 @@ namespace airelinna::platform::windows {
       std::vector<OutputColorSnapshot> outputs_;
     };
 
+    // Create native identity during discovery, never again when the user presses Start.
     class CaptureItemCreator final {
     public:
       CaptureItemCreator()
@@ -212,6 +221,7 @@ namespace airelinna::platform::windows {
       winrt::com_ptr<IGraphicsCaptureItemInterop> interop_;
     };
 
+    // Restrict dynamic loading to System32 and retain the module while its function is used.
     class CloakReader final {
     public:
       CloakReader() noexcept
@@ -330,6 +340,7 @@ namespace airelinna::platform::windows {
     }
 
     [[nodiscard]] std::shared_ptr<detail::ItemObservationState>
+    // Installing Closed before descriptor publication remembers loss during user selection.
     observe(std::optional<GraphicsCaptureItem> item)
     {
       if (!item) {
@@ -436,6 +447,7 @@ namespace airelinna::platform::windows {
       }
     };
 
+    // No C++ exception may cross EnumDisplayMonitors; the outer call consumes failure.
     BOOL CALLBACK monitor_callback(HMONITOR monitor, HDC, LPRECT bounds, LPARAM parameter) noexcept
     {
       auto &context = *reinterpret_cast<MonitorEnumerationContext *>(parameter);
@@ -501,6 +513,7 @@ namespace airelinna::platform::windows {
       }
     };
 
+    // Native enumeration stops on a retained exception rather than unwinding Win32.
     BOOL CALLBACK window_callback(HWND window, LPARAM parameter) noexcept
     {
       auto &context = *reinterpret_cast<WindowEnumerationContext *>(parameter);
@@ -570,6 +583,7 @@ namespace airelinna::platform::windows {
         observations.push_back(std::move(source.observation));
       }
 
+      // Commit exact observations before joining their opaque IDs to the descriptors.
       auto ids = refresh->commit(std::move(observations));
       if (!ids) {
         return std::unexpected(ids.error());

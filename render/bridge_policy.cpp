@@ -1,9 +1,13 @@
+/// @file
+/// Stable bridge-reason precedence, separated from concrete capability queries.
 #include "render/bridge_policy.hpp"
 
 namespace airelinna::render {
 
   BridgeSelection select_bridge(const BridgeCapabilityFacts facts) noexcept
   {
+    // Preserve the first failed fact as the single visible explanation; later
+    // optional queries must not replace a more fundamental compatibility issue.
     if (!facts.adapter_luid_matches) {
       return {core::BridgeMode::CpuCopy,
               core::BridgeReason::AdapterLuidUnavailableOrMismatch};

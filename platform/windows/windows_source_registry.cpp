@@ -1,3 +1,7 @@
+/// @file
+/// @brief Generation-scoped source IDs, runtime leases, and shared Closed observations.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/windows_source_registry.hpp"
 
 #include "platform/windows/detail/item_observation_state.hpp"
@@ -41,6 +45,7 @@ namespace airelinna::platform::windows {
         : owner_{std::exchange(other.owner_, nullptr)} {}
 
     std::optional<RuntimeWakeState::Admission>
+    // One CAS protects the stop/admit race; a separate Boolean could miss an entered wake.
     RuntimeWakeState::try_enter() noexcept
     {
       auto observed = admission_state_.load(std::memory_order_acquire);
@@ -74,6 +79,7 @@ namespace airelinna::platform::windows {
       invoke_wake_noexcept();
     }
 
+    // Closing admission does not revoke the registry's longer-lived Closed observation.
     void RuntimeWakeState::request_stop() noexcept
     {
       admission_state_.fetch_or(closed_bit, std::memory_order_acq_rel);
@@ -95,13 +101,16 @@ namespace airelinna::platform::windows {
         }
 
         if ((observed & closed_bit) != 0 && callbacks == 1) {
-          const auto claimed = (observed | final_wake_claimed_bit) - 1;
+          const auto claimed = observed | final_wake_claimed_bit;
           if (!admission_state_.compare_exchange_weak(observed, claimed,
                                                       std::memory_order_acq_rel,
                                                       std::memory_order_acquire)) {
             continue;
           }
+          // Keep the borrowed wake target alive until its final call returns.
+          // The runtime's bounded poll observes the subsequent quiescence.
           invoke_wake_noexcept();
+          admission_state_.fetch_sub(1, std::memory_order_release);
           return;
         }
 
@@ -150,6 +159,7 @@ namespace airelinna::platform::windows {
       prefix_ = "airelinna-source-" + std::to_string(generation_) + '-';
     }
 
+    // Shared control outlives the wrapper if leases remain; its count gates refresh.
     struct WindowsSourceRegistryControl final {
       mutable std::mutex mutex;
       WindowsSourceIdGeneration id_generation;
@@ -196,6 +206,7 @@ namespace airelinna::platform::windows {
     if (!control_) {
       return;
     }
+    // Drop the native item lease before advertising that refresh may retire the snapshot.
     observation_.reset();
     control_->active_runtime_leases.fetch_sub(1, std::memory_order_acq_rel);
     control_.reset();
@@ -309,6 +320,7 @@ namespace airelinna::platform::windows {
       }
       next_generation = control_->id_generation;
     }
+    // Prepare allocating replacement containers before mutating the published snapshot.
     next_generation.advance();
 
     std::vector<core::SourceId> ids;
@@ -331,6 +343,7 @@ namespace airelinna::platform::windows {
         old_observations.push_back(observation);
       }
     }
+    // Native revocation stays outside the registry mutex to avoid reentrant deadlock.
     for (const auto &observation : old_observations) {
       observation->retire();
     }
@@ -364,6 +377,7 @@ namespace airelinna::platform::windows {
     {
       auto state = std::make_shared<ItemObservationState>(ConstructionKey{},
                                                           std::move(item));
+      // A delegate may outlive registry refresh but can reach only this typed state.
       const std::weak_ptr<ItemObservationState> weak_state{state};
       state->closed_token_ =
         state->item_.Closed([weak_state](const auto &, const auto &) noexcept {
@@ -437,6 +451,7 @@ namespace airelinna::platform::windows {
       if (closed_.compare_exchange_strong(expected, true,
                                           std::memory_order_acq_rel)) {
         closed_sequence_.store(1, std::memory_order_release);
+        // Snapshot the weak binding under its short lock; invoke foreign wake code unlocked.
         std::shared_ptr<RuntimeWakeState> wake;
         {
           const auto wake_guard = runtime_wake_lock_.acquire();

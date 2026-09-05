@@ -1,3 +1,7 @@
+/// @file
+/// @brief Stable registry-item lease and publication-gated runtime wake binding.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/windows_capture_source.hpp"
 
 #include "platform/windows/detail/item_observation_state.hpp"
@@ -7,12 +11,12 @@
 
 namespace airelinna::platform::windows {
 
+  // The lease keeps observation_ valid; shared wake state independently tracks host use.
   class WindowsCaptureSource::Impl final {
   public:
     Impl(WindowsSourceLease lease, detail::ItemObservationState &observation, WakeMainLoop wake_main_loop)
         : lease_{std::move(lease)}, observation_{&observation}, wake_state_{std::make_shared<detail::RuntimeWakeState>(std::move(wake_main_loop))}
     {
-      observation_->bind_runtime_wake(wake_state_);
     }
 
     ~Impl() { request_stop(); }
@@ -23,6 +27,7 @@ namespace airelinna::platform::windows {
       if (observed == closed_cursor_) {
         return false;
       }
+      // Consuming an edge never clears the registry's sticky source-closed fact.
       closed_cursor_ = observed;
       return true;
     }
@@ -32,12 +37,21 @@ namespace airelinna::platform::windows {
       return observation_->is_closed();
     }
 
+    // Only guaranteed publication exposes the borrowed host callable to delegates.
+    void activate_runtime_wake() noexcept
+    {
+      if (!stop_requested_) {
+        observation_->bind_runtime_wake(wake_state_);
+      }
+    }
+
     void request_stop() noexcept
     {
       if (stop_requested_) {
         return;
       }
       stop_requested_ = true;
+      // Reject before detaching: a delegate that copied the binding remains counted.
       wake_state_->request_stop();
       observation_->unbind_runtime_wake(wake_state_.get());
     }
@@ -104,6 +118,11 @@ namespace airelinna::platform::windows {
   bool WindowsCaptureSource::is_closed() const noexcept
   {
     return implementation_->is_closed();
+  }
+
+  void WindowsCaptureSource::activate_runtime_wake() noexcept
+  {
+    implementation_->activate_runtime_wake();
   }
 
   void WindowsCaptureSource::request_stop() noexcept

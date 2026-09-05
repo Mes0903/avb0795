@@ -1,3 +1,7 @@
+/// @file
+/// @brief Main-thread GLFW overlay ownership and decoration changes.
+/// See the matching header for the caller-facing lifetime and thread contract.
+
 #include "platform/windows/overlay_window.hpp"
 
 #include <GLFW/glfw3.h>
@@ -68,6 +72,7 @@ namespace airelinna::platform::windows {
       return std::unexpected{overlay_error(core::AppErrorCode::InvalidValue)};
     }
 
+    // Vulkan owns presentation; the patched main class is not an OpenGL-context window.
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_FLOATING, GLFW_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
@@ -90,6 +95,7 @@ namespace airelinna::platform::windows {
         glfwDestroyWindow(owned_window);
       }
     };
+    // Cover allocation failures between native creation and stable Impl ownership.
     std::unique_ptr<GLFWwindow, decltype(destroy_glfw_window)> window_guard{
       window, destroy_glfw_window};
     auto implementation = std::make_unique<Impl>(window_guard.get(), border);
@@ -129,6 +135,7 @@ namespace airelinna::platform::windows {
       return std::unexpected{overlay_error(
         core::AppErrorCode::PlatformOperationFailure, native_detail)};
     }
+    // Cache the preference only after reading actual GLFW decoration back.
     const auto verified = observed_border(implementation_->window);
     if (!verified) {
       return std::unexpected{verified.error()};
@@ -179,6 +186,7 @@ namespace airelinna::platform::windows {
     int width{};
     int height{};
     glfwGetFramebufferSize(implementation_->window, &width, &height);
+    // A minimized/non-drawable window is zero extent, not an invented render size.
     if (width <= 0 || height <= 0) {
       return {};
     }
@@ -190,6 +198,7 @@ namespace airelinna::platform::windows {
   {
     if (implementation_ && implementation_->window != nullptr) {
       glfwDestroyWindow(implementation_->window);
+      // Explicit destroy and Impl destruction must not destroy the same GLFW window twice.
       implementation_->window = nullptr;
     }
   }
