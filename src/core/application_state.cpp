@@ -97,6 +97,17 @@ namespace airelinna::core {
     return {};
   }
 
+  std::expected<void, AppError> ApplicationState::set_extensions(
+    SessionId session_id, ExtensionSettings extensions) noexcept
+  {
+    if (auto result = validate_session(session_id); !result) {
+      return result;
+    }
+
+    current_session_.set_extensions(extensions);
+    return {};
+  }
+
   std::expected<void, AppError>
   ApplicationState::begin_start(SessionId session_id) noexcept
   {

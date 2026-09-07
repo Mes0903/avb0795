@@ -32,6 +32,8 @@ namespace airelinna::core {
     void set_border(BorderPreference border) noexcept;
     /// Store the accepted render cap; scheduler lifetime belongs to the runtime.
     void set_fps(FpsCap fps_cap) noexcept;
+    /// Store accepted experimental preferences without invoking platform behavior.
+    void set_extensions(ExtensionSettings extensions) noexcept;
 
     /// Require a selected source and Idle/Error, otherwise return InvalidCommand.
     [[nodiscard]] std::expected<void, AppError> begin_start() noexcept;

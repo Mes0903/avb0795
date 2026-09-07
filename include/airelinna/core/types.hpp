@@ -174,11 +174,20 @@ namespace airelinna::core {
                            const SourceDescriptor &) = default;
   };
 
+  /// Experimental portable preferences that remain disabled unless opted in.
+  struct ExtensionSettings {
+    bool browser_capture_keep_alive{};
+
+    friend bool operator==(const ExtensionSettings &,
+                           const ExtensionSettings &) = default;
+  };
+
   /// Portable settings transaction applied as a whole to the current runtime.
   struct ReplicaSettings {
     OverlayMode mode{OverlayMode::Editable};
     BorderPreference border{BorderPreference::Bordered};
     FpsCap fps_cap{FpsCap::Fps60};
+    ExtensionSettings extensions{};
 
     friend bool operator==(const ReplicaSettings &,
                            const ReplicaSettings &) = default;
@@ -192,6 +201,7 @@ namespace airelinna::core {
     bool borderless_resize{};
     bool global_hotkey{};
     bool capture_exclusion{};
+    bool browser_capture_keep_alive{};
 
     friend bool operator==(const PlatformCapabilities &,
                            const PlatformCapabilities &) = default;

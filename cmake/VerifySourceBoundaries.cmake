@@ -504,6 +504,23 @@ function(_airelinna_run_source_boundary_scan)
       ${main_files})
   foreach(file IN LISTS all_files)
     file(READ "${file}" contents)
+    file(RELATIVE_PATH feature_relative "${AIRELINNA_SOURCE_ROOT}" "${file}")
+    string(REPLACE "\\" "/" feature_relative "${feature_relative}")
+    if(NOT feature_relative MATCHES "^platform/windows/features/")
+      _airelinna_assert_no_match(
+        "${file}"
+        "${contents}"
+        "TaskListThumbnailWnd|MultitaskingViewFrame"
+        "browser workaround constants escape their feature module")
+      if(NOT feature_relative MATCHES
+         "^platform/windows/windows_(replica_runtime|runtime_factory)\\.(hpp|cpp)$")
+        _airelinna_assert_no_match(
+          "${file}"
+          "${contents}"
+          "platform/windows/features/|(^|[^A-Za-z0-9_])BrowserCaptureKeepAlive([^A-Za-z0-9_]|$)"
+          "non-runtime consumer depends on the browser helper module")
+      endif()
+    endif()
     _airelinna_assert_no_match(
       "${file}"
       "${contents}"

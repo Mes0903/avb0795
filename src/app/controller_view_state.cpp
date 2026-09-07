@@ -245,6 +245,8 @@ namespace airelinna::app {
         control(context, settings_allowed, capabilities.borderless_resize),
       .replace_hotkey =
         control(context, settings_allowed, capabilities.global_hotkey),
+      .browser_capture_keep_alive = control(
+        context, settings_allowed, capabilities.browser_capture_keep_alive),
     };
     return view;
   }

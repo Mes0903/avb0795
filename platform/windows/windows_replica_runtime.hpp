@@ -20,6 +20,10 @@
 
 namespace airelinna::platform::windows {
 
+  namespace features {
+    class BrowserCaptureKeepAlive;
+  }
+
   class OverlayWindow;
   class WgcCaptureJob;
   class Win32OverlayAdapter;
@@ -53,7 +57,7 @@ namespace airelinna::platform::windows {
     WindowsReplicaRuntime(WindowsReplicaRuntime &&) = delete;
     WindowsReplicaRuntime &operator=(WindowsReplicaRuntime &&) = delete;
 
-    /// Apply native mode/border/geometry transactionally; scheduler commits last.
+    /// Apply native mode/border/geometry/extensions transactionally; settings commit last.
     [[nodiscard]] std::expected<void, core::AppError>
     apply(const core::ReplicaSettings &settings) noexcept override;
     /// Advance bounded capture, rendering, recovery, and drain on the main thread.
@@ -84,7 +88,7 @@ namespace airelinna::platform::windows {
     // WindowsRuntimeFactory can create a ConstructionToken.
     /// Adopt the complete inactive aggregate; only the factory can issue the passkey.
     WindowsReplicaRuntime(
-      ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, core::ReplicaSettings settings, core::Extent allocation, core::CaptureExclusionStatus capture_exclusion, render::WindowsBridgePreference bridge_preference, std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop) noexcept;
+      ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive, core::ReplicaSettings settings, core::Extent allocation, core::CaptureExclusionStatus capture_exclusion, render::WindowsBridgePreference bridge_preference, std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop) noexcept;
 
   private:
     friend class WindowsRuntimeFactory;
@@ -114,6 +118,10 @@ namespace airelinna::platform::windows {
     [[nodiscard]] bool
     cleanup_pending(bool render_cleanup_pending) const noexcept;
     [[nodiscard]] bool cleanup_uncertain() const noexcept;
+    void deactivate_browser_helper(TickCandidates &candidates) noexcept;
+    [[nodiscard]] bool helper_activation_allowed() const noexcept;
+    [[nodiscard]] bool
+    helper_should_activate(const core::ReplicaSettings &settings) const noexcept;
 
     // Declaration order is the stable dependency order. Normal teardown resets
     // these owners in reverse: job, render, adapter, overlay, then source.
@@ -122,6 +130,8 @@ namespace airelinna::platform::windows {
     std::unique_ptr<Win32OverlayAdapter> adapter_;
     std::unique_ptr<render::WindowsRenderStack> render_stack_;
     std::unique_ptr<WgcCaptureJob> capture_job_;
+    // Independent of the overlay/source/GPU chain and retained through its own drain.
+    std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive_;
 
     core::FrameScheduler scheduler_;
     core::ReplicaSettings settings_;
@@ -156,6 +166,7 @@ namespace airelinna::platform::windows {
     bool stop_requested_{};
     bool stopped_{};
     bool published_{};
+    bool helper_activation_ready_{};
     render::RenderTickResult last_render_result_;
     // One timer covers capture, adapter, source wake, and graphics uncertainty.
     detail::RuntimeDrainState drain_state_;

@@ -43,6 +43,11 @@ namespace airelinna::core {
     settings_.fps_cap = fps_cap;
   }
 
+  void ReplicaSession::set_extensions(ExtensionSettings extensions) noexcept
+  {
+    settings_.extensions = extensions;
+  }
+
   std::expected<void, AppError> ReplicaSession::begin_start() noexcept
   {
     const bool allowed =

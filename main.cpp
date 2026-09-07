@@ -42,6 +42,7 @@ namespace {
     .borderless_resize = true,
     .global_hotkey = true,
     .capture_exclusion = true,
+    .browser_capture_keep_alive = true,
   };
 
   /// Print fixed diagnostics/native codes without source titles or pixel data.

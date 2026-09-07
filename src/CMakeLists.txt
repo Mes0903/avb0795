@@ -47,6 +47,7 @@ if(WIN32)
     ${PROJECT_SOURCE_DIR}/platform/windows/capture_exclusion.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/controller_font.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/detail/wgc_capture_state.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/features/browser_capture_keep_alive.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/process_dpi_awareness.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_atomic_replace.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_captured_frame.cpp

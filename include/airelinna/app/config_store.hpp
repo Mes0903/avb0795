@@ -18,6 +18,7 @@ namespace airelinna::app {
                              core::HotkeyKey::R};
     core::FpsCap fps_cap{core::FpsCap::Fps60};
     core::BorderPreference border{core::BorderPreference::Bordered};
+    core::ExtensionSettings extensions{};
 
     friend bool operator==(const UserConfig &, const UserConfig &) = default;
   };

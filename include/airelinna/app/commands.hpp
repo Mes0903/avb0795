@@ -45,6 +45,12 @@ namespace airelinna::app {
     core::FpsCap fps_cap{core::FpsCap::Fps60};
   };
 
+  /// Request an experimental-settings transaction and persist accepted preferences.
+  struct SetExtensions {
+    core::SessionId session_id;
+    core::ExtensionSettings extensions;
+  };
+
   /// Replace the OS binding before committing/persisting this typed desired chord.
   struct ReplaceHotkey {
     core::SessionId session_id;
@@ -60,7 +66,7 @@ namespace airelinna::app {
   /// Value-only command boundary: generation tokens prevent stale session mutations.
   /// No variant alternative carries a native handle, callback or mutable domain reference.
   using AppCommand =
-    std::variant<RefreshSources, SelectSource, Start, Stop, SetMode, SetBorder, SetFps, ReplaceHotkey, RestoreActiveReplicaEditable, Quit>;
+    std::variant<RefreshSources, SelectSource, Start, Stop, SetMode, SetBorder, SetFps, SetExtensions, ReplaceHotkey, RestoreActiveReplicaEditable, Quit>;
 
 }    // namespace airelinna::app
 

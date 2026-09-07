@@ -35,6 +35,7 @@ namespace airelinna::app {
     const auto session_id = state_.current_session_id();
     (void) state_.set_fps(session_id, config_.fps_cap);
     (void) state_.set_border(session_id, config_.border);
+    (void) state_.set_extensions(session_id, config_.extensions);
 
     refresh_sources();
 
@@ -327,6 +328,31 @@ namespace airelinna::app {
       return;
     }
     config_.fps_cap = command.fps_cap;
+    config_dirty_ = true;
+    clear_notice(NoticeOperation::Command);
+    persist_config();
+  }
+
+  void Application::handle(const SetExtensions &command, Clock::time_point now)
+  {
+    if (!validate_session(command.session_id) || !settings_allowed() ||
+        !capabilities_.browser_capture_keep_alive) {
+      reject();
+      return;
+    }
+
+    auto candidate = state_.current_session().settings();
+    candidate.extensions = command.extensions;
+    if (!apply_settings(candidate, now)) {
+      return;
+    }
+    const auto updated =
+      state_.set_extensions(command.session_id, command.extensions);
+    if (!updated) {
+      reject(updated.error());
+      return;
+    }
+    config_.extensions = command.extensions;
     config_dirty_ = true;
     clear_notice(NoticeOperation::Command);
     persist_config();
@@ -691,6 +717,7 @@ namespace airelinna::app {
       replacement.set_mode(pending.settings.mode);
       replacement.set_border(pending.settings.border);
       replacement.set_fps(pending.settings.fps_cap);
+      replacement.set_extensions(pending.settings.extensions);
       // Generation replacement invalidates commands queued from the old view.
       const auto replaced = state_.replace_session(std::move(replacement));
       if (!replaced) {

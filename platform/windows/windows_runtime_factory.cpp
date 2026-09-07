@@ -6,6 +6,7 @@
 
 #include "platform/windows/capture_exclusion.hpp"
 #include "platform/windows/detail/overlay_transactions.hpp"
+#include "platform/windows/features/browser_capture_keep_alive.hpp"
 #include "platform/windows/overlay_window.hpp"
 #include "platform/windows/wgc_capture_job.hpp"
 #include "platform/windows/win32_overlay_adapter.hpp"
@@ -159,11 +160,24 @@ namespace airelinna::platform::windows {
       }
       (*adapter)->update_source_extent(allocation);
 
+      std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive;
+      if (source.kind == core::SourceKind::Window) {
+        browser_keep_alive =
+          std::make_unique<features::BrowserCaptureKeepAlive>();
+        if (settings.extensions.browser_capture_keep_alive) {
+          const auto prepared = browser_keep_alive->prepare_hidden();
+          if (!prepared) {
+            return std::unexpected{factory_error(prepared.error())};
+          }
+        }
+      }
+
       runtime = std::make_unique<WindowsReplicaRuntime>(
         WindowsReplicaRuntime::ConstructionToken{}, std::move(*source_owner),
         std::move(*overlay), std::move(*adapter), std::move(render_stack),
-        std::move(*capture_job), settings, allocation, exclusion,
-        bridge_preference_, capture_pool_buffer_count, wake_main_loop_);
+        std::move(*capture_job), std::move(browser_keep_alive), settings,
+        allocation, exclusion, bridge_preference_, capture_pool_buffer_count,
+        wake_main_loop_);
       // The complete aggregate exists before the last fallible StartCapture operation.
       const auto activated = runtime->activate_for_publication();
       if (!activated) {

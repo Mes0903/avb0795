@@ -6,7 +6,7 @@
 
 ## 命令與 AppCommandQueue
 
-[commands.hpp](../../include/airelinna/app/commands.hpp) 定義十種 `AppCommand` alternatives。[app_command_queue.hpp](../../include/airelinna/app/app_command_queue.hpp)／[app_command_queue.cpp](../../src/app/app_command_queue.cpp) 是沒有 mutex 的主執行緒 FIFO。主執行緒的 UI／host callbacks 可加入 command；WGC background callback 不可使用這個 queue。
+[commands.hpp](../../include/airelinna/app/commands.hpp) 定義十一種 `AppCommand` alternatives。[app_command_queue.hpp](../../include/airelinna/app/app_command_queue.hpp)／[app_command_queue.cpp](../../src/app/app_command_queue.cpp) 是沒有 mutex 的主執行緒 FIFO。主執行緒的 UI／host callbacks 可加入 command；WGC background callback 不可使用這個 queue。
 
 ```mermaid
 sequenceDiagram
@@ -34,6 +34,7 @@ sequenceDiagram
 | `Stop` | 非同步 stop；已在 drain 時取消 pending replacement |
 | `SetMode` | 將 mode transaction 套用 runtime 後更新 domain；不寫 config |
 | `SetBorder`、`SetFps` | 成功套用後更新 domain／config，設定 dirty bit，再嘗試 save |
+| `SetExtensions` | 先讓 runtime 驗證整份 `ReplicaSettings` candidate；接受後更新 domain／config 與 dirty bit，再嘗試 save。checkbox 接受與儲存成功是兩個不同結果 |
 | `ReplaceHotkey` | OS replace 成功後更新 desired chord、confirmed bit 與 config |
 | `RestoreActiveReplicaEditable` | 不帶 SessionId；在處理當下解析目前 runtime，drain 中為 no-op |
 | `Quit` | 關閉 command admission、清除 hotkey，再開始非同步 shutdown |
@@ -73,7 +74,7 @@ flowchart LR
     H -.->|data: replace result| A
 ```
 
-Application 建構時載入 config，套用 FPS／border 到初始 session，列舉來源並嘗試 hotkey registration，再建立第一份 view。它不自動選取來源或開始 capture。controller exclusion 是建構前由 host／platform 提供的 process-scoped 值；overlay exclusion、bridge、drain 是當前 runtime 的 feedback。
+Application 建構時載入 config，套用 FPS／border／extensions 到初始 session，列舉來源並嘗試 hotkey registration，再建立第一份 view。它不自動選取來源或開始 capture。controller exclusion 是建構前由 host／platform 提供的 process-scoped 值；overlay exclusion、bridge、drain 是當前 runtime 的 feedback。
 
 `IReplicaRuntime::apply()`、`tick()`、`request_stop()` 是 no-throw 邊界。`create()`／`enumerate()`／hotkey replace 與 view projection 不全是 `noexcept`；`step()` 包住其執行，遇到未預期例外時保留 runtime，選擇 `AbandonProcess`。這要求 [DesktopHost 與 composition root](desktop-host.md) 接續非展開堆疊的退出路徑，不能因讀到 disposition 就一般解構 Application。
 
@@ -145,20 +146,24 @@ replacement 僅在 Interrupted 且已有 runtime 時接受。它擁有一份 sou
 
 設定 handler 先取得目前 `ReplicaSettings` 的 copy，再只變動目標欄位。若有 runtime，整個 candidate 經 `apply()` 成功才 commit 到 domain；沒有 runtime 的可編輯 Idle／Error 則只更新 portable 值。
 
+Extensions 也遵循這個 accepted-before-save 邊界：runtime 接受後 checkbox 對應的新 preference 立即成為目前值，之後的 config save 是另一個可能失敗的步驟。
+
 | 結果 | Domain／runtime settings | 後續動作 |
 | --- | --- | --- |
-| apply 成功 | commit candidate | mode 到此完成；border／FPS 另更新 config 並 save |
-| ordinary apply failure | 保留舊 domain；port 契約要求 native rollback 已驗證 | 顯示 Settings notice |
-| `RuntimeStateLost` | 不宣稱舊 native settings 仍有效 | Error，清 pending Start，要求 drain |
-| save 失敗 | 已接受的新值繼續有效 | 保留 `config_dirty_` 與 ConfigSave notice |
+| apply 成功 | commit candidate | mode 到此完成；border／FPS／extensions 另更新 config 並 save |
+| ordinary apply failure | 保留已接受的舊值；port 契約要求 native rollback 已驗證 | 顯示 Settings notice |
+| `RuntimeStateLost` | 不宣稱舊 native settings 仍有效 | 進入 Error、清 pending Start，並要求既有的安全 stop／drain |
+| save 失敗 | 已接受的新值繼續有效 | 保留 `config_dirty_` 與 ConfigSave notice，供後續 accepted command 重試 |
 
 `hotkey_binding_confirmed_` 與 desired chord 分開。初始值 false，OS registration／replacement 成功才 true；HotkeyConflict 或 HotkeyCleanupFailure 不改原值，HotkeyRegistrationLost 清為 false，shutdown 也清為 false。當它為 true，confirmed binding 就是目前記憶體內的 `config_.hotkey`。UI 不自行查 OS binding。
 
 Application 只有一個 `PendingNotice{operation, error}`。新 notice 可取代舊 notice；`clear_notice(operation)` 只清除同 operation 的 notice，避免 unrelated success 擦掉目前錯誤。session 的 Error lifecycle 另投影一般失敗文字，並沒有一個偽裝成 per-session 的 native error store。
 
-## ConfigStore：四個 persisted keys
+## ConfigStore：四個必要 keys 與一個 optional extensions object
 
-[config_store.hpp](../../include/airelinna/app/config_store.hpp)／[config_store.cpp](../../src/app/config_store.cpp) 只接受 version 1 的四個 keys：`version`、`hotkey`、`fps_cap`、`border`。預設為 `Ctrl+Alt+R`、60 FPS、Bordered。source、title、pixels、window position 和 mode 不進檔案。
+[config_store.hpp](../../include/airelinna/app/config_store.hpp)／[config_store.cpp](../../src/app/config_store.cpp) 接受 version 1 的四個必要 keys：`version`、`hotkey`、`fps_cap`、`border`，以及 optional 第五個 `extensions` object。Legacy 文件沒有 `extensions` 時，`browser_capture_keep_alive` 採 false，其他四個有效值保持不變。若 `extensions` 存在，它必須是 exact object，只能含有唯一的必要 boolean 成員 `browser_capture_keep_alive`。
+
+任何未知 key、遺漏必要 key、型態錯誤或 malformed value 都使整份文件無效並回 defaults。Serializer 一律寫出第五個 object，但不保證舊版 binary 能 forward-read 新文件。預設為 `Ctrl+Alt+R`、60 FPS、Bordered，extension 關閉。Source ID／title、pixels、window position、mode 與其他 capture 細節都不進檔案。
 
 ```mermaid
 flowchart LR
@@ -167,7 +172,7 @@ flowchart LR
     R -->|I/O failure| E[ConfigReadFailure]
     R -->|yes| P[Read exact size and parse JSON]
     P -->|syntax/schema/version/value invalid| D
-    P -->|valid four keys| C[UserConfig]
+    P -->|valid legacy or extended schema| C[UserConfig]
     S[save accepted config] --> V[Validate version and serialize]
     V --> T[Write sibling .tmp, flush, close]
     T --> A[AtomicReplaceFn]
@@ -202,5 +207,9 @@ flowchart LR
 [controller_view.hpp](../../include/airelinna/ui/controller_view.hpp)／[controller_view.cpp](../../src/ui/controller_view.cpp) 只管理 ImGui widgets 與 hotkey edit buffer。它依 snapshot 的 `ControlState` 畫 disabled controls，使用每次 render 的 `SessionId` 組 command，對 source labels 使用 literal text 與獨立 ImGui ID，因此來源名稱裡的 `##`／`###` 不會被當成 label metadata。
 
 hotkey buffer 在未送出前保留使用者輸入，不會每次 snapshot 更新就覆寫。parser 先阻止語法無效的 Replace command，OS registration 成敗仍由 Application 處理。command 送出後 buffer reset；介面顯示的 binding confirmed／unconfirmed 取自 snapshot，不從編輯文字推測。
+
+Browser capture keep-alive 控制項在 capability unsupported 時必須停用並顯示原因。Idle、Interrupted 與 Display capture／source 都可以編輯 preference。Display 絕不啟動 helper module，只有 capture scope 為 `Window` 時才可能啟用它（Window captures only）。
+
+說明 marker 畫在 disabled box 外，停用 checkbox 時仍可查看功能說明 tooltip。Disabled explanation 另行顯示。Checkbox 已接受只證明 preference 已進入目前 settings，不證明 browser 已恢復產生新 frames。
 
 本頁的圖與說明描述目前 C++ 控制／資料／所有權邊界；實際視窗互動、擷取及 GPU 路徑仍需要相應的 [驗證 gates](build-and-validation.md)。

@@ -41,6 +41,9 @@ namespace airelinna::core {
     /// Commit an accepted render-cap value without configuring a scheduler directly.
     [[nodiscard]] std::expected<void, AppError> set_fps(SessionId session_id,
                                                         FpsCap fps_cap) noexcept;
+    /// Commit accepted experimental preferences without invoking a backend.
+    [[nodiscard]] std::expected<void, AppError>
+    set_extensions(SessionId session_id, ExtensionSettings extensions) noexcept;
 
     /// Validate generation and enter Starting from a selected Idle/Error session.
     [[nodiscard]] std::expected<void, AppError>

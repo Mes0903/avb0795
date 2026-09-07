@@ -176,6 +176,38 @@ namespace airelinna::ui {
             app::SetBorder{state.session_id,
                            core::BorderPreference::Borderless});
 
+    ImGui::SeparatorText("Extensions");
+    // Edit a fresh value snapshot each frame; only an accepted command updates
+    // the next projected checkbox state.
+    auto extensions = state.settings.extensions;
+    const auto &extension_control = state.controls.browser_capture_keep_alive;
+    ImGui::BeginDisabled(!extension_control.enabled);
+    const bool extension_changed = ImGui::Checkbox(
+      "Browser capture keep-alive (experimental)",
+      &extensions.browser_capture_keep_alive);
+    ImGui::EndDisabled();
+    // Keep the help marker outside the disabled block so it remains hoverable.
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort |
+                             ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::BeginTooltip();
+      ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0F);
+      ImGui::TextUnformatted(
+        "Attempts to keep covered browser windows rendering during window capture. "
+        "May also affect other browser windows and increase CPU/GPU usage and power "
+        "consumption. Does not change browser settings. Minimized windows, inactive "
+        "tabs, protected video, and locked or sleeping displays are not guaranteed. "
+        "Browser recovery after disabling is best-effort. Experimental: browser "
+        "updates may break this workaround.");
+      ImGui::PopTextWrapPos();
+      ImGui::EndTooltip();
+    }
+    disabled_explanation(extension_control);
+    text(state.extensions_scope_text);
+    emit_if(extension_changed, command_sink,
+            app::SetExtensions{state.session_id, extensions});
+
     ImGui::SeparatorText("Hotkey");
     // Preserve an unfinished edit across app snapshots. Its text is not proof
     // that the OS accepted a binding; the separate confirmed flag is authoritative.

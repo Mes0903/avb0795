@@ -101,17 +101,48 @@ namespace airelinna::app {
 
     // Reject extra keys as well as omissions: the persistence boundary excludes
     // source identities, titles, pixel data, window geometry and session mode.
+    // `extensions` is an optional V1 object for legacy default-off documents;
+    // old binaries are not promised forward reads of newer V1 documents.
     [[nodiscard]] bool has_exact_keys(const nlohmann::json &document)
     {
-      return document.is_object() && document.size() == 4 &&
+      if (!document.is_object()) {
+        return false;
+      }
+
+      const auto expected_size = document.contains("extensions") ? 5U : 4U;
+      return document.size() == expected_size &&
              document.contains("version") && document.contains("hotkey") &&
              document.contains("fps_cap") && document.contains("border");
+    }
+
+    [[nodiscard]] std::optional<core::ExtensionSettings>
+    parse_extensions(const nlohmann::json &document)
+    {
+      if (!document.contains("extensions")) {
+        return core::ExtensionSettings{};
+      }
+
+      const auto &extensions = document.at("extensions");
+      if (!extensions.is_object() || extensions.size() != 1 ||
+          !extensions.contains("browser_capture_keep_alive") ||
+          !extensions.at("browser_capture_keep_alive").is_boolean()) {
+        return std::nullopt;
+      }
+
+      return core::ExtensionSettings{
+        .browser_capture_keep_alive =
+          extensions.at("browser_capture_keep_alive").get<bool>()};
     }
 
     [[nodiscard]] std::optional<UserConfig>
     parse_config(const nlohmann::json &document)
     {
-      if (!has_exact_keys(document) ||
+      if (!has_exact_keys(document)) {
+        return std::nullopt;
+      }
+
+      const auto extensions = parse_extensions(document);
+      if (!extensions ||
           !document.at("version").is_number_integer() ||
           !document.at("hotkey").is_string() ||
           !document.at("fps_cap").is_string() ||
@@ -138,7 +169,8 @@ namespace airelinna::app {
       return UserConfig{.version = config_version,
                         .hotkey = *hotkey,
                         .fps_cap = *fps_cap,
-                        .border = *border};
+                        .border = *border,
+                        .extensions = *extensions};
     }
 
     [[nodiscard]] nlohmann::json serialize_config(const UserConfig &config)
@@ -146,7 +178,10 @@ namespace airelinna::app {
       return nlohmann::json{{"version", config.version},
                             {"hotkey", core::serialize_hotkey_chord(config.hotkey)},
                             {"fps_cap", serialize_fps_cap(config.fps_cap)},
-                            {"border", serialize_border(config.border)}};
+                            {"border", serialize_border(config.border)},
+                            {"extensions",
+                             {{"browser_capture_keep_alive",
+                               config.extensions.browser_capture_keep_alive}}}};
     }
 
   }    // namespace

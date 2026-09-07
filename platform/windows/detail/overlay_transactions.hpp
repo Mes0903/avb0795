@@ -215,7 +215,7 @@ namespace airelinna::platform::windows::detail {
     return {};
   }
 
-  /// Apply mode/border/geometry as one transaction and commit scheduler settings last.
+  /// Apply mode/border/geometry/extensions as one transaction and commit settings last.
   template <class Operations>
   [[nodiscard]] std::expected<void, core::AppError>
   apply_settings_transaction(Operations &operations) noexcept
@@ -230,6 +230,7 @@ namespace airelinna::platform::windows::detail {
       }
       const auto applied = operations.apply_mode() && operations.apply_border() &&
                            operations.apply_geometry() &&
+                           operations.apply_extensions() &&
                            operations.verify_applied();
       if (applied) {
         operations.commit_scheduler();

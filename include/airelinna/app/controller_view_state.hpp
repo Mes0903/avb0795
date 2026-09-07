@@ -65,6 +65,7 @@ namespace airelinna::app {
     ControlState bordered;
     ControlState borderless;
     ControlState replace_hotkey;
+    ControlState browser_capture_keep_alive;
   };
 
   /// Value snapshot borrowed as const by UI; it contains no runtime/service/native access.
@@ -85,6 +86,7 @@ namespace airelinna::app {
     std::optional<std::string_view> controller_exclusion_warning;
     std::optional<std::string_view> overlay_exclusion_warning;
     std::optional<std::string_view> drain_warning;
+    std::string_view extensions_scope_text{"Window captures only"};
     ControllerControls controls;
   };
 

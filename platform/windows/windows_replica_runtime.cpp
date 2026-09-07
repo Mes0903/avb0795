@@ -4,6 +4,7 @@
 
 #include "platform/windows/windows_replica_runtime.hpp"
 
+#include "platform/windows/features/browser_capture_keep_alive.hpp"
 #include "platform/windows/overlay_window.hpp"
 #include "platform/windows/wgc_capture_job.hpp"
 #include "platform/windows/win32_overlay_adapter.hpp"
@@ -63,7 +64,10 @@ namespace airelinna::platform::windows {
 
   // Bind concrete owners to the small transaction algorithm without exposing another port.
   struct WindowsReplicaRuntime::SettingsOperations final {
-    using Snapshot = core::ReplicaSettings;
+    struct Snapshot final {
+      core::ReplicaSettings settings;
+      bool helper_active{};
+    };
 
     WindowsReplicaRuntime &owner;
     core::ReplicaSettings requested;
@@ -71,9 +75,17 @@ namespace airelinna::platform::windows {
     std::optional<OverlayClientGeometry> geometry;
     bool border_changed{};
 
-    [[nodiscard]] std::optional<Snapshot> snapshot() const noexcept
+    [[nodiscard]] std::optional<Snapshot> snapshot() const
     {
-      return owner.settings_;
+      if (!owner.browser_keep_alive_) {
+        return Snapshot{.settings = owner.settings_};
+      }
+      const auto helper_active = owner.browser_keep_alive_->snapshot_active();
+      if (!helper_active) {
+        throw helper_active.error();
+      }
+      return Snapshot{.settings = owner.settings_,
+                      .helper_active = *helper_active};
     }
 
     [[nodiscard]] bool apply_mode()
@@ -124,21 +136,49 @@ namespace airelinna::platform::windows {
       return restored.has_value();
     }
 
+    [[nodiscard]] bool apply_extensions()
+    {
+      if (!owner.browser_keep_alive_) {
+        return true;
+      }
+      const auto changed = owner.helper_activation_allowed()
+                             ? owner.browser_keep_alive_->set_active(
+                                 requested.extensions.browser_capture_keep_alive)
+                             : owner.browser_keep_alive_->deactivate();
+      if (!changed &&
+          changed.error().code == core::AppErrorCode::RuntimeStateLost) {
+        throw changed.error();
+      }
+      return changed.has_value();
+    }
+
     [[nodiscard]] bool verify_applied() const noexcept
     {
+      const bool helper_matches =
+        !owner.browser_keep_alive_ ||
+        owner.browser_keep_alive_->matches_active(
+          owner.helper_should_activate(requested));
       return owner.adapter_->mode() == requested.mode &&
              owner.adapter_->border_preference() == requested.border &&
-             owner.overlay_->border_matches(requested.border);
+             owner.overlay_->border_matches(requested.border) && helper_matches;
     }
 
     [[nodiscard]] bool rollback(const Snapshot &snapshot) noexcept
     {
       bool restored{true};
-      const auto mode = owner.adapter_->set_mode(snapshot.mode);
+      if (owner.browser_keep_alive_) {
+        const bool allowed = owner.helper_activation_allowed();
+        const bool restore_active = snapshot.helper_active && allowed;
+        const auto helper = allowed
+                              ? owner.browser_keep_alive_->set_active(restore_active)
+                              : owner.browser_keep_alive_->deactivate();
+        restored = restored && helper.has_value();
+      }
+      const auto mode = owner.adapter_->set_mode(snapshot.settings.mode);
       restored = restored && mode.has_value();
-      const auto border = owner.overlay_->set_border(snapshot.border);
+      const auto border = owner.overlay_->set_border(snapshot.settings.border);
       restored = restored && border.has_value();
-      owner.adapter_->set_border_preference(snapshot.border);
+      owner.adapter_->set_border_preference(snapshot.settings.border);
       if (geometry) {
         const auto position = owner.adapter_->restore_client_geometry(*geometry);
         restored = restored && position.has_value();
@@ -149,11 +189,19 @@ namespace airelinna::platform::windows {
     [[nodiscard]] bool verify_rollback(const Snapshot &snapshot) const noexcept
     {
       const bool native_settings_match =
-        owner.adapter_->mode() == snapshot.mode &&
-        owner.adapter_->border_preference() == snapshot.border &&
-        owner.overlay_->border_matches(snapshot.border);
+        owner.adapter_->mode() == snapshot.settings.mode &&
+        owner.adapter_->border_preference() == snapshot.settings.border &&
+        owner.overlay_->border_matches(snapshot.settings.border);
+      const bool original_helper_is_eligible =
+        !snapshot.helper_active ||
+        owner.helper_should_activate(snapshot.settings);
+      const bool helper_matches =
+        owner.browser_keep_alive_
+          ? owner.browser_keep_alive_->matches_active(snapshot.helper_active)
+          : !snapshot.helper_active;
       return native_settings_match &&
-             (!geometry || owner.adapter_->client_geometry_matches(*geometry));
+             (!geometry || owner.adapter_->client_geometry_matches(*geometry)) &&
+             original_helper_is_eligible && helper_matches;
     }
 
     // FPS scheduling/in-memory settings change only after native settings have verified.
@@ -165,8 +213,8 @@ namespace airelinna::platform::windows {
   };
 
   WindowsReplicaRuntime::WindowsReplicaRuntime(
-    ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, const core::ReplicaSettings settings, const core::Extent allocation, const core::CaptureExclusionStatus capture_exclusion, const render::WindowsBridgePreference bridge_preference, const std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop) noexcept
-      : source_{std::move(source)}, overlay_{std::move(overlay)}, adapter_{std::move(adapter)}, render_stack_{std::move(render_stack)}, capture_job_{std::move(capture_job)}, scheduler_{settings.fps_cap, Clock::now()}, settings_{settings}, allocation_{allocation}, bridge_preference_{bridge_preference}, pool_buffer_count_{pool_buffer_count}, wake_main_loop_{std::move(wake_main_loop)}, initial_capture_exclusion_{capture_exclusion} {}
+    ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive, const core::ReplicaSettings settings, const core::Extent allocation, const core::CaptureExclusionStatus capture_exclusion, const render::WindowsBridgePreference bridge_preference, const std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop) noexcept
+      : source_{std::move(source)}, overlay_{std::move(overlay)}, adapter_{std::move(adapter)}, render_stack_{std::move(render_stack)}, capture_job_{std::move(capture_job)}, browser_keep_alive_{std::move(browser_keep_alive)}, scheduler_{settings.fps_cap, Clock::now()}, settings_{settings}, allocation_{allocation}, bridge_preference_{bridge_preference}, pool_buffer_count_{pool_buffer_count}, wake_main_loop_{std::move(wake_main_loop)}, initial_capture_exclusion_{capture_exclusion} {}
 
   WindowsReplicaRuntime::~WindowsReplicaRuntime() noexcept
   {
@@ -241,6 +289,41 @@ namespace airelinna::platform::windows {
     return detail::apply_settings_transaction(operations);
   }
 
+  bool WindowsReplicaRuntime::helper_activation_allowed() const noexcept
+  {
+    return features::detail::helper_should_be_active({
+      .requested = true,
+      .window_capture = browser_keep_alive_ != nullptr,
+      .published_tick_ready = published_ && helper_activation_ready_,
+      .source_connected =
+        source_ && !source_->is_closed() && !source_disconnected_,
+      .stopping_or_terminal =
+        stop_requested_ || stopped_ || pending_failed_event_.has_value() ||
+        pending_overlay_close_event_ ||
+        (overlay_ && overlay_->close_requested()),
+    });
+  }
+
+  bool WindowsReplicaRuntime::helper_should_activate(
+    const core::ReplicaSettings &settings) const noexcept
+  {
+    return settings.extensions.browser_capture_keep_alive &&
+           helper_activation_allowed();
+  }
+
+  void WindowsReplicaRuntime::deactivate_browser_helper(
+    TickCandidates &candidates) noexcept
+  {
+    if (!browser_keep_alive_) {
+      return;
+    }
+    const auto hidden = browser_keep_alive_->deactivate();
+    if (!hidden) {
+      candidates.failed = runtime_state_error(hidden.error().native_detail);
+      pending_failed_event_ = candidates.failed;
+    }
+  }
+
   // Stop is initiation only; later ticks retain each owner until its users are proven safe.
   void WindowsReplicaRuntime::request_stop() noexcept
   {
@@ -248,6 +331,9 @@ namespace airelinna::platform::windows {
       return;
     }
     stop_requested_ = true;
+    if (browser_keep_alive_) {
+      browser_keep_alive_->request_stop();
+    }
     reconfiguration_phase_ = detail::SourceReconfigurationPhase::Inactive;
     pending_allocation_.reset();
     if (source_) {
@@ -369,6 +455,7 @@ namespace airelinna::platform::windows {
             candidates.source_lost = true;
             pending_source_lost_event_ = true;
           }
+          deactivate_browser_helper(candidates);
         }
         begin_source_job_stop();
         return;
@@ -503,6 +590,15 @@ namespace airelinna::platform::windows {
   void WindowsReplicaRuntime::progress_device_recovery(
     const Clock::time_point now, const render::RenderTickResult &render_result, TickCandidates &candidates, render::DrainProgress &progress, std::optional<Clock::time_point> &deadline)
   {
+    if (!stop_requested_ && source_ && source_->is_closed()) {
+      source_disconnected_ = true;
+      if (!source_lost_published_) {
+        candidates.source_lost = true;
+        pending_source_lost_event_ = true;
+      }
+      deactivate_browser_helper(candidates);
+      begin_source_job_stop();
+    }
     if (device_recovery_phase_ == DeviceRecoveryPhase::Draining) {
       if (capture_job_ && capture_job_->cleanup_failure()) {
         candidates.failed =
@@ -575,7 +671,13 @@ namespace airelinna::platform::windows {
       source_.reset();
       progress = render::DrainProgress::ProvenSafeRelease;
     }
-    if (!source_ && !overlay_ && !adapter_ && !render_stack_ && !capture_job_) {
+    if (browser_keep_alive_ && !browser_keep_alive_->cleanup_pending() &&
+        !browser_keep_alive_->cleanup_uncertain()) {
+      browser_keep_alive_.reset();
+      progress = render::DrainProgress::ProvenSafeRelease;
+    }
+    if (!source_ && !overlay_ && !adapter_ && !render_stack_ && !capture_job_ &&
+        !browser_keep_alive_) {
       stopped_ = true;
       candidates.stopped = true;
     }
@@ -595,8 +697,9 @@ namespace airelinna::platform::windows {
 
   bool WindowsReplicaRuntime::cleanup_uncertain() const noexcept
   {
-    return capture_job_ &&
-           detail::capture_cleanup_is_uncertain(capture_job_->cleanup_failure());
+    return (capture_job_ && detail::capture_cleanup_is_uncertain(
+                              capture_job_->cleanup_failure())) ||
+           (browser_keep_alive_ && browser_keep_alive_->cleanup_uncertain());
   }
 
   void WindowsReplicaRuntime::add_runtime_events(
@@ -674,11 +777,12 @@ namespace airelinna::platform::windows {
 
       if (!stop_requested_ && capture_facts.source_closed) {
         source_disconnected_ = true;
-        begin_source_job_stop();
         if (!source_lost_published_) {
           candidates.source_lost = true;
           pending_source_lost_event_ = true;
         }
+        deactivate_browser_helper(candidates);
+        begin_source_job_stop();
       }
       if (!stop_requested_ && capture_facts.capture_failed) {
         candidates.failed = runtime_state_error(
@@ -686,6 +790,7 @@ namespace airelinna::platform::windows {
             ? std::nullopt
             : std::optional{capture_signals.fatal.native_detail});
         pending_failed_event_ = candidates.failed;
+        deactivate_browser_helper(candidates);
         begin_source_job_stop();
       }
       if (!stop_requested_ && !source_disconnected_ &&
@@ -699,6 +804,7 @@ namespace airelinna::platform::windows {
         if (!begun) {
           candidates.failed = runtime_state_error(begun.error().native_detail);
           pending_failed_event_ = candidates.failed;
+          deactivate_browser_helper(candidates);
           begin_source_job_stop();
         }
         else {
@@ -801,6 +907,7 @@ namespace airelinna::platform::windows {
           candidates.failed =
             runtime_state_error(render_result.terminal_error->native_detail);
           pending_failed_event_ = candidates.failed;
+          deactivate_browser_helper(candidates);
         }
       }
 
@@ -808,6 +915,7 @@ namespace airelinna::platform::windows {
           !overlay_close_published_) {
         candidates.overlay_close = true;
         pending_overlay_close_event_ = true;
+        deactivate_browser_helper(candidates);
       }
 
       if (!stop_requested_ &&
@@ -832,6 +940,30 @@ namespace airelinna::platform::windows {
           source_job_stopping_ = false;
           progress = render::DrainProgress::ProvenSafeRelease;
         }
+      }
+      if (!stop_requested_) {
+        helper_activation_ready_ = true;
+        if (browser_keep_alive_) {
+          const bool allowed = helper_activation_allowed() &&
+                               !candidates.failed && !candidates.source_lost &&
+                               !candidates.overlay_close;
+          const auto activated =
+            allowed ? browser_keep_alive_->set_active(
+                        settings_.extensions.browser_capture_keep_alive)
+                    : browser_keep_alive_->deactivate();
+          if (!activated) {
+            candidates.failed =
+              runtime_state_error(activated.error().native_detail);
+            pending_failed_event_ = candidates.failed;
+            deactivate_browser_helper(candidates);
+          }
+        }
+      }
+      if (stop_requested_ && browser_keep_alive_) {
+        if (browser_keep_alive_->progress_stop(now)) {
+          progress = render::DrainProgress::TrackedRetirement;
+        }
+        earlier_deadline(deadline, browser_keep_alive_->next_wake());
       }
       if (stop_requested_) {
         progress_stop(render_result, candidates, progress);
@@ -891,6 +1023,9 @@ namespace airelinna::platform::windows {
     } catch (...) {
       // Discard a partial event batch and retain all owners after an unexpected exception.
       result = {};
+      if (browser_keep_alive_) {
+        browser_keep_alive_->request_stop();
+      }
       const auto exception = detail::observe_runtime_exception(
         drain_state_,
         stop_requested_ ? detail::RuntimeExceptionPhase::Stopping

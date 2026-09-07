@@ -105,6 +105,8 @@ namespace airelinna::app {
                 std::chrono::steady_clock::time_point now);
     void handle(const SetFps &command,
                 std::chrono::steady_clock::time_point now);
+    void handle(const SetExtensions &command,
+                std::chrono::steady_clock::time_point now);
     void handle(const ReplaceHotkey &command,
                 std::chrono::steady_clock::time_point now);
     void handle(const RestoreActiveReplicaEditable &command,

@@ -18,6 +18,8 @@ flowchart TD
     Runtime -->|owns| Adapter[Win32OverlayAdapter]
     Runtime -->|owns| Render[WindowsRenderStack]
     Runtime -->|owns| Job[WgcCaptureJob]
+    Runtime -->|owns unique_ptr| Helper[BrowserCaptureKeepAlive]
+    Helper -->|owns after preparation| HelperWindow[One helper window class and HWND]
     Adapter -.->|borrows HWND| Overlay
     Render -.->|surface requires window lifetime| Overlay
     Job -.->|borrows stable source| Source
@@ -31,8 +33,13 @@ flowchart TD
 | `TickCandidates` | runtime implementation | 暫存同一次 tick 的 native facts，沒有 domain mutation |
 | `SettingsOperations` | runtime implementation | 將具體 overlay/adapter/scheduler 操作接到 transaction algorithm |
 | Runtime value policies | [windows_runtime_policy.hpp](../../platform/windows/detail/windows_runtime_policy.hpp) | Bridge/recovery event coalescing、reconfigure 下一步、aggregate drain observation |
+| `BrowserCaptureKeepAlive` | [header](../../platform/windows/features/browser_capture_keep_alive.hpp)、[implementation](../../platform/windows/features/browser_capture_keep_alive.cpp)、[policy](../../platform/windows/features/detail/browser_capture_keep_alive_policy.hpp) | 擁有一個 module-local window class／hidden HWND，並管理啟用、隱藏與 grace retirement；不借用 source、overlay 或 graphics owner |
 
-Runtime 的 member declaration order 依 dependency 排列：source、overlay、adapter、render、job。正常 teardown 仍由 explicit progress 邏輯控制；「C++ 會反向解構」本身不能證明 callback 或 GPU 已停止引用資源。Published runtime 若尚未安全 stopped 就被解構，會 fail fast，避免一般 stack unwinding 釋放仍有 native users 的 owner。
+Runtime 的 member declaration order 依 dependency 排列：source、overlay、adapter、render、job 與獨立 helper branch。正常 teardown 仍由 explicit progress 邏輯控制；「C++ 會反向解構」本身不能證明 callback 或 GPU 已停止引用資源。Published runtime 若尚未安全 stopped 就被解構，會 fail fast，避免一般 stack unwinding 釋放仍有 native users 的 owner。
+
+每個 Window-scope runtime 都透過 `unique_ptr` 持有一個具體 `BrowserCaptureKeepAlive` object，即使 preference 關閉也是如此。只有設定明確要求時才配置其 Win32 class／HWND。Display-scope runtime 的 helper pointer 為 null，且不會建立或啟動 module。
+
+這條 helper ownership branch 與 source、overlay、WGC、D3 及 Vulkan chain 互不借用，feature object 也不保存 source pointer。Runtime consume native capture／lifecycle facts 並決定 helper eligibility。Application 仍是 portable lifecycle 的唯一 arbiter。
 
 ### Factory 的 publication 與失敗 unwind
 
@@ -66,7 +73,30 @@ sequenceDiagram
     end
 ```
 
-StartCapture 是 publication 路徑最後的 fallible native operation。成功後 frame admission open、source runtime wake binding activation，以及 runtime ownership transfer 都走 no-throw 路徑。失敗時 source 的 registry observation 仍可記錄 closure，但尚未發佈的 source/job 不會向 host 發出最後一次 runtime wake。Capture 的詳細條件見 [publication 章節](windows-capture.md#2-publication-前後的-wake-邊界)。
+Factory 只在 Window-scope settings 要求 extension 時，於 StartCapture 之前 prepare hidden helper。未發佈的 runtime 絕不送出 SHOW。
+
+StartCapture 是 publication 路徑最後的 fallible native operation。成功後 frame admission open、source runtime wake binding activation，以及 runtime ownership transfer 都走 no-throw 路徑。失敗時 source 的 registry observation 仍可記錄 closure，但尚未發佈的 source/job 不會向 host 發出最後一次 runtime wake。
+
+第一個 eligible published tick 會先 consume 已知的 source loss、fatal 與 close facts，再決定是否啟用 helper。Capture 的詳細條件見 [publication 章節](windows-capture.md#2-publication-前後的-wake-邊界)。
+
+```mermaid
+sequenceDiagram
+    participant F as Factory
+    participant R as Windows runtime
+    participant H as Helper module
+    participant B as Browser
+    F->>H: Prepare hidden, only if requested
+    F->>R: Final WGC activation and publication
+    R->>R: First tick consumes stop/loss/fatal facts
+    R->>H: Activate only when eligible
+    H-->>B: SHOW event, asynchronous
+    R->>H: Disable or source loss
+    H-->>B: HIDE event, asynchronous
+    H->>H: Retain valid hidden HWND and class
+    R->>H: Runtime stop, retire after grace
+    H->>H: Verified local resource release
+    Note over H,B: Local cleanup is not browser acknowledgement
+```
 
 ## 2. 一次 tick 做什麼
 
@@ -110,7 +140,12 @@ Resource generation 是 stable runtime 的單調 counter。Rebuild 出來的 sta
 
 ```mermaid
 flowchart TD
-    Stop[request_stop] -->|control: reject runtime wake| SourceStop[Source stop and unbind]
+    Stop[request_stop latch] -->|control: begin helper stop first| HelperStop[Helper stop latch and HIDE]
+    HelperStop -->|independent progress| HelperProof[Grace or never-shown local proof]
+    HelperProof -->|checked DestroyWindow then UnregisterClass| ReleaseHelper[Release helper owners]
+    HelperProof -->|still pending| HelperPoll[Bounded helper observation]
+    HelperPoll -->|later tick, without waiting for GPU| HelperProof
+    HelperStop -->|control: reject runtime wake| SourceStop[Source stop and unbind]
     SourceStop -->|control: close admission and mailbox| JobStop[Job revoke and session Close]
     JobStop -->|control| RenderDrain[Begin render drain]
     RenderDrain -->|future ticks| Proof[Callback and native cleanup plus render retirement]
@@ -121,20 +156,24 @@ flowchart TD
     Detach -->|uncertain binding| DestroyWindow[Destroy overlay while adapter lives]
     DestroyWindow -->|WM_NCDESTROY clears binding| ReleaseWindow
     ReleaseWindow -->|source wake quiescent| ReleaseSource[Release stable source lease]
-    ReleaseSource -->|all owners empty| Stopped[Emit sole Stopped lifecycle event]
+    ReleaseSource --> Owners{"All owners empty, including helper?"}
+    ReleaseHelper --> Owners
+    Owners -->|yes| Stopped[Emit sole Stopped lifecycle event]
     Proof -->|still pending| Poll[Bounded next deadline and drain status]
     Poll -->|control: later tick| Proof
 ```
 
-`request_stop()` 只啟動 stop，不同步等待 callback、D3、Vulkan 或 presentation completion。`progress_stop()` 會分別檢查 capture job 的內部 stop proof 與 render drain proof；job/pool 安全後，才輪到 render stack、adapter/window，最後是 source wake state/lease。
+`request_stop()` 只啟動 stop，不同步等待 callback、D3、Vulkan、presentation 或 browser behavior。Helper stop 在 GPU drain 之前開始，之後沿獨立 branch 前進，不等待 GPU proof。`progress_stop()` 同時檢查 helper 的 local proof、capture job 的內部 stop proof 與 render drain proof。
+
+job/pool 安全後，才輪到 render stack、adapter/window，最後是 source wake state/lease。Helper 則以 checked `DestroyWindow` 後 `UnregisterClass` 的順序完成 native release。只有包括 helper 在內的所有 owners 都空了，runtime 才能發出 `Stopped`。Final source release 本身不能單獨授權 `Stopped`。
 
 Adapter detach failure 有具體 fallback：runtime 保留 adapter/thunk，destroy GLFW overlay，使原始 WndProc 收到 forwarded `WM_NCDESTROY`，再完成 adapter 清理。這不是忽略失敗或把已知可能存活的 callback pointer 直接釋放。
 
-`RuntimeDrainState` 的同一個 no-progress clock 涵蓋 callback/job cleanup、source wake、adapter 與 graphics ownership。Polling、retry 或 warning edge 不代表 forward progress；只有 tracked retirement／proven safe release 才能重設時鐘。`Stalled` 只回報無進展，沒有賦予 destroy permission。
+`RuntimeDrainState` 的同一個 no-progress clock 涵蓋 helper uncertainty、callback/job cleanup、source wake、adapter 與 graphics ownership。Polling、retry 或 warning edge 不代表 forward progress；只有 tracked retirement／proven safe release 才能重設時鐘。`Stalled` 只回報無進展，沒有賦予 destroy permission。
 
 正常 runtime 只有 owners 全空後才發出 `Stopped`。Application 接到這項證明後才釋放 published runtime。遇到 stalled shutdown 的 process-abandon 選擇，以及獨立 controller renderer 的 retirement，分別見 [application/UI](application-ui.md) 與 [DesktopHost](desktop-host.md)。
 
-Tick 的 catch firewall 會丟棄 partial event batch，保留 owner 並排定 bounded drain observation。停止前可回報 failure；停止後不再引入 pre-stop lifecycle failure，只維持既有 drain observation/status 路徑。
+Tick 的 catch firewall 會停止 helper、丟棄 partial event batch、保留 owner 並排定 bounded drain observation。停止前可回報 failure；停止後不再引入 pre-stop lifecycle failure，只維持既有 drain observation/status 路徑。
 
 ## 5. OverlayWindow 與 Win32OverlayAdapter 的分工
 
@@ -151,6 +190,20 @@ flowchart LR
     Subclass -->|control: unhandled or failed operation| Saved[Saved GLFW WndProc]
     Adapter -->|control: verified style transaction| Styles[Extended style and layered attributes]
 ```
+
+`SettingsOperations` 先 snapshot 實際 native activity，不以 config preference 猜測 helper 是否 active。接著依序套用 mode、border、geometry 與 extensions，全部讀回驗證後才 commit candidate。
+
+若 transaction 途中或 rollback 時新狀態已不 eligible，helper deactivation 是 one-way。Sticky source closure 後不會為了還原舊 settings 再送 SHOW。若原本確實 active 的狀態無法恢復並驗證，transaction 回報 `RuntimeStateLost`，由 Application 走既有的安全 stop／drain。
+
+### Browser keep-alive 的隱藏與 retirement
+
+Live disable 或 source loss 都送出 HIDE，但保留一個有效的 hidden HWND 與已註冊 class，讓相同 runtime 仍可接受後續 eligible settings。Runtime stop 的 250 ms grace 從實際 native HIDE 完成且讀回 hidden 之後才開始計時。重複觀察到已知 hidden 不會重設計時。從未 SHOW 的 helper 可立即 retire。
+
+這些都是本地 window lifecycle proof，不承諾 browser 已收到、處理或確認任何事件。
+
+初始實驗刻意不加入 automatic reassert hook、global WinEvent listener、busy SHOW loop 或 browser-state service。真實 taskbar／Alt+Tab 操作仍可能清掉 browser exception。若 Task 7 的 acceptance experiment 失敗，應先記錄結果，再設計有界且 module-local 的 response，不在本次工作預先實作。
+
+現有 build、policy tests 與 headless source-boundary scan 不證明 browser behavior 或 recovery。Task 7 仍需另行授權的真實 UI／browser 實驗。
 
 ### Pass-through 不是只有 hit-test return code
 
