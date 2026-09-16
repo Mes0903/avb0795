@@ -1,0 +1,22 @@
+From: avb0795 project
+Subject: [PATCH] ALTERED SOURCE: export temporary text from its active editor
+
+Drag/slider widgets share an ID between text input and later pointer/keyboard
+tweaks. The text undo state survives deactivation. Gate the deactivation export
+on the active temporary editor so ending a later tweak preserves its value.
+
+---
+diff --git a/imgui_widgets.cpp b/imgui_widgets.cpp
+--- a/imgui_widgets.cpp
++++ b/imgui_widgets.cpp
+@@ -4605,6 +4605,10 @@ void ImGui::InputTextDeactivateHook(ImGuiID id)
+         return;
+     if (!state->EditedBefore)
+         return;
++    // ALTERED SOURCE: a scalar can reuse this ID for a later non-text gesture.
++    // Export temporary text only while its editor owns the active interaction.
++    if ((state->Flags & ImGuiInputTextFlags_TempInput) && g.TempInputId != id)
++        return;
+     //IMGUI_DEBUG_LOG_ACTIVEID("InputTextDeactivateHook() id = 0x%08X\n", id);
+     g.InputTextDeactivatedState.ID = state->ID;
+     g.InputTextDeactivatedState.ElapseFrame = g.FrameCount + 1;

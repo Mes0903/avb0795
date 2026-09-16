@@ -1,3 +1,7 @@
+# Populate pinned dependency sources and expose only the targets used below.
+# Archive hashes constrain downloaded inputs; Windows patch verification also
+# checks the populated sources, including local source overrides that can bypass
+# FetchContent's download/patch step. This is build setup, not runtime updating.
 include(FetchContent)
 
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
@@ -10,16 +14,19 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
-set(imgui_patch_arguments)
+# Scalar text and subsequent drag gestures share an ID. The common widgets patch
+# ties text export to the active editor on every UI platform. Windows additionally
+# uses the Vulkan backend patch to preserve ownership after native failures.
+find_package(Git REQUIRED)
+# FetchContent archives are source trees rather than Git worktrees. Bound Git's
+# discovery above each archive so an enclosing checkout cannot filter patches by
+# its current-directory prefix. Patch files and patched sources use LF regardless
+# of the developer's global Git line-ending configuration.
+set(imgui_patch_files
+  "${PROJECT_SOURCE_DIR}/third_party/patches/imgui-1.92.9-active-temp-input.patch")
 if(WIN32)
-  find_package(Git REQUIRED)
-  set(imgui_patch_arguments
-    PATCH_COMMAND
-      "${CMAKE_COMMAND}" -E chdir "${PROJECT_SOURCE_DIR}"
-      "${GIT_EXECUTABLE}" apply --verbose --unsafe-paths
-      "--directory=<SOURCE_DIR>"
-      "${PROJECT_SOURCE_DIR}/third_party/patches/imgui-1.92.9-vulkan-safe-failure.patch"
-  )
+  list(APPEND imgui_patch_files
+    "${PROJECT_SOURCE_DIR}/third_party/patches/imgui-1.92.9-vulkan-safe-failure.patch")
 endif()
 
 FetchContent_Declare(
@@ -27,11 +34,23 @@ FetchContent_Declare(
   URL https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9.tar.gz
   URL_HASH SHA256=af97ed649182c39314320514a672b82008ab462b9293fe23d37b30bfa5d05519
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  ${imgui_patch_arguments}
+  PATCH_COMMAND
+    "${CMAKE_COMMAND}" -E env "GIT_CEILING_DIRECTORIES=<SOURCE_DIR>/.."
+    "${GIT_EXECUTABLE}" -c core.autocrlf=false -c core.eol=lf
+    -C "<SOURCE_DIR>" apply --verbose ${imgui_patch_files}
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(imgui)
-unset(imgui_patch_arguments)
+unset(imgui_patch_files)
+
+# Verify offline source overrides against the same post-patch input as downloads.
+file(SHA256 "${imgui_SOURCE_DIR}/imgui_widgets.cpp" imgui_widgets_hash)
+if(NOT imgui_widgets_hash STREQUAL
+    "d36894ba583c4a976a1f227b8721473142aa8ff669d9708173c2c2d25c339e3f")
+  message(FATAL_ERROR
+    "Dear ImGui 1.92.9 widgets are missing avb0795's active-temp-input patch")
+endif()
+unset(imgui_widgets_hash)
 
 add_library(imgui STATIC
   "${imgui_SOURCE_DIR}/imgui.cpp"
@@ -46,6 +65,8 @@ target_include_directories(imgui
 )
 
 if(WIN32)
+  # Do not infer patch presence from a successful dependency population step.
+  # The expected post-patch file hash also rejects drift in an offline override.
   file(SHA256
     "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp"
     imgui_vulkan_backend_hash
@@ -75,9 +96,9 @@ if(WIN32)
     URL_HASH SHA256=b5ec004b2712fd08e8861dc271428f048775200a2df719ccf575143ba749a3e9
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     PATCH_COMMAND
-      "${CMAKE_COMMAND}" -E chdir "${PROJECT_SOURCE_DIR}"
-      "${GIT_EXECUTABLE}" apply --verbose --unsafe-paths
-      "--directory=<SOURCE_DIR>"
+      "${CMAKE_COMMAND}" -E env "GIT_CEILING_DIRECTORIES=<SOURCE_DIR>/.."
+      "${GIT_EXECUTABLE}" -c core.autocrlf=false -c core.eol=lf
+      -C "<SOURCE_DIR>" apply --verbose
       "${PROJECT_SOURCE_DIR}/third_party/patches/glfw-3.4-win32-no-own-dc.patch"
     EXCLUDE_FROM_ALL
   )
@@ -87,6 +108,8 @@ if(WIN32)
   avb0795_verify_glfw_patch("${glfw_SOURCE_DIR}")
 endif()
 
+# Test-only dependencies are absent when tests are disabled. Lua inventory
+# validation remains a separately invoked developer utility, not a build input.
 if(AVB0795_BUILD_TESTS)
   set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "" FORCE)
   set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)

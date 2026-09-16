@@ -48,6 +48,12 @@ backend immediately on an error without later destroying an undefined Vulkan
 output. The exact change is recorded in
 `third_party/patches/imgui-1.92.9-vulkan-safe-failure.patch`.
 
+The common scalar widgets additionally export temporary text on deactivation
+while that text editor owns the active interaction. This preserves subsequent
+pointer and keyboard tweaks that reuse the widget ID. The exact change is in
+`third_party/patches/imgui-1.92.9-active-temp-input.patch`; CMake verifies the
+post-patch widgets hash for downloaded and offline sources on every UI platform.
+
 Copyright (c) 2014-2026 Omar Cornut
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
