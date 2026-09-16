@@ -1,11 +1,15 @@
 /// @file
-/// Windows composition root: initialize process services, connect concrete
-/// adapters to portable application ports, and honor the host's exit decision.
+/// @brief Connect process services and concrete adapters, then honor the host's exit decision.
+///
+/// Construction order establishes the lifetime of borrowed command/wake targets.
+/// Runtime sequencing belongs below this composition root; this file only wires
+/// services, reports startup failures, and chooses normal or non-unwinding exit.
 #include "avb/app/app_command_queue.hpp"
 #include "avb/app/application.hpp"
 #include "avb/app/config_store.hpp"
 #include "avb/desktop/desktop_host.hpp"
 #include "platform/windows/capture_exclusion.hpp"
+#include "platform/windows/windows_controller_window.hpp"
 #include "platform/windows/controller_font.hpp"
 #include "platform/windows/process_dpi_awareness.hpp"
 #include "platform/windows/windows_atomic_replace.hpp"
@@ -67,8 +71,13 @@ namespace {
                  description != nullptr ? description : "unknown");
   }
 
-  /// Resolve config beside the executable, independent of the launch directory.
-  /// Path/projection failure becomes a typed startup error rather than an escape.
+  /// @brief Resolve executable-relative preferences without depending on the caller's CWD.
+  ///
+  /// Launching through a shortcut or shell must not silently select a different
+  /// preferences file. Query the wide executable path and reject truncation before
+  /// constructing the sibling path. This only resolves a location: existence,
+  /// readability and writing policy belong to the configured persistence service.
+  /// Path/projection failures are contained as typed startup errors.
   [[nodiscard]] std::expected<std::filesystem::path,
                               avb::core::AppError>
   executable_config_path() noexcept
@@ -97,8 +106,14 @@ namespace {
     }
   }
 
-  /// Construct owners in dependency order and keep every borrowed callback
-  /// target alive through host-driven shutdown. No session sequencing lives here.
+  /// @brief Construct the object graph in the order required by its borrowed callbacks.
+  ///
+  /// The command queue precedes the controller; native services that borrow the
+  /// controller's wake target are built afterward. Normal reverse destruction
+  /// therefore removes those services before their targets. The host drives the
+  /// actual session and shutdown workflow; this function only wires dependencies.
+  /// An abandon result is handled while every owner is still alive, because a
+  /// normal return would destroy resources whose completion has not been proven.
   [[nodiscard]] int run_application()
   {
     using namespace avb;
@@ -115,9 +130,18 @@ namespace {
       [&commands](auto command) {
         return commands.push(std::move(command));
       },
-      [](GLFWwindow *window) {
-        return platform::windows::prepare_controller_window(
-          glfwGetWin32Window(window));
+      [](GLFWwindow *window)
+        -> std::expected<desktop::ControllerWindowSetup, core::AppError> {
+        const auto native_window = glfwGetWin32Window(window);
+        auto exclusion = platform::windows::prepare_controller_window(native_window);
+        if (!exclusion) {
+          return std::unexpected{exclusion.error()};
+        }
+        auto interaction = platform::windows::WindowsControllerWindow::create(native_window);
+        if (!interaction) {
+          return std::unexpected{interaction.error()};
+        }
+        return desktop::ControllerWindowSetup{*exclusion, std::move(*interaction)};
       },
       std::move(*font_data));
     if (!host_result) {
@@ -134,8 +158,13 @@ namespace {
       source_registry, [&host]() noexcept { host.wake(); }};
 
     auto hotkey_result = platform::windows::WindowsGlobalHotkey::create(
-      [&commands, &host](auto command) {
-        if (commands.push(std::move(command))) {
+      [&commands, &host](core::HotkeyChord chord) {
+        // Keep OS registration active while the focused recorder receives the
+        // same confirmed chord. Other events enter the normal recovery queue.
+        if (host.try_record_hotkey(chord)) {
+          host.wake();
+        }
+        else if (commands.push(app::RestoreActiveReplicaEditable{})) {
           host.wake();
         }
       });
@@ -181,8 +210,12 @@ namespace {
 
 }    // namespace
 
-/// Establish DPI, COM and GLFW before any product window; terminate them only
-/// after a normal host return has safely unwound the composed application.
+/// @brief Establish process prerequisites before constructing any product window.
+///
+/// DPI policy comes first so later window geometry is interpreted consistently.
+/// COM and GLFW remain initialized until a normal return has unwound all composed
+/// services. Startup failures have fixed diagnostic exit paths; the separate
+/// abandon path deliberately never returns here to perform ordinary teardown.
 int main()
 {
   const auto dpi =

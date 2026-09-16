@@ -1,6 +1,10 @@
 /// @file
-/// Controller-only GLFW/ImGui/Vulkan infrastructure and deadline-aware host
-/// loop. Native replica resources are composed elsewhere and remain separate.
+/// @brief Controller-only presentation, event-loop deadlines and failure containment.
+///
+/// Each controller submission and presentation retains its own completion proof.
+/// The host coordinates these records with application steps without acquiring
+/// replica resources. Normal destruction follows proven retirement; uncertain
+/// ownership is reported to the composition root for non-unwinding exit.
 #include "avb/desktop/desktop_host.hpp"
 #include "controller_font.hpp"
 
@@ -28,6 +32,7 @@
 #include <ranges>
 #include <span>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace avb::desktop {
@@ -61,11 +66,12 @@ namespace avb::desktop {
       VkResult result;
     };
 
-    // Dear ImGui's Vulkan backend continues after this callback returns, even
-    // when an allocation failed. This is a C++ callback, so leave the backend
-    // immediately and let DesktopHost's owning firewall retain native state.
-    /// Leave the C++ Vulkan backend on failure; the surrounding host firewall
-    /// retains possibly referenced resources instead of continuing with nulls.
+    /// @brief Exit the C++ backend immediately instead of using failed native outputs.
+    ///
+    /// Returning to the backend would allow it to continue after a failed call.
+    /// Throw only across this C++ callback boundary: the enclosing host catches
+    /// the fixed result and preserves possibly referenced graphics resources.
+    /// This is not the policy for C-facing window callbacks, which contain errors.
     void check_backend_result(const VkResult result)
     {
       if (result != VK_SUCCESS) {
@@ -149,8 +155,13 @@ namespace avb::desktop {
 
   }    // namespace
 
-  /// Own controller UI and its complete private presentation context. All work
-  /// except wake() stays on the main thread; domain mutation is application-owned.
+  /// @brief Keep controller graphics ownership and its progress loop in one main-thread owner.
+  ///
+  /// Frame records prove command/acquire completion; present records independently
+  /// prove the presentation engine has released its wait semaphore and swapchain.
+  /// These containers are evidence of outstanding use, not merely reusable frame
+  /// storage. Cleanup may remove an owner only after its relevant proof is met.
+  /// Domain mutation stays in the application; callbacks emit commands or wakes.
   class DesktopHost::Impl final {
   public:
     /// Command/acquire/submission ownership for one UI frame. A successful present
@@ -177,8 +188,10 @@ namespace avb::desktop {
       bool confirms_recovery{};
     };
 
-    /// Active/retired controller WSI resources; render-pass compatibility permits
-    /// the existing ImGui pipeline to render a same-format replacement.
+    /// Active or retired controller WSI allocation, including all image views and
+    /// framebuffers that depend on its images. Retiring forbids new acquisition
+    /// but does not destroy presentation references. A same-format replacement
+    /// keeps the existing ImGui pipeline's render-pass compatibility.
     struct SwapchainState final {
       VkSwapchainKHR handle{VK_NULL_HANDLE};
       VkFormat format{VK_FORMAT_UNDEFINED};
@@ -191,8 +204,11 @@ namespace avb::desktop {
       bool recovery_candidate{};
     };
 
-    /// Host-owned static atlas image plus startup upload staging. Staging follows
-    /// the first submission fence; the sampled image follows all UI submissions.
+    /// Static atlas resources with two different release conditions. Upload staging
+    /// is needed only until the first upload submission is proven complete; the
+    /// sampled image/view/descriptor remains referenced by later UI submissions.
+    /// The two upload flags distinguish work recorded for a future submit from
+    /// work that may already be executing, including an uncertain submit result.
     struct FontTexture final {
       VkBuffer staging_buffer{VK_NULL_HANDLE};
       VkDeviceMemory staging_memory{VK_NULL_HANDLE};
@@ -215,7 +231,7 @@ namespace avb::desktop {
 
     /// Adopt the controller window and font storage, then build private Vulkan
     /// and ImGui owners without submitting startup work.
-    Impl(GLFWwindow *window, CommandSink command_sink, const core::CaptureExclusionStatus controller_exclusion, std::vector<std::byte> font_data);
+    Impl(GLFWwindow *window, CommandSink command_sink, ControllerWindowSetup setup, std::vector<std::byte> font_data);
     /// Require a drained controller; destruction is not a blocking drain path.
     ~Impl() noexcept;
 
@@ -232,6 +248,9 @@ namespace avb::desktop {
     /// Post GLFW's thread-safe wake event; callback owners must keep this host
     /// alive until every admitted wake invocation has returned.
     void wake() const noexcept { glfwPostEmptyEvent(); }
+    /// Admit recorder input using current native focus and controller lifetime.
+    /// The composition root chooses the recovery command when this returns false.
+    [[nodiscard]] bool try_record_hotkey(core::HotkeyChord chord) noexcept;
     /// Own the main-thread controller loop and failure firewall; an abandon result
     /// requires the composition root to exit without unwinding native owners.
     [[nodiscard]] HostRunResult run(app::Application &application) noexcept;
@@ -240,6 +259,8 @@ namespace avb::desktop {
     /// Convert controller close into a portable Quit command once. Contain sink
     /// allocation failure before returning across the GLFW callback boundary.
     static void window_close_callback(GLFWwindow *window) noexcept;
+    /// Cancel recording at the focus-loss edge before queued ImGui events coalesce.
+    static void window_focus_callback(GLFWwindow *window, int focused) noexcept;
 
     /// Enqueue a view command and mark that the next event wait must be skipped.
     void emit(app::AppCommand command);
@@ -364,6 +385,7 @@ namespace avb::desktop {
     GLFWwindow *window_{};
     CommandSink command_sink_;
     core::CaptureExclusionStatus controller_exclusion_{};
+    std::unique_ptr<ControllerWindowInteraction> window_interaction_;
     ui::ControllerView controller_view_;
     // The atlas borrows these bytes; context destruction precedes vector release.
     std::vector<std::byte> font_data_;
@@ -414,14 +436,15 @@ namespace avb::desktop {
   };
 
   DesktopHost::Impl::Impl(
-    GLFWwindow *const window, CommandSink command_sink, const core::CaptureExclusionStatus controller_exclusion, std::vector<std::byte> font_data)
+    GLFWwindow *const window, CommandSink command_sink, ControllerWindowSetup setup, std::vector<std::byte> font_data)
       : window_{window},
         command_sink_{std::move(command_sink)},
-        controller_exclusion_{controller_exclusion},
+        controller_exclusion_{setup.exclusion},
+        window_interaction_{std::move(setup.interaction)},
         font_data_{std::move(font_data)}
   {
     try {
-      if (window_ == nullptr || !command_sink_) {
+      if (window_ == nullptr || !command_sink_ || !window_interaction_) {
         throw graphics_error(core::AppErrorCode::InvalidValue);
       }
       create_instance();
@@ -441,6 +464,10 @@ namespace avb::desktop {
       create_font_texture();
       glfwSetWindowUserPointer(window_, this);
       glfwSetWindowCloseCallback(window_, window_close_callback);
+      // The ImGui backend saved the previous focus hook during initialization.
+      // Our wrapper forwards to that backend; Shutdown restores its saved hook
+      // before releasing the context, removing this wrapper in the same lifetime.
+      glfwSetWindowFocusCallback(window_, window_focus_callback);
       fully_constructed_ = true;
     } catch (...) {
       cleanup_partial();
@@ -455,6 +482,9 @@ namespace avb::desktop {
       std::terminate();
     }
     cleanup_partial();
+    // The input backend restores its previous hook during cleanup_partial().
+    // Detach native interaction after that restoration and before window release.
+    window_interaction_.reset();
     if (window_ != nullptr) {
       glfwSetWindowCloseCallback(window_, nullptr);
       glfwSetWindowUserPointer(window_, nullptr);
@@ -481,11 +511,50 @@ namespace avb::desktop {
     glfwPostEmptyEvent();
   }
 
+  void DesktopHost::Impl::window_focus_callback(
+    GLFWwindow *const window, const int focused) noexcept
+  {
+    auto *const self = static_cast<Impl *>(glfwGetWindowUserPointer(window));
+    if (self == nullptr) {
+      return;
+    }
+    if (focused == GLFW_FALSE) {
+      self->controller_view_.cancel_hotkey_recording();
+    }
+    try {
+      ImGui_ImplGlfw_WindowFocusCallback(window, focused);
+    } catch (...) {
+      self->enter_fatal(
+        FatalKind::Unexpected,
+        graphics_error(core::AppErrorCode::RuntimeStateLost));
+    }
+  }
+
   void DesktopHost::Impl::emit(app::AppCommand command)
   {
+    const bool closing = std::holds_alternative<app::Quit>(command);
     if (command_sink_(std::move(command))) {
       command_emitted_ = true;
+      close_command_emitted_ = close_command_emitted_ || closing;
     }
+  }
+
+  bool DesktopHost::Impl::try_record_hotkey(
+    const core::HotkeyChord chord) noexcept
+  {
+    // GLFW reads the native focus now, before the next ImGui frame consumes its
+    // queued focus events. This preserves recovery immediately after focus loss.
+    const bool ready = fully_constructed_ && window_ != nullptr &&
+                       imgui_context_created_ && imgui_glfw_initialized_ &&
+                       imgui_vulkan_initialized_ &&
+                       ImGui::GetCurrentContext() != nullptr &&
+                       !stopping_controller_ && !close_command_emitted_ &&
+                       fatal_kind_ == FatalKind::None;
+    if (!ready || glfwGetWindowAttrib(window_, GLFW_FOCUSED) != GLFW_TRUE) {
+      controller_view_.cancel_hotkey_recording();
+      return false;
+    }
+    return controller_view_.try_record_hotkey(chord);
   }
 
   void DesktopHost::Impl::create_instance()
@@ -1039,6 +1108,9 @@ namespace avb::desktop {
     };
 
     if (creation.retire_active_before_create) {
+      // Passing an old swapchain to replacement creation cannot be rolled back
+      // into new acquisitions on that old owner if creation fails. Retire first;
+      // outstanding presentations keep it alive while later retries start afresh.
       retire_active_swapchain();
       made_progress_ = true;
     }
@@ -1205,6 +1277,9 @@ namespace avb::desktop {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     imgui_context_created_ = true;
+    // Application owns persisted preferences; controller geometry is session-only.
+    // Disable both the implicit CWD/imgui.ini read and automatic writes.
+    ImGui::GetIO().IniFilename = nullptr;
     if (const auto configured = configure_controller_font(*ImGui::GetIO().Fonts, font_data_); !configured) {
       throw configured.error();
     }
@@ -1749,6 +1824,9 @@ namespace avb::desktop {
     frames_.push_back(std::move(acquire_record));
     acquire_record_.reset();
     auto &record = frames_.back();
+    // Publish the acquired image's ownership record before the native submit.
+    // Once submission is attempted, an error may mean uncertain execution rather
+    // than no work; keeping the record lets the drain path demand the right proof.
     constexpr VkPipelineStageFlags wait_stage{
       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
     const VkSubmitInfo submit_info{
@@ -2301,6 +2379,10 @@ namespace avb::desktop {
     app::Application &application,
     const std::chrono::steady_clock::time_point now)
   {
+    // Advancing the application is independent of having drawable pixels. A zero
+    // framebuffer suppresses presentation below, not commands, recovery or drain.
+    // The view is borrowed only within this iteration; UI commands are queued for
+    // the next step rather than mutating application state while rendering it.
     application.step(now);
     if (application.exit_disposition() != core::ExitDisposition::Continue) {
       return;
@@ -2317,12 +2399,23 @@ namespace avb::desktop {
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
-    controller_view_.render(
+    float xscale{1.0F}, yscale{1.0F};
+    glfwGetWindowContentScale(window_, &xscale, &yscale);
+    constexpr float logical_resize_margin{8.0F};
+    const auto frame = controller_view_.render(
       application.view_state(),
-      [this](app::AppCommand command) { emit(std::move(command)); });
+      [this](app::AppCommand command) { emit(std::move(command)); },
+      logical_resize_margin * std::max({1.0F, xscale, yscale}));
     ImGui::Render();
+    const auto display = ImGui::GetIO().DisplaySize;
+    window_interaction_->set_drag_region(
+      display.x > 0.0F ? frame.drag_right / display.x : 0.0F,
+      display.y > 0.0F ? frame.drag_bottom / display.y : 0.0F);
     if (!zero_extent(current_extent) && fatal_kind_ == FatalKind::None) {
       attempt_present(*ImGui::GetDrawData(), now);
+    }
+    if (frame.minimize_requested && fatal_kind_ == FatalKind::None) {
+      glfwIconifyWindow(window_);
     }
   }
 
@@ -2427,6 +2520,9 @@ namespace avb::desktop {
   void DesktopHost::Impl::drive_application_shutdown(
     app::Application &application, const bool controller_firewall)
   {
+    // A failed controller is not permission to destroy the other resource graph.
+    // Keep advancing its owning application's shutdown even when controller
+    // graphics are behind the failure firewall and must no longer be touched.
     stopping_controller_ = true;
     application.shutdown();
     while (application.exit_disposition() ==
@@ -2623,6 +2719,10 @@ namespace avb::desktop {
 
   void DesktopHost::Impl::cleanup_partial() noexcept
   {
+    // This routine releases dependencies; it does not establish completion.
+    // Callers admit only never-submitted startup state or already-retired work.
+    // Remove the atlas descriptor/backend/context while their device and borrowed
+    // font storage still exist, then destroy images, pools, device and surface.
     if (imgui_vulkan_initialized_) {
       if (font_texture_.descriptor != VK_NULL_HANDLE) {
         if (auto *const texture_data = ImGui::GetIO().Fonts->TexData;
@@ -2707,8 +2807,13 @@ namespace avb::desktop {
     }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_FLOATING, GLFW_FALSE);
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     GLFWwindow *const window = glfwCreateWindow(
       controller_width, controller_height, "avb0795", nullptr, nullptr);
+    // GLFW hints are process-global; later replica creation starts visible.
+    glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
     if (window == nullptr) {
       const char *description{};
       const int detail = glfwGetError(&description);
@@ -2719,13 +2824,14 @@ namespace avb::desktop {
     }
 
     try {
-      auto exclusion = window_created(window);
-      if (!exclusion) {
+      auto setup = window_created(window);
+      if (!setup) {
         glfwDestroyWindow(window);
-        return std::unexpected{exclusion.error()};
+        return std::unexpected{setup.error()};
       }
       auto impl =
-        std::make_unique<Impl>(window, std::move(command_sink), *exclusion, std::move(font_data));
+        std::make_unique<Impl>(window, std::move(command_sink), std::move(*setup), std::move(font_data));
+      glfwShowWindow(window);
       return DesktopHost{std::move(impl)};
     } catch (const BackendVulkanFailure &failure) {
       glfwDestroyWindow(window);
@@ -2753,6 +2859,11 @@ namespace avb::desktop {
     if (impl_) {
       impl_->wake();
     }
+  }
+
+  bool DesktopHost::try_record_hotkey(const core::HotkeyChord chord) noexcept
+  {
+    return impl_ && impl_->try_record_hotkey(chord);
   }
 
   HostRunResult DesktopHost::run(app::Application &application) noexcept

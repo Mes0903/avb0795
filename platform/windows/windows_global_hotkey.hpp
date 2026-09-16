@@ -1,11 +1,10 @@
 /// @file
-/// @brief Owner-thread hotkey registration, rollback, and command-only dispatch.
+/// @brief Owner-thread hotkey registration, rollback, and typed chord dispatch.
 /// Native implementation details remain below the portable application ports.
 
 #ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_GLOBAL_HOTKEY_HPP
 #define AVB0795_PLATFORM_WINDOWS_WINDOWS_GLOBAL_HOTKEY_HPP
 
-#include "avb/app/commands.hpp"
 #include "avb/app/ports.hpp"
 #include "avb/core/types.hpp"
 
@@ -20,8 +19,10 @@
 
 namespace avb::platform::windows {
 
-  /// Emits portable commands only; dispatch never receives a runtime or session owner.
-  using HotkeyCommandSink = std::function<void(app::AppCommand)>;
+  /// @brief Deliver a confirmed chord value for composition-owned event routing.
+  /// The sink selects the recorder or application recovery path while native
+  /// registration and payload validation remain owned by this service.
+  using HotkeyChordSink = std::function<void(core::HotkeyChord)>;
 
   namespace detail {
 
@@ -70,12 +71,16 @@ namespace avb::platform::windows {
     [[nodiscard]] std::expected<NativeHotkey, core::AppError>
     map_hotkey_to_native(const core::HotkeyChord &chord) noexcept;
 
-    /// Shared message-dispatch lifetime independent of wrapper or transaction unwind.
-    /// All mutation belongs to the creating thread captured at construction.
+    /// @brief Retain confirmed dispatch state across chord-sink reentrancy.
+    ///
+    /// The native trampoline keeps a shared owner during sink invocation, so the
+    /// sink may destroy the service without invalidating the executing dispatch.
+    /// Shared ownership supplies lifetime only: state mutation and dispatch belong
+    /// to the creating thread and are not synchronized for concurrent access.
     class HotkeyDispatchState final {
     public:
       explicit HotkeyDispatchState(HotkeyRegistrationState initial_state,
-                                   HotkeyCommandSink command_sink = {});
+                                   HotkeyChordSink chord_sink = {});
 
       /// Read the current confirmed binding and native registration ownership.
       [[nodiscard]] const HotkeyRegistrationState &
@@ -84,8 +89,9 @@ namespace avb::platform::windows {
       [[nodiscard]] DWORD owner_thread_id() const noexcept;
       /// Check before making Win32 calls whose registration state is thread-local.
       [[nodiscard]] bool is_owner_thread() const noexcept;
-      /// Accept only the confirmed primary chord and emit RestoreActiveReplicaEditable.
-      /// Contain a throwing command sink at the Win32 callback boundary.
+      /// @brief Validate the primary ID and payload, then deliver its confirmed chord.
+      /// The copied value survives reentrant registration changes. Exceptions
+      /// from the consumer are contained at this Win32 callback boundary.
       void dispatch_hotkey(int id, LPARAM message_parameter) noexcept;
 
     private:
@@ -93,12 +99,17 @@ namespace avb::platform::windows {
       [[nodiscard]] HotkeyRegistrationState &mutable_registration_state() noexcept;
 
       HotkeyRegistrationState registration_state_;
-      HotkeyCommandSink command_sink_;
+      HotkeyChordSink chord_sink_;
       DWORD owner_thread_id_{};
     };
 
-    /// Replaces a chord using fixed primary/probe IDs and verified rollback state.
-    /// The old confirmed chord survives a normal conflict; uncertainty remains explicit.
+    /// @brief Replace a chord while tracking primary and probe ownership separately.
+    ///
+    /// Probing protects the old registration from an ordinary availability
+    /// conflict, but cannot reserve the chord across the later replacement call.
+    /// Failure after retiring the old primary therefore attempts restoration.
+    /// Only a confirmed primary may dispatch; uncertain native ownership retains
+    /// cleanup diagnostics and blocks replacement until cleanup succeeds.
     class HotkeyRegistrationTransaction final {
     public:
       HotkeyRegistrationTransaction(HotkeyRegistrationState initial_state,
@@ -131,12 +142,16 @@ namespace avb::platform::windows {
 
     struct HotkeyWindowContext;
 
-    /// Win32 trampoline that keeps dispatch state alive across command-sink reentrancy.
+    /// Win32 trampoline that keeps dispatch state alive across chord-sink reentrancy.
     LRESULT CALLBACK windows_global_hotkey_window_proc(
       HWND window, UINT message, WPARAM word_parameter, LPARAM long_parameter) noexcept;
 
-    /// Move-only owner of the hidden hotkey window, class, and callback context.
-    /// Native destruction must occur on its recorded owner thread.
+    /// @brief Own the hidden message target, registered class, and dispatch context.
+    ///
+    /// Moving transfers native cleanup responsibility without changing the owner
+    /// thread. Destruction first detaches user data, then releases context and
+    /// destroys the window. If destruction fails, the remaining native window is
+    /// inert; wrong-thread destruction or failed context detachment terminates.
     class HotkeyMessageWindow final {
     public:
       /// Allocate stable dispatch context before exposing it through window messages.
@@ -166,11 +181,14 @@ namespace avb::platform::windows {
 
   }    // namespace detail
 
-  // The creating thread owns all native operations. Off-owner replace reports a
-  // platform error and clear is a no-op. Destruction must occur on the creating
-  // thread; violating that lifetime invariant terminates in every build mode.
-  /// Process service adapting the portable hotkey port to one owner-thread window.
-  /// A global shortcut only enqueues a command; the orchestrator resolves the active session.
+  /// @brief Adapt the global shortcut port to an owner-thread message window.
+  ///
+  /// A shortcut delivers its confirmed chord; the composition-supplied sink
+  /// chooses recorder input or application recovery. The creating thread owns
+  /// registration, dispatch, and destruction.
+  /// Off-owner replace reports a platform error and clear does nothing; destroying
+  /// on another thread terminates. A copied chord sink does not extend lifetimes
+  /// of objects it captures by reference, which must survive message dispatch.
   class WindowsGlobalHotkey final : public app::IGlobalHotkey {
   private:
     struct Impl;
@@ -181,10 +199,14 @@ namespace avb::platform::windows {
     };
 
   public:
-    /// Build a message target and transaction state with the supplied command sink.
+    /// @brief Build an initially unregistered service around the supplied chord sink.
+    ///
+    /// An empty sink or native window-creation failure returns a typed error.
+    /// Allocation failures may throw. The caller must pump messages on the
+    /// creating thread for registered shortcuts to reach the sink.
     [[nodiscard]] static std::expected<std::unique_ptr<WindowsGlobalHotkey>,
                                        core::AppError>
-    create(HotkeyCommandSink command_sink);
+    create(HotkeyChordSink chord_sink);
 
     WindowsGlobalHotkey(ConstructionToken,
                         std::unique_ptr<Impl> implementation) noexcept;
@@ -195,7 +217,11 @@ namespace avb::platform::windows {
     WindowsGlobalHotkey(WindowsGlobalHotkey &&) = delete;
     WindowsGlobalHotkey &operator=(WindowsGlobalHotkey &&) = delete;
 
-    /// Replace the native binding on the owner thread with rollback-aware results.
+    /// @brief Replace the binding while preserving a confirmed old chord when possible.
+    ///
+    /// A conflict before primary retirement leaves the old chord usable. Failure
+    /// to restore it reports HotkeyRegistrationLost; uncertain unregister state
+    /// remains tracked instead of being treated as a successful replacement.
     [[nodiscard]] std::expected<void, core::AppError>
     replace(const core::HotkeyChord &chord) override;
     /// Best-effort owner-thread unregister; off-owner calls leave native state intact.

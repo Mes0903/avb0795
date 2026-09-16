@@ -199,9 +199,9 @@ namespace avb::platform::windows {
     }
 
     HotkeyDispatchState::HotkeyDispatchState(HotkeyRegistrationState initial_state,
-                                             HotkeyCommandSink command_sink)
+                                             HotkeyChordSink chord_sink)
         : registration_state_{std::move(initial_state)},
-          command_sink_{std::move(command_sink)},
+          chord_sink_{std::move(chord_sink)},
           owner_thread_id_{GetCurrentThreadId()} {}
 
     const HotkeyRegistrationState &
@@ -225,7 +225,7 @@ namespace avb::platform::windows {
     {
       if (id != primary_hotkey_id ||
           registration_state_.primary != FixedHotkeyState::Registered ||
-          !registration_state_.confirmed_chord || !command_sink_) {
+          !registration_state_.confirmed_chord || !chord_sink_) {
         return;
       }
 
@@ -239,10 +239,11 @@ namespace avb::platform::windows {
       }
 
       try {
-        command_sink_(app::AppCommand{app::RestoreActiveReplicaEditable{}});
+        const auto chord = *registration_state_.confirmed_chord;
+        chord_sink_(chord);
       } catch (...) {
-        // A callback failure drops only this restore request. The controller
-        // remains the independent recovery path.
+        // The current delivery ends here; the confirmed OS binding remains
+        // available for the next event and the controller retains its controls.
       }
     }
 
@@ -340,6 +341,8 @@ namespace avb::platform::windows {
 
       const auto primary_registration =
         register_hotkey(primary_hotkey_id, *native_hotkey);
+      // The probe has already been released. Another registrant can win before
+      // this call, so probe success cannot eliminate the rollback path below.
       if (primary_registration.succeeded) {
         state.primary = FixedHotkeyState::Registered;
         state.primary_cleanup_diagnostic.reset();
@@ -469,7 +472,7 @@ namespace avb::platform::windows {
         if (message == WM_HOTKEY) {
           if (context != nullptr &&
               word_parameter == static_cast<WPARAM>(primary_hotkey_id)) {
-            // A command sink may destroy the wrapper/window; keep dispatch alive until return.
+            // A chord sink may destroy the wrapper/window; keep dispatch alive until return.
             const auto dispatch_state = context->dispatch_state;
             dispatch_state->dispatch_hotkey(primary_hotkey_id, long_parameter);
           }
@@ -597,7 +600,7 @@ namespace avb::platform::windows {
   }    // namespace detail
 
   struct WindowsGlobalHotkey::Impl final {
-    explicit Impl(HotkeyCommandSink sink)
+    explicit Impl(HotkeyChordSink sink)
         : dispatch_state{std::make_shared<detail::HotkeyDispatchState>(
             detail::HotkeyRegistrationState{}, std::move(sink))},
           transaction{
@@ -650,7 +653,7 @@ namespace avb::platform::windows {
     }
 
     [[nodiscard]] static std::expected<std::unique_ptr<Impl>, core::AppError>
-    create(HotkeyCommandSink sink)
+    create(HotkeyChordSink sink)
     {
       auto implementation = std::make_unique<Impl>(std::move(sink));
       auto message_window =
@@ -691,13 +694,13 @@ namespace avb::platform::windows {
   };
 
   std::expected<std::unique_ptr<WindowsGlobalHotkey>, core::AppError>
-  WindowsGlobalHotkey::create(HotkeyCommandSink command_sink)
+  WindowsGlobalHotkey::create(HotkeyChordSink chord_sink)
   {
-    if (!command_sink) {
+    if (!chord_sink) {
       return std::unexpected{
         core::AppError{.code = core::AppErrorCode::InvalidValue}};
     }
-    auto implementation = Impl::create(std::move(command_sink));
+    auto implementation = Impl::create(std::move(chord_sink));
     if (!implementation) {
       return std::unexpected{implementation.error()};
     }

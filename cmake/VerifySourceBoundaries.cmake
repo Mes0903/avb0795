@@ -1,3 +1,7 @@
+# Two complementary architecture checks share this file: configure-time target
+# source/link allowlists and a standalone textual source scan. The scan is not a
+# C++ parser: comments and inactive preprocessor branches are examined too. Keep
+# cross-layer explanations in role terms rather than weakening the rules for prose.
 include_guard(GLOBAL)
 
 set(_AVB0795_BOUNDARY_SCRIPT "${CMAKE_CURRENT_LIST_FILE}")
@@ -6,6 +10,9 @@ function(_avb0795_boundary_failure detail)
   message(FATAL_ERROR "avb0795 architecture boundary violation: ${detail}")
 endfunction()
 
+# Unwrap only the generator-expression forms admitted by current target wiring.
+# This is not a general generator-expression evaluator; other forms retain their
+# spelling and must pass the explicit allowlist instead of hiding dependencies.
 function(_avb0795_normalize_link output link)
   set(value "${link}")
   if(value MATCHES "^\\$<LINK_ONLY:(.*)>$")
@@ -81,6 +88,9 @@ function(_avb0795_assert_sources target)
   endforeach()
 endfunction()
 
+# Follow first-party source directories while excluding the build/dependency tree
+# and external source roots. The root invokes this before adding test targets, so
+# a new production owner cannot evade review merely by using an unfamiliar name.
 function(_avb0795_collect_project_targets output directory)
   get_property(
     directory_targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
@@ -118,7 +128,6 @@ function(_avb0795_assert_known_production_targets)
       avb0795_windows_graphics
       avb0795_desktop
       avb0795
-      avb0795
       imgui)
   _avb0795_collect_project_targets(project_targets "${PROJECT_SOURCE_DIR}")
   list(REMOVE_DUPLICATES project_targets)
@@ -153,12 +162,16 @@ function(avb0795_assert_target_boundaries)
   if(TARGET avb0795_app)
     _avb0795_assert_sources(avb0795_app "src/app")
     _avb0795_assert_links(
-      avb0795_app avb0795_core avb0795_i18n nlohmann_json::nlohmann_json)
+      avb0795_app
+      avb0795_core
+      avb0795_i18n
+      nlohmann_json::nlohmann_json)
   endif()
 
   if(TARGET avb0795_ui)
     _avb0795_assert_sources(avb0795_ui "src/ui")
-    _avb0795_assert_links(avb0795_ui avb0795_core imgui)
+    _avb0795_assert_links(
+      avb0795_ui avb0795_core avb0795_i18n imgui)
   endif()
 
   if(TARGET avb0795_windows)
@@ -214,7 +227,7 @@ function(avb0795_assert_target_boundaries)
       imgui_impl_vulkan)
   endif()
 
-  foreach(product_target avb0795 avb0795)
+  foreach(product_target avb0795)
     if(TARGET "${product_target}")
       get_target_property(product_type "${product_target}" TYPE)
       if(NOT product_type STREQUAL "EXECUTABLE")
@@ -321,14 +334,18 @@ function(_avb0795_assert_layer_includes file contents prefix)
   endforeach()
 endfunction()
 
+# Apply the category's include and ownership vocabulary constraints to raw text.
+# Include paths are normalized separately from case-sensitive C++ symbols. The
+# explicit exceptions describe existing seams; absence of a match is not proof of
+# runtime ownership correctness, which still requires contracts and code review.
 function(_avb0795_scan_files category)
   set(files ${ARGN})
   set(portable_native_include
-      "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|unknwn\\.h|objbase\\.h|objidl[^>\"]*\\.h|vulkan/|glfw/|imgui_impl_(glfw|vulkan)\\.h|platform/windows/)")
+      "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h[>\"]|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|unknwn\\.h|objbase\\.h|objidl[^>\"]*\\.h|vulkan/|glfw/|imgui_impl_(glfw|vulkan)\\.h|platform/windows/)")
   set(portable_native_symbol
       "(^|[^A-Za-z0-9_])(HANDLE|HDC|HINSTANCE|HMONITOR|HWND|IUnknown|IInspectable|ID3D[A-Za-z0-9_]*|IDXGI[A-Za-z0-9_]*|Vk[A-Z][A-Za-z0-9_]*)([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])winrt::")
   set(desktop_forbidden_include
-      "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|platform/windows/)")
+      "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h[>\"]|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|platform/windows/)")
 
   foreach(file IN LISTS files)
     file(READ "${file}" contents)
@@ -345,8 +362,15 @@ function(_avb0795_scan_files category)
         "${normalized_lower_contents}"
         "#[ \t]*include[ \t]+[^<\" \t\r\n]"
         "portable source uses a non-literal include")
+      # The source table names its diagnostic column with this exact caption.
+      # Keep native declarations and includes checked; this allowance grants
+      # presentation text, with no native identifier lookup or resource access.
+      set(symbol_contents "${contents}")
+      if(category STREQUAL "ui")
+        string(REPLACE "\"HWND\"" "\"\"" symbol_contents "${symbol_contents}")
+      endif()
       _avb0795_assert_no_match(
-        "${file}" "${contents}" "${portable_native_symbol}"
+        "${file}" "${symbol_contents}" "${portable_native_symbol}"
         "portable source mentions a native graphics/platform type")
     endif()
 
@@ -360,9 +384,12 @@ function(_avb0795_scan_files category)
     endif()
 
     if(category STREQUAL "i18n")
-      foreach(layer app core ui desktop render platform)
-        _avb0795_assert_layer_includes("${file}" "${contents}" "${layer}")
-      endforeach()
+      _avb0795_assert_layer_includes("${file}" "${contents}" "app")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "core")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "desktop")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "render")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "platform")
       _avb0795_assert_no_match(
         "${file}"
         "${normalized_lower_contents}"
@@ -370,6 +397,7 @@ function(_avb0795_scan_files category)
         "language policy includes filesystem I/O")
     elseif(category STREQUAL "core")
       _avb0795_assert_app_includes("${file}" "${contents}")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "i18n")
       _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
       _avb0795_assert_layer_includes("${file}" "${contents}" "desktop")
       _avb0795_assert_layer_includes("${file}" "${contents}" "render")
@@ -400,6 +428,7 @@ function(_avb0795_scan_files category)
         "(^|[^A-Za-z0-9_])(Application|ApplicationState|ReplicaSession|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack)([^A-Za-z0-9_]|$)"
         "UI crosses the frontend command/view-state boundary")
     elseif(category STREQUAL "desktop")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "i18n")
       _avb0795_assert_layer_includes(
         "${file}"
         "${contents}"
@@ -429,8 +458,8 @@ function(_avb0795_scan_files category)
     elseif(category STREQUAL "windows")
       get_filename_component(file_name "${file}" NAME)
       set(allowed_windows_app_headers avb/app/ports.hpp)
-      set(allowed_windows_desktop_headers)
       set(allowed_windows_i18n_headers)
+      set(allowed_windows_desktop_headers)
       file(RELATIVE_PATH windows_relative "${AVB0795_SOURCE_ROOT}" "${file}")
       string(REPLACE "\\" "/" windows_relative "${windows_relative}")
       if(windows_relative MATCHES
@@ -442,13 +471,15 @@ function(_avb0795_scan_files category)
         "${file}" "${contents}" "desktop"
         ${allowed_windows_desktop_headers})
       if(windows_relative MATCHES
-         "^platform/windows/windows_ui_language\\.(hpp|cpp)$" OR
+         "^platform/windows/windows_ui_language\\.(c|cc|cpp|cxx|h|hpp|inc|inl|ipp|tpp)$" OR
          windows_relative STREQUAL
          "platform/windows/detail/ui_language_query.hpp")
         list(APPEND allowed_windows_i18n_headers i18n/language.hpp)
       endif()
       _avb0795_assert_layer_includes(
-        "${file}" "${contents}" "i18n"
+        "${file}"
+        "${contents}"
+        "i18n"
         ${allowed_windows_i18n_headers})
       set(is_hotkey_file FALSE)
       if(file_name MATCHES
@@ -472,7 +503,7 @@ function(_avb0795_scan_files category)
         "${file}"
         "${contents}"
         "(avb/)?core/(application_state|replica_session)|(avb/)?ui/"
-        "Windows adapter includes domain state or frontend code")
+        "Windows adapter includes domain state or frontend/desktop code")
       _avb0795_assert_no_match(
         "${file}"
         "${contents}"
@@ -480,6 +511,7 @@ function(_avb0795_scan_files category)
         "Windows adapter mentions an owner outside its boundary")
     elseif(category STREQUAL "render")
       _avb0795_assert_app_includes("${file}" "${contents}")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "i18n")
       _avb0795_assert_layer_includes(
         "${file}"
         "${contents}"
@@ -495,6 +527,10 @@ function(_avb0795_scan_files category)
   endforeach()
 endfunction()
 
+# Discover current production files directly, including untracked additions; do
+# not rely on an older compilation database or Git index to define this boundary.
+# Per-layer rules run first, followed by feature-isolation and removed-contract
+# checks that apply across the complete production set.
 function(_avb0795_run_source_boundary_scan)
   if(NOT DEFINED AVB0795_SOURCE_ROOT OR
      NOT IS_DIRECTORY "${AVB0795_SOURCE_ROOT}")

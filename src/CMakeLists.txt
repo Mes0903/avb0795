@@ -1,4 +1,7 @@
-# Language policy and compiled catalogs form a portable, dependency-free owner.
+# These targets encode compile/link ownership, not just convenient source groups.
+# Portable values and language policy can be used without native graphics. The UI
+# consumes public command/view contracts but never links the application owner.
+# Concrete Windows services and the controller host meet at the executable below.
 add_library(avb0795_i18n
   i18n/catalog.cpp
   i18n/language.cpp
@@ -51,17 +54,22 @@ target_compile_features(avb0795_app PUBLIC cxx_std_23)
 
 add_library(avb0795_ui
   ui/controller_view.cpp
+  ui/language_selector.cpp
 )
 
 target_link_libraries(avb0795_ui
   PUBLIC
     avb0795_core
+    avb0795_i18n
   PRIVATE
     imgui
 )
 
 target_compile_features(avb0795_ui PUBLIC cxx_std_23)
 
+# Native capture/system adapters are separate from the replica graphics aggregate.
+# Only the latter needs both capture and presentation dependencies; a frontend
+# target must not inherit these dependencies as a shortcut to native operations.
 if(WIN32)
   add_library(avb0795_windows
     ${PROJECT_SOURCE_DIR}/platform/windows/capture_exclusion.cpp
@@ -149,6 +157,8 @@ if(WIN32)
 
   target_compile_features(avb0795_windows_graphics PUBLIC cxx_std_23)
 
+  # The controller has its own backend/device lifetime. Compiling these backend
+  # sources here does not make the replica renderer their owner or consumer.
   add_library(avb0795_desktop
     desktop/desktop_host.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
