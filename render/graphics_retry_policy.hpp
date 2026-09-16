@@ -22,11 +22,7 @@ namespace avb::render {
                                        Surface,
                                        Device,
                                        Terminal };
-  /// Independent cleanup facts; neither API's loss proves the other's work safe.
-  enum class DeviceLossKind { VulkanDeviceLost,
-                              D3DeviceRemoved };
-
-  /// Requested next recovery step, without performing or owning that step.
+  /// @brief Requested next recovery step, without performing or owning that step.
   enum class GraphicsRetryAction {
     Retry,
     SurfaceRecreate,
@@ -123,53 +119,15 @@ namespace avb::render {
             .use_active_as_old = true};
   }
 
-  /// Explicitly separates WSI-only recovery from capture/device reconstruction.
-  struct GraphicsRecoveryScope final {
-    bool recreate_surface{};
-    bool recreate_swapchain{};
-    bool recreate_capture{};
-    bool recreate_d3{};
-    bool recreate_slots{};
-    bool advance_generation{};
-  };
-
-  /// Map failure category to the resources affected; surface loss preserves
-  /// capture, D3 devices, slots and the runtime-owned resource generation.
-  [[nodiscard]] constexpr GraphicsRecoveryScope
-  graphics_recovery_scope(const GraphicsFailureCategory category) noexcept
-  {
-    switch (category) {
-    case GraphicsFailureCategory::Swapchain:
-      return {.recreate_swapchain = true};
-    case GraphicsFailureCategory::Surface:
-      return {.recreate_surface = true, .recreate_swapchain = true};
-    case GraphicsFailureCategory::Device:
-      return {.recreate_surface = true,
-              .recreate_swapchain = true,
-              .recreate_capture = true,
-              .recreate_d3 = true,
-              .recreate_slots = true,
-              .advance_generation = true};
-    case GraphicsFailureCategory::Terminal:
-      return {};
-    }
-    return {};
-  }
-
-  /// True when a replica renderer can recover without replacing capture owners.
-  [[nodiscard]] constexpr bool
-  render_stack_local_recovery(const GraphicsRecoveryScope scope) noexcept
-  {
-    return scope.recreate_swapchain && !scope.recreate_capture &&
-           !scope.recreate_d3 && !scope.recreate_slots &&
-           !scope.advance_generation;
-  }
-
-  /// Native proof currently owed by a ring slot. Empty can still retain a safe
-  /// sampled image for redraw; it means no outstanding native use.
+  /// @brief Native proof or retained ownership currently owed by a ring slot.
+  ///
+  /// Empty can still retain a safe sampled image for redraw. Ready phases have
+  /// completed source copies but await selection; neither owns a producer checkout.
+  /// Producer, acquire, and submission phases track distinct obligations. Present
+  /// fences live in separate records and can remain pending after a slot is Empty.
   enum class RenderSlotPhase {
     Empty,
-    D3CopyPending,
+    ProducerPending,
     CpuReady,
     GpuReady,
     Submitted,
@@ -234,7 +192,7 @@ namespace avb::render {
     case RenderSlotPhase::SubmitUncertain:
       return SlotProofFence::Submission;
     case RenderSlotPhase::Empty:
-    case RenderSlotPhase::D3CopyPending:
+    case RenderSlotPhase::ProducerPending:
     case RenderSlotPhase::CpuReady:
     case RenderSlotPhase::GpuReady:
     case RenderSlotPhase::ReleaseRetained:
@@ -255,7 +213,7 @@ namespace avb::render {
     case RenderSlotPhase::ReleaseRetained:
       return true;
     case RenderSlotPhase::Empty:
-    case RenderSlotPhase::D3CopyPending:
+    case RenderSlotPhase::ProducerPending:
     case RenderSlotPhase::CpuReady:
     case RenderSlotPhase::GpuReady:
       return false;
@@ -263,34 +221,7 @@ namespace avb::render {
     return false;
   }
 
-  /// Cause-specific disposition of one slot during aggregate device recovery.
-  enum class DeviceRecoverySlotAction {
-    None,
-    ClearWithoutWait,
-    AwaitD3Completion,
-    AwaitVulkanRetirement,
-  };
-
-  /// Preserve D3 copies after Vulkan loss and healthy Vulkan work after D3 loss.
-  /// Only the corresponding confirmed loss permits that API's no-wait cleanup.
-  [[nodiscard]] constexpr DeviceRecoverySlotAction
-  plan_device_recovery_slot(const DeviceLossKind kind,
-                            const RenderSlotPhase phase) noexcept
-  {
-    if (phase == RenderSlotPhase::Empty) {
-      return DeviceRecoverySlotAction::None;
-    }
-    if (kind == DeviceLossKind::VulkanDeviceLost) {
-      return phase == RenderSlotPhase::D3CopyPending
-               ? DeviceRecoverySlotAction::AwaitD3Completion
-               : DeviceRecoverySlotAction::ClearWithoutWait;
-    }
-    return slot_has_vulkan_work(phase)
-             ? DeviceRecoverySlotAction::AwaitVulkanRetirement
-             : DeviceRecoverySlotAction::ClearWithoutWait;
-  }
-
-  /// Owner-local retry budget; successful construction alone does not reset it.
+  /// @brief Owner-local retry budget; successful construction alone does not reset it.
   struct GraphicsRecoveryEpisodeState final {
     std::uint32_t attempt{};
     bool awaiting_successful_present{};
@@ -551,24 +482,7 @@ namespace avb::render {
             .clear_acquired_ownership = released};
   }
 
-  /// Distinguish pending/complete from the fence's device-removal sentinel.
-  enum class D3CompletionStatus { Pending,
-                                  Complete,
-                                  DeviceRemoved };
-
-  /// UINT64_MAX is removal, never proof that an arbitrary target completed.
-  [[nodiscard]] constexpr D3CompletionStatus
-  classify_d3_completed_value(const std::uint64_t completed,
-                              const std::uint64_t target) noexcept
-  {
-    if (completed == (std::numeric_limits<std::uint64_t>::max)()) {
-      return D3CompletionStatus::DeviceRemoved;
-    }
-    return completed >= target ? D3CompletionStatus::Complete
-                               : D3CompletionStatus::Pending;
-  }
-
-  /// Only tracked retirement/proven release resets the no-progress timer.
+  /// @brief Only tracked retirement/proven release resets the no-progress timer.
   /// Polling, new work and warning edges are not forward cleanup progress.
   enum class DrainProgress {
     None,

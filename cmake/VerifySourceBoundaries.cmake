@@ -530,12 +530,21 @@ function(_avb0795_scan_files category)
     elseif(category STREQUAL "render")
       _avb0795_assert_app_includes("${file}" "${contents}")
       _avb0795_assert_layer_includes("${file}" "${contents}" "i18n")
+      set(allowed_render_windows_headers
+          platform/windows/overlay_window.hpp
+          platform/windows/windows_captured_frame.hpp)
+      file(RELATIVE_PATH render_relative "${AVB0795_SOURCE_ROOT}" "${file}")
+      string(REPLACE "\\" "/" render_relative "${render_relative}")
+      if(render_relative MATCHES "^render/windows_render_stack\\.(hpp|cpp)$")
+        list(APPEND allowed_render_windows_headers
+             platform/windows/detail/bridge_policy.hpp
+             platform/windows/detail/windows_graphics_policy.hpp)
+      endif()
       _avb0795_assert_layer_includes(
         "${file}"
         "${contents}"
         "platform/windows"
-        platform/windows/overlay_window.hpp
-        platform/windows/windows_captured_frame.hpp)
+        ${allowed_render_windows_headers})
       _avb0795_assert_no_match(
         "${file}"
         "${contents}"

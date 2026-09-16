@@ -7,7 +7,7 @@
 
 #include "avb/app/ports.hpp"
 #include "platform/windows/windows_source_registry.hpp"
-#include "render/bridge_policy.hpp"
+#include "platform/windows/detail/bridge_policy.hpp"
 
 #include <functional>
 

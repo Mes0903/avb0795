@@ -6,7 +6,7 @@
 #define AVB0795_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP
 
 #include "platform/windows/wgc_capture_job.hpp"
-#include "render/bridge_policy.hpp"
+#include "platform/windows/detail/bridge_policy.hpp"
 #include "render/graphics_retry_policy.hpp"
 
 #include <chrono>

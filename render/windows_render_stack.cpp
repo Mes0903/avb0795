@@ -5,6 +5,7 @@
 #include "avb/diagnostics/performance_report.hpp"
 
 #include "avb/render/replica_shaders.hpp"
+#include "platform/windows/detail/windows_graphics_policy.hpp"
 #include "platform/windows/overlay_window.hpp"
 #include "platform/windows/windows_captured_frame.hpp"
 #include "render/graphics_retry_policy.hpp"
@@ -3002,7 +3003,7 @@ namespace avb::render {
       d3_context_->End(slot->copy_query.Get());
       d3_context_->Flush();
     }
-    slot->phase = SlotPhase::D3CopyPending;
+    slot->phase = SlotPhase::ProducerPending;
     ++captured_frames_;
     observe_performance(PerformanceCounter::Admitted);
     slot->content_sequence = captured_frames_;
@@ -3014,7 +3015,7 @@ namespace avb::render {
     // the source-pool lease held by a healthy asynchronous copy on the other.
     if (!d3_device_removed_ &&
         std::ranges::any_of(slots_, [](const CaptureSlot &slot) noexcept {
-          return slot.phase == SlotPhase::D3CopyPending;
+          return slot.phase == SlotPhase::ProducerPending;
         })) {
       return true;
     }
@@ -3988,7 +3989,7 @@ namespace avb::render {
   {
     for (auto &slot : slots_) {
       switch (slot.phase) {
-      case SlotPhase::D3CopyPending:
+      case SlotPhase::ProducerPending:
         progress_d3_copy(slot, result, now);
         break;
       case SlotPhase::Submitted:

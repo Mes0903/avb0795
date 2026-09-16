@@ -5,9 +5,11 @@
 #define AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP
 
 #include "avb/core/types.hpp"
-#include "render/bridge_policy.hpp"
+#include "platform/windows/detail/bridge_policy.hpp"
+#include "platform/windows/detail/windows_graphics_policy.hpp"
 #include "render/graphics_retry_policy.hpp"
 #include "render/render_math.hpp"
+#include "render/replica_presentation.hpp"
 
 #include <dxgiformat.h>
 
@@ -28,29 +30,6 @@ namespace avb::platform::windows {
 }    // namespace avb::platform::windows
 
 namespace avb::render {
-
-  /// @brief Latest requested replica draw, independent of capture and native styles.
-  /// Selection displays full content; its optional preview is expressed in source
-  /// pixels. The runtime grants redraw admission through its existing FPS budget.
-  struct ReplicaPresentation {
-    std::optional<core::PixelRegion> region;
-    bool selecting_region{};
-    std::optional<core::PixelRegion> selection_preview;
-    friend bool operator==(const ReplicaPresentation &, const ReplicaPresentation &) = default;
-  };
-
-  /// @brief Geometry copied from a draw whose successful presentation has retired.
-  /// The runtime maps native client input through this value so selection follows
-  /// the displayed image. A later retirement with an older sequence keeps the
-  /// newer snapshot; geometry invalidation discards preceding in-flight mappings.
-  struct PresentationSnapshot {
-    core::Extent content;
-    core::Extent framebuffer;
-    Viewport viewport;
-    core::PixelRegion region;
-    bool selection_full_view{};
-    std::uint64_t present_sequence{};
-  };
 
   /// @brief Value snapshot of one main-thread progress pass.
   ///

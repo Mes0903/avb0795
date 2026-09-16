@@ -125,7 +125,7 @@ if(WIN32)
   target_compile_features(avb0795_windows PUBLIC cxx_std_23)
 
   add_library(avb0795_windows_graphics
-    ${PROJECT_SOURCE_DIR}/render/bridge_policy.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/detail/bridge_policy.cpp
     ${PROJECT_SOURCE_DIR}/render/graphics_retry_policy.cpp
     ${PROJECT_SOURCE_DIR}/render/render_math.cpp
     ${PROJECT_SOURCE_DIR}/render/windows_render_stack.cpp

@@ -1,6 +1,6 @@
 /// @file
-/// Stable bridge-reason precedence, separated from concrete capability queries.
-#include "render/bridge_policy.hpp"
+/// @brief Stable bridge-reason precedence, separated from concrete capability queries.
+#include "platform/windows/detail/bridge_policy.hpp"
 
 namespace avb::render {
 
@@ -42,6 +42,8 @@ namespace avb::render {
   std::optional<BridgeSelection>
   select_interop_fallback(const InteropFallbackPoint point) noexcept
   {
+    // A fallback reason describes the eventual transport, not permission to
+    // destroy resources still referenced by either graphics API.
     switch (point) {
     case InteropFallbackPoint::RuntimeWorkPending:
       return std::nullopt;

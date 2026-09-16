@@ -1,8 +1,8 @@
 /// @file
-/// Pure bridge decisions; native capability queries and resource ownership stay
+/// @brief Pure bridge decisions; native capability queries and resource ownership stay
 /// in WindowsRenderStack. No policy in this file performs GPU work.
-#ifndef AVB0795_RENDER_BRIDGE_POLICY_HPP
-#define AVB0795_RENDER_BRIDGE_POLICY_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_DETAIL_BRIDGE_POLICY_HPP
+#define AVB0795_PLATFORM_WINDOWS_DETAIL_BRIDGE_POLICY_HPP
 
 #include "avb/core/types.hpp"
 
@@ -11,12 +11,15 @@
 
 namespace avb::render {
 
-  /// Construction preference; ForceCpuBaseline exercises the real CPU path.
+  /// @brief Construction preference; ForceCpuBaseline exercises the real CPU path.
   enum class WindowsBridgePreference { Automatic,
                                        ForceCpuBaseline };
 
-  /// Results of concrete D3D/Vulkan queries, including every imported NT handle.
-  /// False facts select a portable fallback reason in a stable priority order.
+  /// @brief Value snapshot of concrete D3D/Vulkan capability queries.
+  ///
+  /// False facts select a fallback reason in a stable priority order. Device-level
+  /// support does not certify ring construction: compatibility is also queried
+  /// for created NT handles, and subsequent import operations can still fail.
   struct BridgeCapabilityFacts final {
     bool adapter_luid_matches{};
     bool external_image_supported{};
@@ -27,10 +30,10 @@ namespace avb::render {
     bool compatible_memory_type_available{};
   };
 
-  /// One canonical visible bridge result; GPU interop uses BridgeReason::None.
+  /// @brief One canonical visible bridge result; GPU interop uses BridgeReason::None.
   struct BridgeSelection final {
     BridgeSelection() = delete;
-    /// Pair the selected transport with the reason returned by bridge policy.
+    /// @brief Store a policy-produced pair; this constructor does not validate it.
     constexpr BridgeSelection(const core::BridgeMode selected_mode,
                               const core::BridgeReason selected_reason) noexcept
         : mode{selected_mode}, reason{selected_reason} {}
@@ -42,25 +45,31 @@ namespace avb::render {
                            const BridgeSelection &) = default;
   };
 
-  /// Whether setup failed before use or all runtime users have since retired.
+  /// @brief Evidence supplied by the owner before replacing interop resources.
   enum class InteropFallbackPoint {
     PreSubmitSetupFailure,
     RuntimeWorkPending,
     RuntimeWorkRetired,
   };
 
-  /// Select GPU interop only when all facts pass; otherwise report the first
-  /// failed fact. This decision neither allocates nor changes native owners.
+  /// @brief Select GPU interop only when all facts pass.
+  ///
+  /// Otherwise report the first failed fact. The returned value requests a
+  /// transport; it neither allocates resources nor certifies their retirement.
   [[nodiscard]] BridgeSelection
   select_bridge(BridgeCapabilityFacts facts) noexcept;
 
-  /// Permit operational CPU fallback only before submission or after retirement.
+  /// @brief Permit CPU fallback before native use or after its proven retirement.
+  ///
   /// Pending work returns no selection so callers keep the current owners alive.
+  /// The caller supplies the evidence; the policy does not inspect native work.
   [[nodiscard]] std::optional<BridgeSelection>
   select_interop_fallback(InteropFallbackPoint point) noexcept;
 
-  /// Avoid repeatedly probing an already-failed CPU generation; a new resource
-  /// generation may retry after the prerequisite capability facts pass.
+  /// @brief Suppress repeated interop probes for an already-failed CPU generation.
+  ///
+  /// A different resource generation may retry after prerequisite facts pass.
+  /// The optional selection is borrowed only for the call; no owner is retained.
   [[nodiscard]] constexpr bool should_probe_interop_generation(
     const bool prefix_available,
     const std::optional<BridgeSelection> &current_selection,
@@ -75,4 +84,4 @@ namespace avb::render {
 
 }    // namespace avb::render
 
-#endif    // AVB0795_RENDER_BRIDGE_POLICY_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_DETAIL_BRIDGE_POLICY_HPP
