@@ -89,6 +89,7 @@ if(WIN32)
     ${PROJECT_SOURCE_DIR}/render/render_math.cpp
     ${PROJECT_SOURCE_DIR}/render/vulkan_device.cpp
     ${PROJECT_SOURCE_DIR}/render/vulkan_renderer.cpp
+    ${PROJECT_SOURCE_DIR}/render/vulkan_wsi.cpp
     ${AVB0795_REPLICA_SHADER_SOURCE}
   )
 

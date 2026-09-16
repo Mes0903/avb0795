@@ -21,6 +21,8 @@ flowchart LR
 
 為了依生命週期閱讀 renderer 內部實作，程式需要集中保存資源狀態，並依操作責任安排 translation units。[`vulkan_renderer_impl.hpp`](../../render/detail/vulkan_renderer_impl.hpp) 定義同一個私有 `Impl` 與其持有的資源；[`vulkan_device.cpp`](../../render/vulkan_device.cpp) 實作 instance、surface bootstrap、device 選擇、queues 與共用 graphics resources。Constructor、整體 teardown 與 canonical transitions 維持由 renderer 實作串接。
 
+為了在 resize、surface recovery 與結束時安全處理呈現中的影像，WSI 操作需要同時檢查 slot image users 與獨立 present records。[`vulkan_wsi.cpp`](../../render/vulkan_wsi.cpp) 集中 swapchain 建立／退休、render-pass 與 framebuffer resources、present proof observation、acquired-image release 及 recovery episode。這些方法存取同一個 `Impl`，將完成證據交回 canonical transitions，並沿用共同的 error／deadline 結果。
+
 目前 graphics dependency configuration 與原生驗證使用 Windows。`avb0795_vulkan_renderer` 擁有獨立的 source／link 邊界，連結 core、Vulkan、GLFW 與 diagnostics。Linux 的 Portal／PipeWire 接入屬於後續平台工作。
 
 ## Device bootstrap 與借用

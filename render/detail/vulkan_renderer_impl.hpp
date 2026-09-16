@@ -33,6 +33,22 @@ namespace avb::render::detail {
     inline constexpr std::size_t cpu_slot_count = 3;
     inline constexpr std::size_t present_record_count = cpu_slot_count;
 
+    [[nodiscard]] constexpr bool
+    has_zero_dimension(const core::Extent value) noexcept
+    {
+      return value.width == 0 || value.height == 0;
+    }
+
+    // Independent native obligations share one wakeup; keep the earliest deadline
+    // so a later retry cannot postpone an already-pending completion observation.
+    template <typename Value>
+    void earlier_deadline(std::optional<Value> &current, const Value candidate)
+    {
+      if (!current || candidate < *current) {
+        current = candidate;
+      }
+    }
+
     /// @brief Four vec4 blocks shared with the fragment shader's push layout.
     /// Bounds address texel centers; the selection stroke uses framebuffer-pixel
     /// thickness converted to local UV units. The triangle stays allocation-free.
