@@ -1,5 +1,5 @@
 /// @file
-/// Replica-only native graphics owner. Main-thread ticks advance a bounded
+/// @brief Replica-only native graphics owner. Main-thread ticks advance a bounded
 /// D3-to-Vulkan ring and independent WSI retirement without synchronous waits.
 #include "render/windows_render_stack.hpp"
 
@@ -47,7 +47,18 @@ namespace avb::render {
     constexpr std::uint32_t bytes_per_pixel = 4;
     constexpr auto pending_poll_interval = 2ms;
 
-    /// Move-only owner of a temporary NT sharing handle; importing native APIs
+    /// @brief Four vec4 blocks shared with the fragment shader's push layout.
+    /// Bounds address texel centers; the selection stroke uses framebuffer-pixel
+    /// thickness converted to local UV units. The triangle stays allocation-free.
+    struct alignas(16) ReplicaPushConstants {
+      std::array<float, 4> transform;
+      std::array<float, 4> bounds;
+      std::array<float, 4> selection;
+      std::array<float, 4> stroke;
+    };
+    static_assert(sizeof(ReplicaPushConstants) == 64);
+
+    /// @brief Move-only owner of a temporary NT sharing handle; importing native APIs
     /// retain their own resource references, so the handle can close afterward.
     class UniqueWin32Handle final {
     public:
@@ -75,7 +86,7 @@ namespace avb::render {
         return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
       }
 
-      /// Close a valid NT handle once and leave the wrapper empty.
+      // Clearing the wrapper makes repeated reset and moved-from destruction safe.
       void reset() noexcept
       {
         if (*this) {
@@ -100,7 +111,7 @@ namespace avb::render {
 #define AVB0795_HAS_EXT_MAINTENANCE_VARIANT 1
 #endif
 
-    /// Feature/entry-point pair enabled on this concrete Vulkan device.
+    /// @brief Feature/entry-point pair enabled on this concrete Vulkan device.
     enum class MaintenanceVariant { None,
                                     Khr,
                                     Ext };
@@ -130,7 +141,8 @@ namespace avb::render {
       return value.width == 0 || value.height == 0;
     }
 
-    /// Validate allocation arithmetic before buffer sizes, row offsets or maps.
+    // Validate both native allocation size and host-addressable row arithmetic
+    // before either side of the CPU bridge can use these dimensions.
     [[nodiscard]] std::optional<VkDeviceSize>
     checked_pixel_bytes(const core::Extent extent) noexcept
     {
@@ -151,7 +163,8 @@ namespace avb::render {
       return bytes;
     }
 
-    /// Merge independent completion/recovery deadlines without delaying a user.
+    // Independent native obligations share one wakeup; keep the earliest deadline
+    // so a later retry cannot postpone an already-pending completion observation.
     template <typename Value>
     void earlier_deadline(std::optional<Value> &current, const Value candidate)
     {
@@ -170,7 +183,8 @@ namespace avb::render {
         });
     }
 
-    /// Intersect compatible memory bits with required flags before preferences.
+    // Preferences cannot make an incompatible memory type usable. Keep the first
+    // required-only match as a fallback when no compatible preferred type exists.
     [[nodiscard]] std::optional<std::uint32_t>
     memory_type_index(const VkPhysicalDeviceMemoryProperties &properties,
                       std::uint32_t bits,
@@ -198,23 +212,28 @@ namespace avb::render {
 
   }    // namespace
 
-  /// Canonical owner for one replica graphics generation. The runtime owns this
+  /// @brief Canonical owner for one replica graphics generation. The runtime owns this
   /// aggregate and its borrowed overlay; callbacks never enter this data plane.
   class WindowsRenderStack::Impl final {
   public:
     using SlotPhase = RenderSlotPhase;
 
-    /// One of three stable ring slots, with CPU or imported-GPU destination.
+    /// @brief One of three stable ring slots, with CPU or imported-GPU destination.
     /// frame owns only the WGC source-copy lease; sampled images survive that
     /// checkout and can remain as safe redraw content after submission retires.
     struct CaptureSlot final {
+      // Source-copy lease and completion query. These can outlive Vulkan loss
+      // because the D3 device has an independent completion/removal obligation.
       ComPtr<ID3D11Texture2D> readback_texture;
       ComPtr<ID3D11Query> copy_query;
       std::optional<platform::windows::WindowsCapturedFrame> frame;
       core::Extent content{};
       SlotPhase phase{SlotPhase::Empty};
       std::uint64_t content_sequence{};
+      PresentationSnapshot recorded_presentation{};
 
+      // CPU transport owns host-visible upload storage plus a separate sampled
+      // image. mapped_upload only borrows the mapped upload_memory allocation.
       VkBuffer upload_buffer{VK_NULL_HANDLE};
       VkDeviceMemory upload_memory{VK_NULL_HANDLE};
       void *mapped_upload{};
@@ -224,6 +243,8 @@ namespace avb::render {
       VkDeviceMemory sampled_memory{VK_NULL_HANDLE};
       VkImageView sampled_view{VK_NULL_HANDLE};
       bool sampled_image_initialized{};
+      // Slot-owned acquisition/submission proof is separate from a present record.
+      // The command buffer is pool-owned and survives capture-slot reconstruction.
       VkDescriptorSet descriptor{VK_NULL_HANDLE};
       VkCommandBuffer command_buffer{VK_NULL_HANDLE};
       VkFence acquire_fence{VK_NULL_HANDLE};
@@ -234,6 +255,8 @@ namespace avb::render {
       std::uint32_t acquired_image_index{};
       bool acquired_image{};
 
+      // GPU transport shares a D3 destination allocation with Vulkan. Its source
+      // checkout is still released after the D3 copy, before Vulkan samples it.
       ComPtr<ID3D11Texture2D> interop_texture;
       UniqueWin32Handle interop_handle;
       VkImage interop_image{VK_NULL_HANDLE};
@@ -247,7 +270,7 @@ namespace avb::render {
       bool query_completion{};
     };
 
-    /// Independent presentation lease: semaphore and WSI outlive the submission
+    /// @brief Independent presentation lease: semaphore and WSI outlive the submission
     /// record until the attached maintenance1 present fence proves retirement.
     struct PresentRecord final {
       VkFence fence{VK_NULL_HANDLE};
@@ -256,10 +279,14 @@ namespace avb::render {
       bool counts_as_presented{};
       bool confirms_recovery{};
       bool uncertain{};
+      std::optional<PresentationSnapshot> presentation;
     };
 
-    /// Active or retired WSI aggregate. Moving to retired does not destroy any
-    /// image views, framebuffer, pipeline or outstanding presentation resource.
+    /// @brief Active or retired WSI aggregate with explicit native teardown.
+    ///
+    /// Images are borrowed from the swapchain; views/framebuffers/pipeline are
+    /// owned children. Retirement preserves them until all referencing slot and
+    /// present records are safe, even if replacement construction fails.
     struct SwapchainState final {
       VkSwapchainKHR handle{VK_NULL_HANDLE};
       VkFormat format{VK_FORMAT_UNDEFINED};
@@ -272,7 +299,7 @@ namespace avb::render {
       bool recovery_candidate{};
     };
 
-    /// Owner-local construction budget, retained until a replacement presents.
+    /// @brief Owner-local construction budget, retained until a replacement presents.
     struct RecoveryEpisode final {
       GraphicsFailureCategory category{GraphicsFailureCategory::Swapchain};
       GraphicsRecoveryEpisodeState state{};
@@ -299,6 +326,10 @@ namespace avb::render {
     /// Adopt a matching checkout and enqueue its D3 copy on the main thread.
     /// Retain the checkout until query/fence completion or confirmed D3 removal.
     void submit(platform::windows::WindowsCapturedFrame &&frame);
+    void set_presentation(ReplicaPresentation presentation) noexcept;
+    [[nodiscard]] bool has_redraw_work() const noexcept;
+    void request_redraw() noexcept { redraw_requested_ = true; }
+    void invalidate_presentation() noexcept;
     /// Poll native proof and WSI recovery without waiting; contain failures into
     /// fixed result values while preserving possibly referenced owners.
     [[nodiscard]] RenderTickResult
@@ -555,6 +586,9 @@ namespace avb::render {
     PFN_vkReleaseSwapchainImagesEXT release_images_ext_{};
 #endif
 
+    // Device-scoped resources survive WSI replacement. Slot rebuild resets the
+    // descriptor pool only after slot users retire; device teardown frees pools
+    // after their slot and swapchain children have been released.
     VkDescriptorSetLayout descriptor_layout_{VK_NULL_HANDLE};
     VkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
     VkDescriptorPool descriptor_pool_{VK_NULL_HANDLE};
@@ -568,12 +602,19 @@ namespace avb::render {
     CaptureSlot *retained_slot_{};
     std::uint64_t last_submitted_sequence_{};
     bool redraw_requested_{};
+    ReplicaPresentation presentation_;
+    bool presentation_dirty_{};
+    std::optional<PresentationSnapshot> published_presentation_;
+    std::uint64_t next_present_sequence_{1};
+    std::uint64_t first_valid_present_sequence_{1};
     // Present records are bounded independently of reusable source-copy slots.
     std::array<std::optional<PresentRecord>, present_record_count>
       present_records_{};
     std::optional<SwapchainState> swapchain_;
     std::vector<SwapchainState> retired_swapchains_;
 
+    // Capability facts are diagnostic values; active_bridge_mode_ describes the
+    // actually constructed ring. A pending selection edge owns no native state.
     BridgeCapabilityFacts bridge_facts_{};
     std::optional<BridgeSelection> bridge_selection_;
     std::optional<BridgeSelection> bridge_change_pending_;
@@ -586,6 +627,8 @@ namespace avb::render {
     std::size_t interop_created_handle_count_{};
     std::size_t interop_compatible_handle_count_{};
 
+    // Admission, recovery, and completion are separate state. Closing admission
+    // or recording a terminal error leaves native owners available to later ticks.
     bool accepting_frames_{true};
     bool draining_{};
     bool progress_pending_{};
@@ -752,6 +795,8 @@ namespace avb::render {
       extension_available(available_extensions,
                           VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
 #endif
+    // Both transports depend on present fences and explicit unused-image release.
+    // Falling back to CPU copies therefore cannot relax this WSI requirement.
     if (!khr_surface_maintenance_enabled_ && !ext_surface_maintenance_enabled_) {
       throw graphics_error(core::AppErrorCode::UnsupportedGraphics);
     }
@@ -846,6 +891,8 @@ namespace avb::render {
         return id.deviceLUIDValid == VK_TRUE &&
                std::memcmp(&d3_luid, id.deviceLUID, VK_LUID_SIZE) == 0;
       };
+    // Prefer a same-adapter candidate for sharing while preserving the original
+    // order of equally ranked devices; later checks still enforce the WSI floor.
     std::ranges::stable_sort(
       devices, [&matches_d3_adapter](const VkPhysicalDevice left,
                                      const VkPhysicalDevice right) noexcept {
@@ -1135,6 +1182,8 @@ namespace avb::render {
 
   void WindowsRenderStack::Impl::collect_bridge_capabilities() noexcept
   {
+    // These queries establish a device-level prefix. Memory compatibility stays
+    // unproven until slot creation queries the handles for the actual allocation.
     bridge_capabilities_collected_ = false;
     bridge_facts_ = {};
     d3_device5_.Reset();
@@ -1324,10 +1373,12 @@ namespace avb::render {
     }
     descriptor_layout_ = created_descriptor_layout;
 
+    // Fragment sampling and the selection outline share four vec4 blocks.
+    // Both capture transports use the same allocation-normalized interface.
     const VkPushConstantRange push_constant{
-      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       .offset = 0,
-      .size = sizeof(float) * 2,
+      .size = sizeof(ReplicaPushConstants),
     };
     const VkPipelineLayoutCreateInfo pipeline_layout_info{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1597,6 +1648,9 @@ namespace avb::render {
     SwapchainState candidate;
     candidate.format = selected_format->format;
     candidate.extent = extent;
+    // Passing oldSwapchain retires it even if native creation fails. Move its
+    // resources into tracked retirement before the call so failure cannot expose
+    // the old handle as active or lose the outstanding present leases.
     if (create_plan.retire_active_before_create) {
       retire_active_swapchain();
     }
@@ -1633,6 +1687,8 @@ namespace avb::render {
         core::AppErrorCode::RuntimeConstructionFailure,
         result == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : result)};
     }
+    // These image handles belong to WSI. Only the views/framebuffers built around
+    // them are destroyed individually when this swapchain record retires.
     state.images.resize(image_count);
     result = vkGetSwapchainImagesKHR(device_, state.handle, &image_count,
                                      state.images.data());
@@ -1774,6 +1830,8 @@ namespace avb::render {
         .pName = "main",
         .pSpecializationInfo = nullptr,
       }};
+    // Geometry is generated from vertex indices. Dynamic viewport/scissor supply
+    // aspect fit, so capture-size changes need no vertex allocation or new shader.
     const VkPipelineVertexInputStateCreateInfo vertex_input{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     const VkPipelineInputAssemblyStateCreateInfo input_assembly{
@@ -2382,6 +2440,8 @@ namespace avb::render {
     if (result != VK_SUCCESS) {
       return false;
     }
+    // A format-level import capability cannot choose memory for this handle.
+    // Both the image requirements and the exported allocation must allow it.
     const auto compatible_bits = requirements.memoryRequirements.memoryTypeBits &
                                  handle_properties.memoryTypeBits;
     const auto memory_index =
@@ -2424,6 +2484,8 @@ namespace avb::render {
     VkDeviceMemory allocated_interop_memory{VK_NULL_HANDLE};
     const auto result = vkAllocateMemory(device_, &allocation_info, nullptr,
                                          &allocated_interop_memory);
+    // This import form leaves NT-handle ownership with us. The allocation keeps
+    // its own reference on success; either result ends this temporary handle use.
     slot.interop_handle.reset();
     if (result != VK_SUCCESS) {
       return std::unexpected{
@@ -2496,6 +2558,8 @@ namespace avb::render {
   void WindowsRenderStack::Impl::destroy_capture_slot(
     CaptureSlot &slot) noexcept
   {
+    // Pools span capture allocations. Preserve the command buffer for the next
+    // ring while clearing every allocation-local owner and borrowed mapping.
     const auto command_buffer = slot.command_buffer;
     slot.frame.reset();
     slot.copy_query.Reset();
@@ -2558,6 +2622,7 @@ namespace avb::render {
       return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
     }
     const bool generation_changed = generation != generation_;
+    invalidate_presentation();
     for (auto &slot : slots_) {
       if (slot.phase == SlotPhase::CpuReady ||
           slot.phase == SlotPhase::GpuReady) {
@@ -2568,6 +2633,8 @@ namespace avb::render {
         progress_pending_ = true;
       }
     }
+    // The old ring is discarded before constructing replacements. The caller's
+    // capture barrier must remain closed on failure; there is no old-ring rollback.
     destroy_capture_slots();
     const auto reset_result = vkResetDescriptorPool(device_, descriptor_pool_, 0);
     if (reset_result != VK_SUCCESS) {
@@ -2800,6 +2867,8 @@ namespace avb::render {
       const auto signal_result =
         d3_context4_->Signal(interop_fence_.Get(), slot->d3_fence_target);
       if (FAILED(signal_result)) {
+        // Copy was issued before Signal failed. A healthy device still owes copy
+        // completion, so append a query and retain the checkout while falling back.
         const auto removal = d3_device_->GetDeviceRemovedReason();
         if (FAILED(removal)) {
           d3_device_removed_ = true;
@@ -2831,6 +2900,8 @@ namespace avb::render {
 
   bool WindowsRenderStack::Impl::has_unsafe_native_work() const noexcept
   {
+    // Test D3 before the Vulkan-loss shortcut: loss of one API does not discharge
+    // the source-pool lease held by a healthy asynchronous copy on the other.
     if (!d3_device_removed_ &&
         std::ranges::any_of(slots_, [](const CaptureSlot &slot) noexcept {
           return slot.phase == SlotPhase::D3CopyPending;
@@ -2891,6 +2962,9 @@ namespace avb::render {
 
   bool WindowsRenderStack::Impl::render_allocation_idle() const noexcept
   {
+    // A pending present owns its semaphore and swapchain in a separate record.
+    // Once slot submission retires it no longer references the capture image or
+    // descriptor, so those allocation-local resources can be reconstructed.
     return std::ranges::all_of(slots_, [](const CaptureSlot &slot) noexcept {
       return slot.phase == SlotPhase::Empty ||
              slot.phase == SlotPhase::CpuReady ||
@@ -2985,6 +3059,9 @@ namespace avb::render {
       return;
     }
 
+    // Runtime fallback changes both transport allocations and their shared
+    // timeline. Keep the existing owners intact until every tracked user retires;
+    // the new CPU ring remains within the same resource generation.
     const auto allocation = capture_allocation_;
     const auto format = capture_format_;
     destroy_capture_slots();
@@ -3038,12 +3115,39 @@ namespace avb::render {
     result.made_progress = true;
   }
 
+  void WindowsRenderStack::Impl::set_presentation(
+    const ReplicaPresentation presentation) noexcept
+  {
+    if (presentation == presentation_) {
+      return;
+    }
+    if (presentation.selecting_region != presentation_.selecting_region) {
+      invalidate_presentation();
+    }
+    presentation_ = presentation;
+    presentation_dirty_ = true;
+  }
+
+  bool WindowsRenderStack::Impl::has_redraw_work() const noexcept
+  {
+    return presentation_dirty_ && retained_slot_ && !draining_ &&
+           !terminal_error_ && !vulkan_device_lost_ && !d3_device_removed_ &&
+           !has_zero_dimension(framebuffer_);
+  }
+
+  void WindowsRenderStack::Impl::invalidate_presentation() noexcept
+  {
+    published_presentation_.reset();
+    first_valid_present_sequence_ = next_present_sequence_;
+  }
+
   void WindowsRenderStack::Impl::resize(const core::Extent framebuffer) noexcept
   {
     if (framebuffer == framebuffer_) {
       return;
     }
     framebuffer_ = framebuffer;
+    invalidate_presentation();
     if (!has_zero_dimension(framebuffer_)) {
       swapchain_recreate_pending_ = true;
     }
@@ -3051,6 +3155,7 @@ namespace avb::render {
 
   void WindowsRenderStack::Impl::begin_drain() noexcept
   {
+    invalidate_presentation();
     accepting_frames_ = false;
     draining_ = true;
     retained_slot_ = nullptr;
@@ -3068,6 +3173,7 @@ namespace avb::render {
   void WindowsRenderStack::Impl::begin_device_recovery_drain(
     const DeviceLossKind kind) noexcept
   {
+    invalidate_presentation();
     accepting_frames_ = false;
     draining_ = true;
     retained_slot_ = nullptr;
@@ -3152,9 +3258,18 @@ namespace avb::render {
         continue;
       }
       if (record->counts_as_presented) {
+        // Enqueue success is insufficient for accounting or retry reset. Only
+        // the present fence's retirement discharges this presentation record.
         ++presented_frames_;
         if (record->confirms_recovery) {
           reset_recovery_after_present(record->swapchain);
+        }
+        if (record->presentation && swapchain_ &&
+            record->swapchain == swapchain_->handle &&
+            record->presentation->present_sequence >= first_valid_present_sequence_ &&
+            (!published_presentation_ ||
+             record->presentation->present_sequence > published_presentation_->present_sequence)) {
+          published_presentation_ = record->presentation;
         }
       }
       vkDestroySemaphore(device_, record->wait_semaphore, nullptr);
@@ -3282,6 +3397,9 @@ namespace avb::render {
       result.made_progress = true;
       return;
     }
+    // Upload commands copy the entire allocation, but capture only defines the
+    // content rectangle. Clear the remaining bytes and translate D3's row pitch
+    // into the tightly packed allocation stride expected by Vulkan's buffer copy.
     std::memset(slot.mapped_upload, 0, static_cast<std::size_t>(*byte_count));
     auto *const destination = static_cast<std::byte *>(slot.mapped_upload);
     const auto *const source = static_cast<const std::byte *>(mapped.pData);
@@ -3295,6 +3413,8 @@ namespace avb::render {
     d3_context_->Unmap(slot.readback_texture.Get(), 0);
 
     if (!slot.upload_coherent) {
+      // Flush whole noncoherent atoms. If rounding would overflow or extend past
+      // the allocation, VK_WHOLE_SIZE covers the mapped allocation's remainder.
       const auto atom_size =
         (std::max) (physical_properties_.limits.nonCoherentAtomSize,
                     VkDeviceSize{1});
@@ -3355,6 +3475,9 @@ namespace avb::render {
     }
 
     if (!slot.gpu_copy && &slot != retained_slot_) {
+      // Reused CPU storage already has a shader-read layout; first use does not.
+      // Retained redraw bypasses this upload because its sampled pixels survive
+      // submission retirement and no new host data has replaced them.
       const VkImageMemoryBarrier before_copy{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -3432,6 +3555,9 @@ namespace avb::render {
                            0, nullptr, 1, &before_sampling);
     }
     else if (slot.gpu_copy) {
+      // D3 completion supplies the timeline ordering, while this barrier acquires
+      // the shared image for Vulkan sampling. Both are needed on retained redraw
+      // too, since the prior command sequence returned ownership to EXTERNAL.
       const VkImageMemoryBarrier acquire_external{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -3456,6 +3582,8 @@ namespace avb::render {
                            0, nullptr, 1, &acquire_external);
     }
 
+    // Clear the whole attachment before narrowing viewport/scissor to content.
+    // Letterbox pixels therefore stay opaque black across resize and redraw.
     constexpr VkClearValue clear{.color = {{0.0F, 0.0F, 0.0F, 1.0F}}};
     const VkRenderPassBeginInfo render_pass_info{
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -3468,14 +3596,19 @@ namespace avb::render {
     };
     vkCmdBeginRenderPass(slot.command_buffer, &render_pass_info,
                          VK_SUBPASS_CONTENTS_INLINE);
-    const auto fitted =
-      aspect_fit(slot.content, {.width = swapchain_->extent.width,
-                                .height = swapchain_->extent.height});
-    if (!fitted) {
+    const core::Extent destination{swapchain_->extent.width, swapchain_->extent.height};
+    const auto sampling = region_sampling(
+      presentation_.selecting_region ? std::nullopt : presentation_.region,
+      slot.content, capture_allocation_, destination);
+    if (!sampling) {
       vkCmdEndRenderPass(slot.command_buffer);
       static_cast<void>(vkEndCommandBuffer(slot.command_buffer));
       return VK_ERROR_UNKNOWN;
     }
+    const auto *const fitted = &sampling->viewport;
+    slot.recorded_presentation = {
+      slot.content, destination, *fitted, sampling->region,
+      presentation_.selecting_region, 0};
     const VkViewport viewport{
       .x = static_cast<float>(fitted->x),
       .y = static_cast<float>(fitted->y),
@@ -3489,11 +3622,27 @@ namespace avb::render {
                  .y = static_cast<std::int32_t>(fitted->y)},
       .extent = {.width = fitted->width, .height = fitted->height},
     };
-    const std::array texture_scale{
-      static_cast<float>(slot.content.width) /
-        static_cast<float>(capture_allocation_.width),
-      static_cast<float>(slot.content.height) /
-        static_cast<float>(capture_allocation_.height)};
+    ReplicaPushConstants constants{
+      .transform = {sampling->texture_offset[0], sampling->texture_offset[1],
+                    sampling->texture_scale[0], sampling->texture_scale[1]},
+      .bounds = {sampling->texture_min[0], sampling->texture_min[1],
+                 sampling->texture_max[0], sampling->texture_max[1]},
+      .selection = {},
+      .stroke = {},
+    };
+    if (presentation_.selecting_region && presentation_.selection_preview) {
+      if (const auto preview = core::intersect_region(*presentation_.selection_preview, slot.content)) {
+        const auto width = static_cast<float>(slot.content.width);
+        const auto height = static_cast<float>(slot.content.height);
+        constants.selection = {
+          static_cast<float>(preview->x) / width,
+          static_cast<float>(preview->y) / height,
+          static_cast<float>(preview->x + preview->width) / width,
+          static_cast<float>(preview->y + preview->height) / height};
+        constants.stroke = {1.0F, 2.0F / static_cast<float>(fitted->width),
+                            2.0F / static_cast<float>(fitted->height), 0.0F};
+      }
+    }
     vkCmdSetViewport(slot.command_buffer, 0, 1, &viewport);
     vkCmdSetScissor(slot.command_buffer, 0, 1, &scissor);
     vkCmdBindPipeline(slot.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3501,8 +3650,8 @@ namespace avb::render {
     vkCmdBindDescriptorSets(slot.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipeline_layout_, 0, 1, &slot.descriptor, 0, nullptr);
     vkCmdPushConstants(
-      slot.command_buffer, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
-      static_cast<std::uint32_t>(sizeof(texture_scale)), texture_scale.data());
+      slot.command_buffer, pipeline_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+      static_cast<std::uint32_t>(sizeof(constants)), &constants);
     vkCmdDraw(slot.command_buffer, 3, 1, 0, 0);
     vkCmdEndRenderPass(slot.command_buffer);
     if (slot.gpu_copy) {
@@ -3530,6 +3679,8 @@ namespace avb::render {
                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
                            nullptr, 1, &release_external);
     }
+    // The submission fence also covers the external release barrier. Slot reuse
+    // waits for that proof before allowing a later D3 copy to overwrite the image.
     return vkEndCommandBuffer(slot.command_buffer);
   }
 
@@ -3613,6 +3764,9 @@ namespace avb::render {
   void WindowsRenderStack::Impl::release_acquired_image(
     CaptureSlot &slot, RenderTickResult &result)
   {
+    // progress_submission has already observed the phase's proof fence. Completed
+    // but unconsumed binary signals can now be destroyed even when image release
+    // fails; that failure still keeps the image attached to its owning swapchain.
     const auto prior_phase = slot.phase;
     const auto release_result =
       release_swapchain_image(slot.owning_swapchain, slot.acquired_image_index);
@@ -3682,6 +3836,8 @@ namespace avb::render {
     }
 
     if (slot.phase == SlotPhase::Submitted) {
+      // Presentation, if still pending, holds its own record and wait semaphore.
+      // This proof retires only the slot's command-buffer and sampled-image use.
       result.made_progress = true;
       reset_slot_after_vulkan(slot);
       return;
@@ -3748,6 +3904,8 @@ namespace avb::render {
       break;
     }
 
+    // Acquire has created ownership before command recording can fail. Record it
+    // now so every later error retains the correct image and acquire proof.
     slot.acquired_image = true;
     slot.owning_swapchain = swapchain_->handle;
     slot.acquired_image_index = image_index;
@@ -3763,6 +3921,8 @@ namespace avb::render {
       return;
     }
 
+    // WSI availability gates attachment writes; shared D3 data gates sampling.
+    // The CPU path uses only the acquire wait and has no imported timeline.
     const std::array wait_semaphores{slot.acquire_semaphore, interop_timeline_};
     const std::array<VkPipelineStageFlags, 2> wait_stages{
       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -3907,6 +4067,12 @@ namespace avb::render {
       present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR;
     if (record.counts_as_presented) {
       redraw_requested_ = false;
+      // Recording and enqueue run synchronously on the main thread, so this draw
+      // contains the latest accepted settings. Subsequent setters mark it dirty
+      // again while this independently owned presentation record retires.
+      presentation_dirty_ = false;
+      record.presentation = slot.recorded_presentation;
+      record.presentation->present_sequence = next_present_sequence_++;
     }
     record.confirms_recovery = swapchain_->recovery_candidate;
     record.uncertain = present.ownership == PresentOwnership::Uncertain;
@@ -3976,6 +4142,8 @@ namespace avb::render {
     if (recovery_episode_ && recovery_episode_->category == category) {
       return;
     }
+    // A category change starts a new episode. An older present may retire later,
+    // but its former candidate marker must not reset this episode's attempt budget.
     if (swapchain_) {
       swapchain_->recovery_candidate = false;
     }
@@ -4146,6 +4314,8 @@ namespace avb::render {
       }
       progress_retired_swapchains(result);
       if (!retired_swapchains_.empty()) {
+        // A surface cannot be replaced while any retired child still owes native
+        // image-use or present proof, even if a new swapchain could otherwise fit.
         schedule_poll(result, now);
         return;
       }
@@ -4222,6 +4392,8 @@ namespace avb::render {
       return;
     }
 
+    // Construction restores a candidate, not the retry budget. Retained content
+    // requests one redraw so recovery can be confirmed without a new capture.
     recovery_episode_->state = advance_graphics_recovery_episode(
       recovery_episode_->state,
       GraphicsRecoveryObservation::ReplacementConstructed);
@@ -4259,6 +4431,8 @@ namespace avb::render {
       }
       result.terminal_error = terminal_error_;
 
+      // Retire existing owners before considering new work. These passes remain
+      // active for zero-size framebuffers, terminal errors, and closed admission.
       progress_present_records(result, now);
       progress_slots(result, now);
       for (auto &record : present_records_) {
@@ -4276,6 +4450,8 @@ namespace avb::render {
           !interop_fallback_pending_ && !surface_recovery_pending_ &&
           !swapchain_recreate_pending_ && !has_zero_dimension(framebuffer_) &&
           swapchain_) {
+        // At most one acquire/submit/present attempt per tick, using a free bounded
+        // present record. A full record set supplies its own future poll deadline.
         if (auto *const slot = ready_slot()) {
           if (auto *const record = empty_present_record()) {
             try_present(*slot, *record, result, now);
@@ -4315,6 +4491,8 @@ namespace avb::render {
     if (has_unsafe_native_work()) {
       schedule_poll(result, now);
     }
+    // This is graphics-owner drain proof only. Capture callback/checkout barriers
+    // are combined with it by the caller before releasing the whole runtime.
     result.drain_complete =
       draining_ && slots_in_flight() == 0 && presentations_in_flight() == 0;
     result.cleanup_pending =
@@ -4336,6 +4514,12 @@ namespace avb::render {
     else {
       result.device_loss.reset();
     }
+    if (draining_ || terminal_error_ || vulkan_device_lost_ || d3_device_removed_ ||
+        surface_recovery_pending_ || swapchain_recreate_pending_ ||
+        has_zero_dimension(framebuffer_)) {
+      invalidate_presentation();
+    }
+    result.presentation = published_presentation_;
     return result;
   }
 
@@ -4356,6 +4540,21 @@ namespace avb::render {
   bool WindowsRenderStack::ready_for_frame() const noexcept
   {
     return implementation_->ready_for_frame();
+  }
+
+  void WindowsRenderStack::set_presentation(const ReplicaPresentation presentation) noexcept
+  {
+    implementation_->set_presentation(presentation);
+  }
+
+  bool WindowsRenderStack::has_redraw_work() const noexcept
+  {
+    return implementation_->has_redraw_work();
+  }
+
+  void WindowsRenderStack::request_redraw() noexcept
+  {
+    implementation_->request_redraw();
   }
 
   void WindowsRenderStack::submit(

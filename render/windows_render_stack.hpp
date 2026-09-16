@@ -1,5 +1,5 @@
 /// @file
-/// Concrete replica graphics boundary: the runtime supplies capture checkouts
+/// @brief Concrete replica graphics boundary: the runtime supplies capture checkouts
 /// and receives native facts/deadlines, without exposing graphics to the UI.
 #ifndef AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP
 #define AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP
@@ -7,6 +7,7 @@
 #include "avb/core/types.hpp"
 #include "render/bridge_policy.hpp"
 #include "render/graphics_retry_policy.hpp"
+#include "render/render_math.hpp"
 
 #include <dxgiformat.h>
 
@@ -26,9 +27,37 @@ namespace avb::platform::windows {
 
 namespace avb::render {
 
-  /// Allocation-free snapshot of one main-thread progress pass.
+  /// @brief Latest requested replica draw, independent of capture and native styles.
+  /// Selection displays full content; its optional preview is expressed in source
+  /// pixels. The runtime grants redraw admission through its existing FPS budget.
+  struct ReplicaPresentation {
+    std::optional<core::PixelRegion> region;
+    bool selecting_region{};
+    std::optional<core::PixelRegion> selection_preview;
+    friend bool operator==(const ReplicaPresentation &, const ReplicaPresentation &) = default;
+  };
+
+  /// @brief Geometry copied from a draw whose successful presentation has retired.
+  /// The runtime maps native client input through this value so selection follows
+  /// the displayed image. A later retirement with an older sequence keeps the
+  /// newer snapshot; geometry invalidation discards preceding in-flight mappings.
+  struct PresentationSnapshot {
+    core::Extent content;
+    core::Extent framebuffer;
+    Viewport viewport;
+    core::PixelRegion region;
+    bool selection_full_view{};
+    std::uint64_t present_sequence{};
+  };
+
+  /// @brief Value snapshot of one main-thread progress pass.
+  ///
   /// Device-loss flags are independent; drain_complete is release evidence,
   /// whereas cleanup_pending and deadlines describe work still needing ticks.
+  /// Counters are cumulative for this stack. presented_frames advances when a
+  /// successful/suboptimal present fence retires, not when submission succeeds.
+  /// device_loss selects Vulkan loss first if both flags are set; inspect both
+  /// flags when deciding which independent cleanup obligations remain.
   struct RenderTickResult final {
     bool surface_recovery_started{};
     bool surface_recovery_completed{};
@@ -46,23 +75,31 @@ namespace avb::render {
     std::size_t slots_in_flight{};
     std::size_t presentations_in_flight{};
     std::optional<std::chrono::steady_clock::time_point> next_deadline;
+    std::optional<PresentationSnapshot> presentation;
   };
 
-  /// Own one replica's D3D device, Vulkan device/WSI, and three capture slots.
+  /// @brief Own one replica's D3D device, Vulkan device/WSI, and three capture slots.
+  ///
   /// All calls run on the main thread. The borrowed OverlayWindow must outlive
   /// this stack; published owners must drain before destruction.
-  /// Controller rendering has a separate device and owner in DesktopHost.
+  /// Copy and move are disabled so outstanding work keeps a stable native owner.
   class WindowsRenderStack final {
   public:
-    /// Create graphics against an existing overlay and runtime-owned generation.
-    /// Throws core::AppError for unsupported required features or native setup
-    /// failure; capture slots are prepared separately before capture starts.
+    /// @brief Create graphics against an existing overlay and nonzero generation.
+    ///
+    /// Borrows the overlay for the stack lifetime. Capture slots are prepared
+    /// separately before capture starts; a zero framebuffer defers WSI creation.
+    /// Throws core::AppError for invalid inputs or native setup failure; C++
+    /// allocation failures can also propagate from construction.
     WindowsRenderStack(platform::windows::OverlayWindow &overlay,
                        std::uint64_t resource_generation,
                        WindowsBridgePreference bridge_preference =
                          WindowsBridgePreference::Automatic);
-    /// Release only proven-safe owners; unsafe healthy-device work terminates
-    /// rather than being destroyed or synchronously waited upon.
+    /// @brief Release resources after native-use or matching device-loss proof.
+    ///
+    /// The caller must finish the drain protocol before destroying a published
+    /// stack. Outstanding healthy-device work causes std::terminate(); destruction
+    /// neither waits for fences nor turns a terminal error into completion proof.
     ~WindowsRenderStack() noexcept;
 
     WindowsRenderStack(const WindowsRenderStack &) = delete;
@@ -70,47 +107,88 @@ namespace avb::render {
     WindowsRenderStack(WindowsRenderStack &&) = delete;
     WindowsRenderStack &operator=(WindowsRenderStack &&) = delete;
 
-    /// Borrow the device used to construct this generation's WGC frame pool.
+    /// @brief Borrow the device used to construct this generation's WGC frame pool.
+    ///
+    /// The reference remains tied to this stack's lifetime and transfers no COM
+    /// reference. The caller must retire capture users before replacing the stack.
     [[nodiscard]] ID3D11Device &capture_device() noexcept;
-    /// Report admission and empty-slot availability without consuming a frame.
+    /// @brief Report copy admission and empty-slot capacity without consuming a frame.
+    ///
+    /// This is an observation, not a reservation or a promise that WSI can present.
     [[nodiscard]] bool ready_for_frame() const noexcept;
-    /// Move a matching checkout into an available slot and enqueue its D3 copy.
-    /// The slot retains the WGC checkout until copy completion/removal is proven.
-    /// Requires ready_for_frame(); invalid generation/metadata throws AppError.
+    /// @brief Consume a matching checkout into an available D3 source-copy slot.
+    ///
+    /// Requires ready_for_frame(), this generation's allocation and BGRA format,
+    /// positive in-bounds content, and a texture from capture_device(). Validation
+    /// failure throws core::AppError before adoption. Once adopted, the slot keeps
+    /// the WGC checkout until copy completion or D3 removal is proven. Returning
+    /// does not promise presentation: the frame can be dropped during recovery.
     void submit(platform::windows::WindowsCapturedFrame &&frame);
-    /// Poll native completion, advance presentation/recovery, and return the
-    /// next deadline. Never waits for a fence; call even without a new frame.
+    /// @brief Coalesce a presentation edit into the next admitted draw.
+    /// Stores an owned value and marks retained content dirty. Capture allocation,
+    /// native window styles and scheduling remain with their existing owners.
+    void set_presentation(ReplicaPresentation presentation) noexcept;
+    /// @brief Report a dirty retained image eligible for scheduler admission.
+    [[nodiscard]] bool has_redraw_work() const noexcept;
+    /// @brief Grant one redraw attempt after the runtime's FPS admission.
+    /// Completion and recovery polling continue independently of this permission.
+    void request_redraw() noexcept;
+    /// @brief Poll completion and advance presentation/recovery on the main thread.
+    ///
+    /// Supply physical framebuffer pixels and the current steady-clock time.
+    /// Continue calling after admission closes or while the framebuffer is zero:
+    /// completion still progresses. Native failures become result facts/errors;
+    /// pending work yields a future deadline without a synchronous fence wait.
     [[nodiscard]] RenderTickResult
     tick(core::Extent framebuffer,
          std::chrono::steady_clock::time_point now) noexcept;
-    /// Prove old capture allocation users are retired. Unsubmitted ready images
-    /// may still exist and can be discarded by rebuild_capture_slots().
+    /// @brief Test whether the capture slot allocations have no native users.
+    ///
+    /// Ready or retained content may still exist and can be discarded by rebuild.
+    /// Independent present records may remain alive; this is not whole-stack drain
+    /// completion or evidence that capture callbacks/checkouts are quiescent.
     [[nodiscard]] bool render_allocation_idle() const noexcept;
-    /// Replace the bounded slot ring after callback/check-out and old-allocation
-    /// barriers. The runtime supplies the next generation and actual pool extent.
+    /// @brief Replace the bounded ring after capture and old-allocation barriers.
+    ///
+    /// The caller closes capture admission, retires callbacks/checkouts, and checks
+    /// render_allocation_idle(). Supply a nonzero generation, nonzero representable
+    /// allocation, and DXGI_FORMAT_B8G8R8A8_UNORM on healthy devices. Invalid inputs
+    /// or native construction failures return unexpected. Once rebuilding starts,
+    /// failure need not preserve the old ring; callers must enter safe recovery.
+    /// generation() changes only after all replacement slots are constructed.
     [[nodiscard]] std::expected<void, core::AppError>
     rebuild_capture_slots(std::uint64_t generation, core::Extent allocation, DXGI_FORMAT format);
-    /// Record framebuffer dimensions; nonzero changes request WSI recreation.
+    /// @brief Record physical framebuffer dimensions for subsequent ticks.
+    ///
+    /// Nonzero changes request WSI recreation; zero suspends presentation without
+    /// ending completion polling or changing capture allocation/generation.
     void resize(core::Extent framebuffer) noexcept;
-    /// Close new-frame admission and discard unsubmitted ready content; later
-    /// ticks retain and retire all outstanding D3/Vulkan/presentation work.
+    /// @brief Close copy admission and discard unsubmitted or retained redraw content.
+    ///
+    /// Repeated calls are allowed. Later ticks must retire outstanding D3, acquire,
+    /// submission, and presentation work before drain_complete permits teardown.
     void begin_drain() noexcept;
-    /// Add a confirmed device-loss fact and apply only its legal cleanup rule.
+    /// @brief Add a confirmed device-loss fact and apply only its legal cleanup rule.
+    ///
     /// Vulkan loss does not prove D3 copies complete, nor does D3 removal prove
     /// healthy Vulkan work complete.
     void begin_device_recovery_drain(DeviceLossKind kind) noexcept;
-    /// Return the resource generation supplied by the owning runtime.
+    /// @brief Return the resource generation supplied by the owning runtime.
     [[nodiscard]] std::uint64_t generation() const noexcept;
-    /// Snapshot the concrete capability probes, without querying the driver.
+    /// @brief Snapshot the concrete capability probes, without querying the driver.
     [[nodiscard]] BridgeCapabilityFacts bridge_capability_facts() const noexcept;
-    /// Return the published bridge choice once slots have been prepared.
+    /// @brief Return the published bridge choice once slots have been prepared.
     [[nodiscard]] std::optional<BridgeSelection>
     bridge_selection() const noexcept;
-    /// Report the transport currently implemented by the owned slot ring.
+    /// @brief Report the transport currently implemented by the owned slot ring.
     [[nodiscard]] core::BridgeMode active_bridge_mode() const noexcept;
-    /// Diagnostic count of successfully enqueued GPU-interop submissions.
+    /// @brief Count successfully enqueued GPU-interop submissions, including redraws.
     [[nodiscard]] std::uint64_t gpu_interop_frames_submitted() const noexcept;
-    /// Consume the pending bridge change once for runtime event projection.
+    /// @brief Consume the pending bridge change once for runtime event projection.
+    ///
+    /// Returns an independent value and clears the pending edge; another call is
+    /// empty until a later selection change. This is a single pending value, not
+    /// an event queue, so intermediate changes may be superseded.
     [[nodiscard]] std::optional<BridgeSelection>
     take_bridge_mode_change() noexcept;
 
