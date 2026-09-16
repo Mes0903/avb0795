@@ -2,6 +2,16 @@
 # Portable values and language policy can be used without native graphics. The UI
 # consumes public command/view contracts but never links the application owner.
 # Concrete Windows services and the controller host meet at the executable below.
+add_library(avb0795_diagnostics
+  diagnostics/performance_report.cpp
+)
+
+target_include_directories(avb0795_diagnostics
+  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+)
+target_compile_features(avb0795_diagnostics PUBLIC cxx_std_23)
+target_link_libraries(avb0795_diagnostics PRIVATE nlohmann_json::nlohmann_json)
+
 add_library(avb0795_i18n
   i18n/catalog.cpp
   i18n/language.cpp

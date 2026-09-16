@@ -120,6 +120,7 @@ endfunction()
 
 function(_avb0795_assert_known_production_targets)
   set(known_targets
+      avb0795_diagnostics
       avb0795_i18n
       avb0795_core
       avb0795_app
@@ -148,6 +149,11 @@ endfunction()
 
 function(avb0795_assert_target_boundaries)
   _avb0795_assert_known_production_targets()
+
+  if(TARGET avb0795_diagnostics)
+    _avb0795_assert_sources(avb0795_diagnostics "src/diagnostics")
+    _avb0795_assert_links(avb0795_diagnostics nlohmann_json::nlohmann_json)
+  endif()
 
   if(TARGET avb0795_i18n)
     _avb0795_assert_sources(avb0795_i18n "src/i18n")
@@ -199,6 +205,7 @@ function(avb0795_assert_target_boundaries)
       avb0795_core
       avb0795_app
       avb0795_windows
+      avb0795_diagnostics
       glfw
       Vulkan::Vulkan
       d3d11
@@ -220,6 +227,7 @@ function(avb0795_assert_target_boundaries)
       avb0795_desktop
       avb0795_app
       avb0795_ui
+      avb0795_diagnostics
       glfw
       Vulkan::Vulkan
       imgui
@@ -246,6 +254,7 @@ function(avb0795_assert_target_boundaries)
          avb0795_desktop
          avb0795_windows
          avb0795_windows_graphics
+         avb0795_diagnostics
          glfw
          windowsapp)
      endif()
@@ -352,7 +361,7 @@ function(_avb0795_scan_files category)
     string(TOLOWER "${contents}" lower_contents)
     string(REPLACE "\\" "/" normalized_lower_contents "${lower_contents}")
 
-    if(category STREQUAL "i18n" OR category STREQUAL "core" OR
+    if(category STREQUAL "diagnostics" OR category STREQUAL "i18n" OR category STREQUAL "core" OR
        category STREQUAL "app" OR category STREQUAL "ui")
       _avb0795_assert_no_match(
         "${file}" "${normalized_lower_contents}" "${portable_native_include}"
@@ -374,7 +383,7 @@ function(_avb0795_scan_files category)
         "portable source mentions a native graphics/platform type")
     endif()
 
-    if(category STREQUAL "i18n" OR category STREQUAL "core" OR
+    if(category STREQUAL "diagnostics" OR category STREQUAL "i18n" OR category STREQUAL "core" OR
        category STREQUAL "app")
       _avb0795_assert_no_match(
         "${file}"
@@ -383,7 +392,16 @@ function(_avb0795_scan_files category)
         "portable source includes a UI header")
     endif()
 
-    if(category STREQUAL "i18n")
+    if(category STREQUAL "i18n" OR category STREQUAL "core" OR
+       category STREQUAL "app" OR category STREQUAL "ui")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "diagnostics")
+    endif()
+
+    if(category STREQUAL "diagnostics")
+      foreach(layer app core ui desktop render platform i18n)
+        _avb0795_assert_layer_includes("${file}" "${contents}" "${layer}")
+      endforeach()
+    elseif(category STREQUAL "i18n")
       _avb0795_assert_layer_includes("${file}" "${contents}" "app")
       _avb0795_assert_layer_includes("${file}" "${contents}" "core")
       _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
@@ -539,6 +557,10 @@ function(_avb0795_run_source_boundary_scan)
   endif()
 
   _avb0795_collect_sources(
+    diagnostics_files "include/avb/diagnostics" "src/diagnostics")
+  _avb0795_scan_files(diagnostics ${diagnostics_files})
+
+  _avb0795_collect_sources(
     i18n_files "include/avb/i18n" "src/i18n")
   _avb0795_scan_files(i18n ${i18n_files})
 
@@ -574,6 +596,7 @@ function(_avb0795_run_source_boundary_scan)
   endforeach()
 
   set(all_files
+      ${diagnostics_files}
       ${i18n_files}
       ${core_files}
       ${app_files}
