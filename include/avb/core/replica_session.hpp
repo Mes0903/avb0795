@@ -1,4 +1,5 @@
-/// @file Pure session values and guarded visible lifecycle transitions.
+/// @file
+/// @brief Pure session values and guarded visible lifecycle transitions.
 #ifndef AVB0795_CORE_REPLICA_SESSION_HPP
 #define AVB0795_CORE_REPLICA_SESSION_HPP
 
@@ -9,12 +10,17 @@
 
 namespace avb::core {
 
-  /// Stores selection/settings and enforces lifecycle edges without native side effects.
+  /// @brief Store selection/settings and enforce lifecycle edges without native side effects.
   /// Settings setters do not enforce application command availability; Application
   /// applies runtime transactions before committing these values.
+  /// All rejected lifecycle edges return InvalidCommand without changing lifecycle,
+  /// selection or settings. Successful edges likewise retain selection/settings.
+  /// An Error value therefore does not establish whether native cleanup remains.
+  /// This value has no synchronization; shared mutation requires caller sequencing.
   class ReplicaSession final {
   public:
-    /// Borrow the owned catalog snapshot, if a source has been selected.
+    /// Borrow the owned catalog snapshot, if selected; selection/clear/replacement
+    /// can invalidate references into its descriptor and strings.
     [[nodiscard]] const std::optional<SourceDescriptor> &
     selected_source() const noexcept;
     /// Read visible state, which need not match the runtime's resource drain phase.
@@ -22,27 +28,36 @@ namespace avb::core {
     /// Borrow the current accepted settings; no platform objects are referenced.
     [[nodiscard]] const ReplicaSettings &settings() const noexcept;
 
-    /// Replace the source value only; selection never starts native capture.
+    /// @brief Select a source and reset its crop/interaction without starting capture.
     void select_source(SourceDescriptor source);
-    /// Remove only the selected descriptor.
+    /// Remove the selected descriptor and its source-specific crop/interaction.
     void clear_source() noexcept;
-    /// Store the accepted session-only input mode.
+    /// Store the accepted input-mode value; preference persistence belongs to Application.
     void set_mode(OverlayMode mode) noexcept;
     /// Store the accepted border preference; persistence belongs to Application.
     void set_border(BorderPreference border) noexcept;
     /// Store the accepted render cap; scheduler lifetime belongs to the runtime.
     void set_fps(FpsCap fps_cap) noexcept;
+    /// Store an accepted opacity percentage; command validation belongs to Application.
+    void set_opacity(int percent) noexcept;
+    /// Store an accepted session-only source crop; nullopt restores the full source.
+    void set_region(std::optional<PixelRegion> region) noexcept;
+    /// Store transient selection intent after the runtime transaction succeeds.
+    void set_region_selection(bool active) noexcept;
     /// Store accepted experimental preferences without invoking platform behavior.
     void set_extensions(ExtensionSettings extensions) noexcept;
 
-    /// Require a selected source and Idle/Error, otherwise return InvalidCommand.
+    /// @brief Enter Starting from Idle/Error when a source is selected.
+    /// InvalidCommand leaves the previous state intact; source liveness must still
+    /// be established by runtime construction after this domain edge succeeds.
     [[nodiscard]] std::expected<void, AppError> begin_start() noexcept;
     /// Confirm a successful start; valid only from Starting.
     [[nodiscard]] std::expected<void, AppError> mark_capturing() noexcept;
-    /// Enter RecoveringGraphics from Capturing, or self-transition while Interrupted.
+    /// @brief Enter RecoveringGraphics from Capturing, or self-transition while Interrupted.
     [[nodiscard]] std::expected<void, AppError>
     begin_graphics_recovery() noexcept;
-    /// Return recovery to Capturing while preserving Interrupted after source loss.
+    /// @brief Complete recovery from RecoveringGraphics or Interrupted.
+    /// Only the former becomes Capturing: graphics repair cannot prove source return.
     [[nodiscard]] std::expected<void, AppError>
     complete_graphics_recovery() noexcept;
     /// Record source disconnection from Capturing, RecoveringGraphics or Interrupted.

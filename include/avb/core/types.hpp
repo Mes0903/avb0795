@@ -1,4 +1,5 @@
-/// @file Portable identities, settings and diagnostics shared across layer boundaries.
+/// @file
+/// @brief Portable identities, settings and diagnostics shared across layer boundaries.
 /// Native handles and resource lifetimes belong to platform/render owners.
 #ifndef AVB0795_CORE_TYPES_HPP
 #define AVB0795_CORE_TYPES_HPP
@@ -10,14 +11,18 @@
 
 namespace avb::core {
 
-  /// Generation token used to reject commands targeting a replaced session.
+  /// @brief Generation token used to reject commands targeting a replaced session.
+  /// Copy the token from the current view; its numeric value is not a runtime
+  /// resource identifier and default construction does not name the initial session.
   struct SessionId {
     std::uint64_t value{};
 
     friend bool operator==(const SessionId &, const SessionId &) = default;
   };
 
-  /// Opaque catalog identity; it carries no native handle or ownership lease.
+  /// @brief Owned opaque catalog identity with no native ownership lease.
+  /// String equality permits snapshot lookup, but retaining this value does not
+  /// keep a source alive or make a stale observation safe to capture.
   struct SourceId {
     std::string value;
 
@@ -31,6 +36,32 @@ namespace avb::core {
 
     friend bool operator==(const Extent &, const Extent &) = default;
   };
+
+  /// @brief Source-image pixel rectangle with a top-left origin and half-open edges.
+  /// Captures use this value to retain a viewing region independently of replica
+  /// placement, scale and DPI. Positive width/height and containment are checked
+  /// at command admission; aggregate construction also represents invalid input
+  /// for validation. Arithmetic consumers use remaining extent to prevent overflow.
+  struct PixelRegion {
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint32_t width{};
+    std::uint32_t height{};
+
+    friend bool operator==(const PixelRegion &, const PixelRegion &) = default;
+  };
+
+  /// @brief Check a complete source-pixel rectangle against current content bounds.
+  /// This pure check keeps invalid typed commands outside native settings apply;
+  /// zero dimensions and rectangles crossing an edge fail as one value.
+  [[nodiscard]] bool valid_region(PixelRegion region, Extent content) noexcept;
+
+  /// @brief Clip a requested source region to current content after source resize.
+  /// Empty intersections return nullopt, allowing the caller to restore full view.
+  /// The requested origin remains fixed; subtraction bounds width/height safely
+  /// even when a caller supplies values near the unsigned integer limit.
+  [[nodiscard]] std::optional<PixelRegion>
+  intersect_region(PixelRegion region, Extent content) noexcept;
 
   /// Source category used by catalog filtering and capability-driven controls.
   enum class SourceKind { Display,
@@ -143,7 +174,9 @@ namespace avb::core {
     return false;
   }
 
-  /// Fixed-size failure value with optional numeric native detail, never dynamic text.
+  /// @brief Fixed-size failure value with optional numeric native detail, never dynamic text.
+  /// Code drives portable policy and localization; detail preserves adapter-specific
+  /// diagnostics without making user-facing wording part of the failure contract.
   struct AppError {
     AppErrorCode code{};
     std::optional<std::int64_t> native_detail{};
@@ -156,19 +189,27 @@ namespace avb::core {
 
     /// Borrow a static user-facing explanation; no native/source text is included.
     [[nodiscard]] std::string_view user_message() const noexcept;
-    /// Borrow a stable diagnostic label suitable for structured logging.
+    /// @brief Borrow a program-lifetime diagnostic label suitable for structured logging.
+    /// Labels are untranslated and exclude native_detail; unknown codes use a
+    /// stable fallback rather than allocating a message.
     [[nodiscard]] std::string_view diagnostic_label() const noexcept;
 
     friend bool operator==(const AppError &, const AppError &) = default;
   };
 
-  /// Owned catalog snapshot for selection/display; selecting it does not start capture.
+  /// @brief Owned catalog snapshot for selection/display; selecting it does not start capture.
+  /// Extent and color are observations at enumeration time, not guarantees about
+  /// the next frame. Strings remain valid independently of the enumerator's storage.
   struct SourceDescriptor {
     SourceId id;
     SourceKind kind{SourceKind::Display};
     std::string display_label;
     Extent extent;
     ColorSupport color_support{ColorSupport::UnknownAssumeSdr};
+    /// @brief Platform-formatted diagnostic text, owned with the catalog snapshot.
+    /// Window sources expose platform-formatted handle text here. Selection and
+    /// runtime lookup continue through SourceId; this label conveys no native access.
+    std::string native_handle_text;
 
     friend bool operator==(const SourceDescriptor &,
                            const SourceDescriptor &) = default;
@@ -182,18 +223,28 @@ namespace avb::core {
                            const ExtensionSettings &) = default;
   };
 
-  /// Portable settings transaction applied as a whole to the current runtime.
+  /// @brief Portable candidate or accepted settings, applied as a whole to a runtime.
+  /// The value itself performs no validation or persistence. Application may persist
+  /// accepted mode, border, cap, opacity and extension preferences; crop and region
+  /// selection remain session state, with temporary native overrides kept separate.
   struct ReplicaSettings {
     OverlayMode mode{OverlayMode::Editable};
     BorderPreference border{BorderPreference::Bordered};
     FpsCap fps_cap{FpsCap::Fps60};
     ExtensionSettings extensions{};
+    int opacity_percent{100};
+    /// Session-only crop in source content pixels; nullopt presents the full frame.
+    std::optional<PixelRegion> region{};
+    /// Transient full-source selection request; persisted preferences remain unchanged.
+    bool selecting_region{};
 
     friend bool operator==(const ReplicaSettings &,
                            const ReplicaSettings &) = default;
   };
 
-  /// Pre-runtime behavior capabilities; excludes dynamic graphics bridge selection.
+  /// @brief Pre-runtime behavior capabilities used to admit commands and explain controls.
+  /// An available capability does not guarantee that a later native operation
+  /// succeeds; bridge selection depends on actual constructed graphics resources.
   struct PlatformCapabilities {
     bool display_capture{};
     bool window_capture{};

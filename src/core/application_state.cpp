@@ -1,4 +1,5 @@
-/// @file Generation validation delegates every accepted operation to one session.
+/// @file
+/// @brief Generation validation delegates every accepted operation to one session.
 #include "avb/core/application_state.hpp"
 
 #include <limits>
@@ -94,6 +95,38 @@ namespace avb::core {
     }
 
     current_session_.set_fps(fps_cap);
+    return {};
+  }
+
+  std::expected<void, AppError>
+  ApplicationState::set_opacity(SessionId session_id, int percent) noexcept
+  {
+    if (auto result = validate_session(session_id); !result) {
+      return result;
+    }
+
+    current_session_.set_opacity(percent);
+    return {};
+  }
+
+  std::expected<void, AppError>
+  ApplicationState::set_region(SessionId session_id,
+                               std::optional<PixelRegion> region) noexcept
+  {
+    if (auto result = validate_session(session_id); !result) {
+      return result;
+    }
+    current_session_.set_region(region);
+    return {};
+  }
+
+  std::expected<void, AppError>
+  ApplicationState::set_region_selection(SessionId session_id, bool active) noexcept
+  {
+    if (auto result = validate_session(session_id); !result) {
+      return result;
+    }
+    current_session_.set_region_selection(active);
     return {};
   }
 

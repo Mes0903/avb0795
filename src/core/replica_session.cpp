@@ -1,4 +1,5 @@
-/// @file Domain transition guards; no operation acquires or releases native owners.
+/// @file
+/// @brief Domain transition guards; no operation acquires or releases native owners.
 #include "avb/core/replica_session.hpp"
 
 #include <utility>
@@ -24,9 +25,16 @@ namespace avb::core {
   void ReplicaSession::select_source(SourceDescriptor source)
   {
     selected_source_ = std::move(source);
+    settings_.region.reset();
+    settings_.selecting_region = false;
   }
 
-  void ReplicaSession::clear_source() noexcept { selected_source_.reset(); }
+  void ReplicaSession::clear_source() noexcept
+  {
+    selected_source_.reset();
+    settings_.region.reset();
+    settings_.selecting_region = false;
+  }
 
   void ReplicaSession::set_mode(OverlayMode mode) noexcept
   {
@@ -41,6 +49,21 @@ namespace avb::core {
   void ReplicaSession::set_fps(FpsCap fps_cap) noexcept
   {
     settings_.fps_cap = fps_cap;
+  }
+
+  void ReplicaSession::set_opacity(int percent) noexcept
+  {
+    settings_.opacity_percent = percent;
+  }
+
+  void ReplicaSession::set_region(std::optional<PixelRegion> region) noexcept
+  {
+    settings_.region = region;
+  }
+
+  void ReplicaSession::set_region_selection(bool active) noexcept
+  {
+    settings_.selecting_region = active;
   }
 
   void ReplicaSession::set_extensions(ExtensionSettings extensions) noexcept
