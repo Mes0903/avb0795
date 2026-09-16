@@ -542,7 +542,8 @@ function(_avb0795_scan_files category)
       endif()
       if(render_relative STREQUAL "render/windows_render_stack.cpp")
         list(APPEND allowed_render_windows_headers
-             platform/windows/windows_frame_bridge.hpp)
+             platform/windows/windows_frame_bridge.hpp
+             platform/windows/detail/graphics_construction_guard.hpp)
       endif()
       _avb0795_assert_layer_includes(
         "${file}"

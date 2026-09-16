@@ -29,6 +29,7 @@ flowchart LR
 - [`windows_frame_bridge.cpp`](../../platform/windows/windows_frame_bridge.cpp)：D3 資源、Windows adapter／extension 偏好、逐 handle 相容性探測、Vulkan import、copy proof、Map/Unmap 與 checkout 歸還。
 - [`windows_render_stack.cpp`](../../render/windows_render_stack.cpp)：呼叫 bridge、驗證 canonical slot、搬移 CPU rows，以及 Vulkan submission／presentation。
 - [`vulkan_input.hpp`](../../render/vulkan_input.hpp)：`SlotKey`、`FrameStamp`、`CpuRowsView` 等跨 owner 資料契約。
+- [`graphics_construction_guard.hpp`](../../platform/windows/detail/graphics_construction_guard.hpp)：建構與 ring 安裝的有序 rollback，依序撤銷引用、釋放 bridge 資源、釋放 renderer 資源。
 
 ## Device bootstrap 與 external import
 
@@ -79,7 +80,29 @@ flowchart LR
 
 renderer 收到 completion 時，會一起核對 serial、index 與預期 phase。bridge 收到建立 slot 或釋放 ring 的要求時，也會先驗證 identity。舊 ring 的 key 因此具有明確的失效邊界。
 
-`submit` 先完成來源尺寸、格式、generation、D3 device 與 texture projection 驗證，再接收 checkout。成功接收後，renderer 更新 retained redraw 的引用與接納計數。`FrameStamp::sequence` 表示本 renderer 的接納順序，`intake_observed_at` 延續 capture 端記錄的觀察時間。
+Facade 先透過 `reserve_source_slot()` 取得空閒 slot，接著呼叫 bridge 的 `submit`。Bridge 完成來源尺寸、格式、generation、D3 device 與 texture projection 驗證後接收 checkout。`FrameStamp::sequence` 表示本 renderer 的接納順序，`intake_observed_at` 延續 capture 端記錄的觀察時間。
+
+為了讓 retained redraw 能跨越一次接納嘗試，reservation 保存舊 metadata 與一個 `restore_retained_on_cancel` 標記。Adoption 前的驗證錯誤或 exception 走 `cancel_source_reservation`；當 ring、接納狀態與 sequence 仍符合 redraw 條件時，舊 retained reference 會恢復。Bridge 接收 checkout 後產生的 `SafeDiscard` 走 `discard_completed_source`，完成該次 producer reservation 的歸還。
+
+## Typed handoff 與 readiness
+
+```mermaid
+flowchart TD
+  E[Empty] -->|reserve_source_slot| P[ProducerPending]
+  P -->|adoption 前取消| C[cancel_source_reservation<br/>恢復符合條件的 retained reference]
+  C --> E
+  P -->|CPU rows + FrameStamp| U[complete_cpu_input<br/>驗證 / copy / flush]
+  U --> R[CpuReady<br/>提交 content 與 stamp]
+  P -->|content + FrameStamp + completed wait| G[complete_external_input<br/>驗證 registration 與 wait]
+  G --> V[GpuReady]
+  P -->|producer proof + discard| D[discard_completed_source]
+  D --> E
+  I[register_external_image<br/>安裝期 borrowed image] --> G
+```
+
+為了讓 draw 消費一組一致的影格資料，renderer 需要一起提交 content extent、來源時間戳與 readiness。`complete_cpu_input` 直接核對 `CpuRowsView` 的 allocation、content、pitch 與 span，完成 row copy 與 flush 後更新 metadata，再將 phase 改成 `CpuReady`。Flush 回報 Vulkan device loss 時，renderer 同步記錄 loss 並關閉接納，completion batch 的後續工作沿用 proof／discard 路徑。
+
+GPU 路徑透過 `register_external_image` 在安裝期間建立 borrowed image 與 descriptor 的關聯；`complete_external_input` 再核對當前 `SlotKey`、`ProducerPending`、content bounds 與 completed timeline wait，成功後提交 `GpuReady`。兩條路徑共同使用 renderer 的 canonical phase，bridge 的 records 保存 producer 原生操作的完成證據。
 
 ## Producer proof 與同步 CPU rows
 
@@ -142,6 +165,21 @@ flowchart TD
 4. 以目前的 serial 呼叫 `release_ring`，依序釋放 imported view／image／memory 與 D3 texture，再回收 staging／query。
 5. 在 aggregate 清理階段釋放 bridge 的 timeline、D3 owners，接著釋放 renderer 的 Vulkan device。
 
-一般 ring detach 先 reset descriptor pool；reset 失敗時保存 ring owners 並回報錯誤。最終 teardown 在取得退休證據後直接銷毀 descriptor pool，清除 ring references，釋放 bridge，最後銷毀 Vulkan device。若 allocation 與 cleanup 先後回報錯誤，已觀察到的 Vulkan device loss 維持其 recovery 優先權。
+一般 ring detach 先驗證 installation serial、每個 slot identity 與 image-user proof，再 reset descriptor pool；reset 失敗時保存 ring owners 並回報錯誤。最終 teardown 在取得退休證據後直接銷毀 descriptor pool，清除 ring references，釋放 bridge，最後銷毀 Vulkan device。
 
 `has_pending_inputs()` 同時涵蓋 copy-pending 與 Map-pending records。析構保留 fail-closed invariant：仍有 producer obligation 時會終止程序，以維持 checkout 與原生資源的安全生命週期。
+
+## 建構與安裝的 rollback
+
+```mermaid
+flowchart LR
+  A[建立 Operations 與 armed guard] --> B[逐步建立 private resources]
+  B -->|成功| C[發布 ready state / disarm]
+  B -->|錯誤返回或 exception| D[detach_renderer_references]
+  D --> E[release_bridge_resources]
+  E --> F[release_renderer_resources]
+```
+
+為了讓 partial construction 也遵守跨 owner 的引用順序，系統需要在第一個 fallible step 前建立 cleanup 責任。`GraphicsConstructionGuard<Operations>` 保存借用的 operations，scope 結束時依序執行三個 `noexcept` cleanup 動作。`disarm()` 在交易成功時轉移 cleanup 責任；detach proof 失敗時沿用 terminate invariant，保存資源相依性的安全邊界。
+
+Bootstrap operations 負責整個 graphics aggregate：撤銷 renderer references、釋放 bridge，再釋放 renderer native resources。Ring-install operations 綁定單次安裝的 serial，回收該 ring 的 registrations、imports、staging 與 upload allocations；兩個 devices 與獨立 present records 維持既有生命週期。Private slot identities 在配置前建立，`ring_ready_` 在所有必要資源就緒後發布，接納條件因此能直接反映安裝交易的完成狀態。

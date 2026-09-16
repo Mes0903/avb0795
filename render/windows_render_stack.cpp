@@ -5,6 +5,7 @@
 #include "avb/diagnostics/performance_report.hpp"
 
 #include "avb/render/replica_shaders.hpp"
+#include "platform/windows/detail/graphics_construction_guard.hpp"
 #include "platform/windows/detail/windows_graphics_policy.hpp"
 #include "platform/windows/overlay_window.hpp"
 #include "platform/windows/windows_captured_frame.hpp"
@@ -179,6 +180,9 @@ namespace avb::render {
       core::Extent content{};
       SlotPhase phase{SlotPhase::Empty};
       FrameStamp stamp;
+      // Reservation rollback keeps the old sampled content and wait untouched;
+      // only pre-adoption cancellation may restore its retained designation.
+      bool restore_retained_on_cancel{};
       PresentationSnapshot recorded_presentation{};
 
       // CPU transport owns host-visible upload storage plus a separate sampled
@@ -355,6 +359,38 @@ namespace avb::render {
     [[nodiscard]] std::expected<void, core::AppError>
     start_source_ring(std::uint64_t generation, core::Extent allocation,
                       DXGI_FORMAT format) noexcept;
+    /// @brief Reserve safe storage, preserving old content only for cancellation.
+    /// Capacity/admission failure changes no slot; successful keys name the sole
+    /// ProducerPending phase until producer completion or pre-adoption rollback.
+    [[nodiscard]] std::optional<SlotKey> reserve_source_slot() noexcept;
+    /// @brief Cancel only before producer adoption; restore eligible old redraw.
+    [[nodiscard]] std::expected<void, core::AppError>
+    cancel_source_reservation(SlotKey key) noexcept;
+    /// @brief Borrow an image for an Empty slot in an unpublished installation.
+    /// The bridge retains every native owner until detach_ring succeeds; partial
+    /// descriptor/sync setup remains owned by the installation's rollback scope.
+    [[nodiscard]] std::expected<void, core::AppError>
+    register_external_image(SlotKey key, ExternalSampledImageView image) noexcept;
+    /// @brief Consume mapped rows synchronously and publish only after copy/flush.
+    /// Rows and stamp come from this completion; failure retains ProducerPending
+    /// so the facade can discard the key after the bridge releases its producer.
+    [[nodiscard]] std::expected<void, core::AppError>
+    complete_cpu_input(SlotKey key, CpuRowsView rows, FrameStamp stamp) noexcept;
+    /// @brief Publish a registered image after host-observed producer completion.
+    /// The borrowed wait preserves the external memory dependency, not proof of
+    /// an unobserved copy; the bridge keeps it alive through submission retirement.
+    [[nodiscard]] std::expected<void, core::AppError>
+    complete_external_input(SlotKey key, core::Extent content, FrameStamp stamp,
+                            CompletedProducerWait wait) noexcept;
+    /// @brief Consume a pending reservation whose producer is proven safe.
+    /// The caller supplies the producer proof; image registration stays installed.
+    [[nodiscard]] std::expected<void, core::AppError>
+    discard_completed_source(SlotKey key) noexcept;
+    /// @brief Detach a matching installation after all allocation users retire.
+    /// Ready/retained images may be discarded; independent present records remain.
+    /// Reset failure preserves references and ownership for ordinary retry paths.
+    [[nodiscard]] std::expected<void, core::AppError>
+    detach_ring(std::uint64_t expected_ring_serial) noexcept;
     /// Create descriptor, command buffer and unsignaled synchronization for a
     /// slot's sampled view; this setup enqueues no GPU work.
     [[nodiscard]] std::expected<void, core::AppError>
@@ -371,6 +407,26 @@ namespace avb::render {
     /// A descriptor-reset failure preserves all ring owners for later cleanup.
     [[nodiscard]] std::expected<void, core::AppError>
     destroy_capture_slots() noexcept;
+    /// Release allocation-local native owners after descriptor/image detachment
+    /// and bridge release; preserve devices, command buffers and present records.
+    void release_renderer_ring_resources() noexcept;
+    /// Release final Vulkan owners after the bridge and ring have been released.
+    void release_renderer_resources() noexcept;
+    /// @brief Actual partial bootstrap cleanup, borrowed only by its stack guard.
+    struct BootstrapOperations final {
+      Impl &owner;
+      [[nodiscard]] bool detach_renderer_references() noexcept;
+      void release_bridge_resources() noexcept;
+      void release_renderer_resources() noexcept;
+    };
+    /// @brief Roll back one unpublished serial without touching device lifetimes.
+    struct RingInstallOperations final {
+      Impl &owner;
+      std::uint64_t serial;
+      [[nodiscard]] bool detach_renderer_references() noexcept;
+      void release_bridge_resources() noexcept;
+      void release_renderer_resources() noexcept;
+    };
     /// Destroy all registrations at final teardown, after native-use proof.
     void destroy_descriptor_pool() noexcept;
     /// Release present fences/semaphores only with retirement or Vulkan-loss
@@ -427,10 +483,6 @@ namespace avb::render {
     /// Poll D3 completion before checking in WGC. CPU then maps rows into upload
     /// storage; GPU becomes ready only with an already-satisfiable timeline wait.
     void progress_d3_copy(RenderTickResult &result, std::chrono::steady_clock::time_point now);
-    /// Copy borrowed mapped rows and flush before the bridge unmaps its staging.
-    [[nodiscard]] std::expected<void, core::AppError>
-    consume_cpu_rows(SlotKey key, CpuRowsView rows, FrameStamp stamp,
-                     RenderTickResult &result) noexcept;
     /// Poll acquire or submission proof by phase, then recycle or release the
     /// acquired image that was never handed to presentation.
     void progress_submission(CaptureSlot &slot, RenderTickResult &result, std::chrono::steady_clock::time_point now);
@@ -541,6 +593,9 @@ namespace avb::render {
     std::array<CaptureSlot, cpu_slot_count> slots_{};
     std::uint64_t last_ring_serial_{};
     std::uint64_t ring_serial_{};
+    // Private identities exist during construction; admission is published only
+    // after every native slot and its presentation resources were established.
+    bool ring_ready_{};
     // Borrowed from the stable ring; Empty still means there is no native work.
     // Prefer another empty slot for capture, but keep all three reusable.
     CaptureSlot *retained_slot_{};
@@ -653,69 +708,49 @@ namespace avb::render {
                                  diagnostics::PerformanceReport *performance, const std::uint64_t observation_instance)
       : window_{native_window}, performance_{performance}, observation_instance_{observation_instance}, generation_{resource_generation}, bridge_preference_{bridge_preference}, framebuffer_{initial_framebuffer}
   {
-    try {
-      if (window_ == nullptr || generation_ == 0) {
-        throw graphics_error(core::AppErrorCode::InvalidValue);
-      }
-      frame_bridge_ = std::make_unique<platform::windows::WindowsFrameBridge>(
-        platform::windows::BridgeResourceObserver{
-          .context = this,
-          .observe = [](void *context,
-                        const platform::windows::BridgeResourceEvent event) noexcept {
-            static_cast<Impl *>(context)->observe_performance(
-              event == platform::windows::BridgeResourceEvent::SemaphoreCreated
-                ? PerformanceCounter::SemaphoresCreated
-                : PerformanceCounter::SemaphoresDestroyed);
-          },
-        });
-      const auto startup = frame_bridge_->startup_request();
-      create_vulkan_instance();
-      create_surface();
-      select_physical_device(startup);
-      if (performance_) {
-        std::snprintf(performance_driver_.data(), performance_driver_.size(), "raw:%u", physical_properties_.driverVersion);
-      }
-      create_vulkan_device(startup);
-      frame_bridge_->attach_vulkan_device({
-        .physical_device = physical_device_,
-        .device = device_,
-        .memory_properties = memory_properties_,
-        .limits = physical_properties_.limits,
-        .optional_extension_group_enabled = optional_extension_group_enabled_,
-        .timeline_semaphore_enabled = timeline_semaphore_supported_,
-      });
-      bridge_facts_ = frame_bridge_->capability_facts();
-      bridge_capabilities_collected_ = true;
-      create_vulkan_common_resources();
-      if (!has_zero_dimension(framebuffer_)) {
-        const auto created = create_swapchain(framebuffer_);
-        if (!created) {
-          throw created.error();
-        }
-      }
-      fully_constructed_ = true;
-    } catch (...) {
-      destroy_descriptor_pool();
-      static_cast<void>(destroy_capture_slots());
-      destroy_present_records();
-      destroy_swapchain();
-      destroy_retired_swapchains();
-      destroy_vulkan_common_resources();
-      frame_bridge_.reset();
-      if (device_ != VK_NULL_HANDLE) {
-        vkDestroyDevice(device_, nullptr);
-        device_ = VK_NULL_HANDLE;
-      }
-      if (surface_ != VK_NULL_HANDLE && instance_ != VK_NULL_HANDLE) {
-        vkDestroySurfaceKHR(instance_, surface_, nullptr);
-        surface_ = VK_NULL_HANDLE;
-      }
-      if (instance_ != VK_NULL_HANDLE) {
-        vkDestroyInstance(instance_, nullptr);
-        instance_ = VK_NULL_HANDLE;
-      }
-      throw;
+    BootstrapOperations operations{*this};
+    platform::windows::detail::GraphicsConstructionGuard guard{operations};
+    if (window_ == nullptr || generation_ == 0) {
+      throw graphics_error(core::AppErrorCode::InvalidValue);
     }
+    frame_bridge_ = std::make_unique<platform::windows::WindowsFrameBridge>(
+      platform::windows::BridgeResourceObserver{
+        .context = this,
+        .observe = [](void *context,
+                      const platform::windows::BridgeResourceEvent event) noexcept {
+          static_cast<Impl *>(context)->observe_performance(
+            event == platform::windows::BridgeResourceEvent::SemaphoreCreated
+              ? PerformanceCounter::SemaphoresCreated
+              : PerformanceCounter::SemaphoresDestroyed);
+        },
+      });
+    const auto startup = frame_bridge_->startup_request();
+    create_vulkan_instance();
+    create_surface();
+    select_physical_device(startup);
+    if (performance_) {
+      std::snprintf(performance_driver_.data(), performance_driver_.size(), "raw:%u", physical_properties_.driverVersion);
+    }
+    create_vulkan_device(startup);
+    frame_bridge_->attach_vulkan_device({
+      .physical_device = physical_device_,
+      .device = device_,
+      .memory_properties = memory_properties_,
+      .limits = physical_properties_.limits,
+      .optional_extension_group_enabled = optional_extension_group_enabled_,
+      .timeline_semaphore_enabled = timeline_semaphore_supported_,
+    });
+    bridge_facts_ = frame_bridge_->capability_facts();
+    bridge_capabilities_collected_ = true;
+    create_vulkan_common_resources();
+    if (!has_zero_dimension(framebuffer_)) {
+      const auto created = create_swapchain(framebuffer_);
+      if (!created) {
+        throw created.error();
+      }
+    }
+    fully_constructed_ = true;
+    guard.disarm();
   }
 
   WindowsRenderStack::Impl::~Impl() noexcept
@@ -726,12 +761,54 @@ namespace avb::render {
       std::terminate();
     }
     destroy_descriptor_pool();
-    static_cast<void>(destroy_capture_slots());
+    if (ring_serial_ != 0 && !detach_ring(ring_serial_)) {
+      std::terminate();
+    }
+    frame_bridge_.reset();
+    release_renderer_resources();
+  }
+
+  bool WindowsRenderStack::Impl::BootstrapOperations::detach_renderer_references() noexcept
+  {
+    owner.destroy_descriptor_pool();
+    return owner.ring_serial_ == 0 ||
+           owner.detach_ring(owner.ring_serial_).has_value();
+  }
+
+  void WindowsRenderStack::Impl::BootstrapOperations::release_bridge_resources() noexcept
+  {
+    owner.frame_bridge_.reset();
+  }
+
+  void WindowsRenderStack::Impl::BootstrapOperations::release_renderer_resources() noexcept
+  {
+    owner.release_renderer_resources();
+  }
+
+  bool WindowsRenderStack::Impl::RingInstallOperations::detach_renderer_references() noexcept
+  {
+    return owner.detach_ring(serial).has_value();
+  }
+
+  void WindowsRenderStack::Impl::RingInstallOperations::release_bridge_resources() noexcept
+  {
+    if (!owner.frame_bridge_->release_ring(serial)) {
+      std::terminate();
+    }
+  }
+
+  void WindowsRenderStack::Impl::RingInstallOperations::release_renderer_resources() noexcept
+  {
+    owner.release_renderer_ring_resources();
+  }
+
+  void WindowsRenderStack::Impl::release_renderer_resources() noexcept
+  {
+    release_renderer_ring_resources();
     destroy_present_records();
     destroy_swapchain();
     destroy_retired_swapchains();
     destroy_vulkan_common_resources();
-    frame_bridge_.reset();
     if (device_ != VK_NULL_HANDLE) {
       vkDestroyDevice(device_, nullptr);
       device_ = VK_NULL_HANDLE;
@@ -2184,33 +2261,74 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::destroy_capture_slots() noexcept
+  WindowsRenderStack::Impl::detach_ring(
+    const std::uint64_t expected_ring_serial) noexcept
   {
-    if (frame_bridge_ && frame_bridge_->has_pending_inputs()) {
-      std::terminate();
+    if (expected_ring_serial == 0 || expected_ring_serial != ring_serial_) {
+      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
     }
-    if (ring_serial_ != 0 && device_ != VK_NULL_HANDLE &&
-        descriptor_pool_ != VK_NULL_HANDLE) {
+    // Validate every identity and allocation-user proof before withdrawing even
+    // a retained pointer. Vulkan loss cannot discharge a producer reservation.
+    for (std::size_t index{}; index < slots_.size(); ++index) {
+      const auto &slot = slots_[index];
+      if (slot.key != SlotKey{expected_ring_serial, static_cast<std::uint32_t>(index)} ||
+          slot.phase == SlotPhase::ProducerPending ||
+          (!vulkan_device_lost_ &&
+           (slot.acquired_image ||
+            (slot.phase != SlotPhase::Empty && slot.phase != SlotPhase::CpuReady &&
+             slot.phase != SlotPhase::GpuReady)))) {
+        return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
+      }
+    }
+    if (device_ != VK_NULL_HANDLE && descriptor_pool_ != VK_NULL_HANDLE) {
       const auto reset = vkResetDescriptorPool(device_, descriptor_pool_, 0);
       if (reset != VK_SUCCESS) {
         return std::unexpected{vulkan_error(
           core::AppErrorCode::RuntimeConstructionFailure, reset)};
       }
     }
+    ring_ready_ = false;
     retained_slot_ = nullptr;
+    for (auto &slot : slots_) {
+      slot.key = {};
+      slot.descriptor = VK_NULL_HANDLE;
+      slot.external_image = {};
+      slot.producer_wait = {};
+      slot.restore_retained_on_cancel = false;
+      slot.gpu_copy = false;
+      slot.phase = SlotPhase::Empty;
+      slot.acquired_image = false;
+      slot.owning_swapchain = VK_NULL_HANDLE;
+    }
+    return {};
+  }
+
+  void WindowsRenderStack::Impl::release_renderer_ring_resources() noexcept
+  {
     for (auto &slot : slots_) {
       destroy_capture_slot(slot);
     }
-    // Renderer references are detached before the producer releases allocation
-    // state. A partial ring follows the same path and never had native users.
+    ring_serial_ = 0;
+    ring_ready_ = false;
+    capture_allocation_ = {};
+    capture_format_ = DXGI_FORMAT_UNKNOWN;
+  }
+
+  std::expected<void, core::AppError>
+  WindowsRenderStack::Impl::destroy_capture_slots() noexcept
+  {
+    if (frame_bridge_ && frame_bridge_->has_pending_inputs()) {
+      std::terminate();
+    }
     if (ring_serial_ != 0) {
+      if (auto detached = detach_ring(ring_serial_); !detached) {
+        return detached;
+      }
       if (!frame_bridge_->release_ring(ring_serial_)) {
         std::terminate();
       }
-      ring_serial_ = 0;
     }
-    capture_allocation_ = {};
-    capture_format_ = DXGI_FORMAT_UNKNOWN;
+    release_renderer_ring_resources();
     return {};
   }
 
@@ -2240,6 +2358,7 @@ namespace avb::render {
       return started;
     }
     ring_serial_ = *serial;
+    ring_ready_ = false;
     capture_allocation_ = allocation;
     capture_format_ = format;
     return {};
@@ -2273,24 +2392,6 @@ namespace avb::render {
     if (auto detached = destroy_capture_slots(); !detached) {
       return detached;
     }
-    const auto create_cpu_ring = [this]() -> std::expected<void, core::AppError> {
-      for (auto &slot : slots_) {
-        if (auto created = create_capture_slot(slot); !created) {
-          const auto error = created.error();
-          if (auto detached = destroy_capture_slots(); !detached) {
-            // Loss already observed during allocation remains authoritative if
-            // the cleanup attempt reports a second, less specific failure.
-            if (error.native_detail == static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
-              return std::unexpected{error};
-            }
-            return detached;
-          }
-          return std::unexpected{error};
-        }
-      }
-      return {};
-    };
-
     const auto interop_prefix_available = [this]() noexcept {
       return bridge_capabilities_collected_ &&
              bridge_facts_.adapter_luid_matches &&
@@ -2319,6 +2420,8 @@ namespace avb::render {
       if (auto started = start_source_ring(generation, allocation, format); !started) {
         return started;
       }
+      RingInstallOperations operations{*this, ring_serial_};
+      platform::windows::detail::GraphicsConstructionGuard guard{operations};
       const auto probed = frame_bridge_->probe_interop_ring(ring_serial_);
       if (!probed) {
         return std::unexpected{probed.error()};
@@ -2333,9 +2436,7 @@ namespace avb::render {
             interop_operation_failed = true;
             break;
           }
-          slot.external_image = *finished;
-          if (auto registered = create_slot_presentation_resources(
-                slot, slot.external_image.view, slot.external_image.layout);
+          if (auto registered = register_external_image(slot.key, *finished);
               !registered) {
             interop_operation_failed = true;
             break;
@@ -2345,6 +2446,11 @@ namespace avb::render {
       if (attempt_interop && bridge_facts_.compatible_memory_type_available &&
           !interop_operation_failed && !frame_bridge_->ensure_interop_timeline()) {
         interop_operation_failed = true;
+      }
+      if (attempt_interop && bridge_facts_.compatible_memory_type_available &&
+          !interop_operation_failed) {
+        ring_ready_ = true;
+        guard.disarm();
       }
     }
     else if (!bridge_selection_) {
@@ -2361,14 +2467,15 @@ namespace avb::render {
       bridge_selection_ = selected;
     }
     else {
-      if (auto detached = destroy_capture_slots(); !detached) {
-        return detached;
-      }
       if (auto started = start_source_ring(generation, allocation, format); !started) {
         return started;
       }
-      if (auto created = create_cpu_ring(); !created) {
-        return created;
+      RingInstallOperations operations{*this, ring_serial_};
+      platform::windows::detail::GraphicsConstructionGuard guard{operations};
+      for (auto &slot : slots_) {
+        if (auto created = create_capture_slot(slot); !created) {
+          return created;
+        }
       }
       frame_bridge_->release_interop_support();
       active_bridge_mode_ = core::BridgeMode::CpuCopy;
@@ -2405,6 +2512,8 @@ namespace avb::render {
         }
         bridge_selection_ = selected;
       }
+      ring_ready_ = true;
+      guard.disarm();
     }
     generation_ = generation;
     return {};
@@ -2413,7 +2522,8 @@ namespace avb::render {
   bool WindowsRenderStack::Impl::ready_for_frame() const noexcept
   {
     return accepting_frames_ && !terminal_error_ && !d3_device_removed_ &&
-           ring_serial_ != 0 && capture_format_ != DXGI_FORMAT_UNKNOWN &&
+           !vulkan_device_lost_ && ring_ready_ && ring_serial_ != 0 &&
+           capture_format_ != DXGI_FORMAT_UNKNOWN &&
            std::ranges::any_of(slots_, [](const CaptureSlot &slot) noexcept {
              return slot.phase == SlotPhase::Empty;
            });
@@ -2433,35 +2543,133 @@ namespace avb::render {
              : nullptr;
   }
 
+  std::optional<SlotKey> WindowsRenderStack::Impl::reserve_source_slot() noexcept
+  {
+    if (!ready_for_frame()) {
+      return std::nullopt;
+    }
+    auto *const slot = empty_slot();
+    if (slot == nullptr || find_slot(slot->key, SlotPhase::Empty) != slot) {
+      return std::nullopt;
+    }
+    slot->restore_retained_on_cancel = slot == retained_slot_;
+    if (slot->restore_retained_on_cancel) {
+      retained_slot_ = nullptr;
+    }
+    slot->phase = SlotPhase::ProducerPending;
+    return slot->key;
+  }
+
+  std::expected<void, core::AppError>
+  WindowsRenderStack::Impl::cancel_source_reservation(const SlotKey key) noexcept
+  {
+    auto *const slot = find_slot(key, SlotPhase::ProducerPending);
+    if (slot == nullptr) {
+      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
+    }
+    slot->phase = SlotPhase::Empty;
+    if (slot->restore_retained_on_cancel && ring_ready_ && accepting_frames_ &&
+        !draining_ && !terminal_error_ && !vulkan_device_lost_ &&
+        !d3_device_removed_ && !interop_fallback_pending_ &&
+        slot->stamp.sequence >= last_submitted_sequence_ &&
+        (!retained_slot_ || slot->stamp.sequence >= retained_slot_->stamp.sequence)) {
+      retained_slot_ = slot;
+    }
+    slot->restore_retained_on_cancel = false;
+    return {};
+  }
+
+  std::expected<void, core::AppError>
+  WindowsRenderStack::Impl::register_external_image(
+    const SlotKey key, const ExternalSampledImageView image) noexcept
+  {
+    auto *const slot = find_slot(key, SlotPhase::Empty);
+    if (slot == nullptr || ring_ready_ || image.image == VK_NULL_HANDLE ||
+        image.view == VK_NULL_HANDLE || image.format != VK_FORMAT_B8G8R8A8_UNORM ||
+        image.allocation != capture_allocation_ || !checked_pixel_bytes(image.allocation) ||
+        slot->external_image.image != VK_NULL_HANDLE ||
+        slot->sampled_image != VK_NULL_HANDLE || slot->upload_buffer != VK_NULL_HANDLE ||
+        slot->descriptor != VK_NULL_HANDLE || vulkan_device_lost_) {
+      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
+    }
+    slot->external_image = image;
+    return create_slot_presentation_resources(*slot, image.view, image.layout);
+  }
+
+  std::expected<void, core::AppError>
+  WindowsRenderStack::Impl::complete_external_input(
+    const SlotKey key, const core::Extent content, const FrameStamp stamp,
+    const CompletedProducerWait wait) noexcept
+  {
+    auto *const slot = find_slot(key, SlotPhase::ProducerPending);
+    if (slot == nullptr || !ring_ready_ ||
+        slot->external_image.image == VK_NULL_HANDLE ||
+        slot->external_image.view == VK_NULL_HANDLE ||
+        slot->external_image.format != VK_FORMAT_B8G8R8A8_UNORM ||
+        slot->external_image.allocation != capture_allocation_ ||
+        !checked_pixel_bytes(content) || content.width > capture_allocation_.width ||
+        content.height > capture_allocation_.height ||
+        wait.semaphore == VK_NULL_HANDLE || wait.value == 0 ||
+        draining_ || vulkan_device_lost_) {
+      return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
+    }
+    slot->content = content;
+    slot->stamp = stamp;
+    slot->producer_wait = wait;
+    slot->gpu_copy = true;
+    slot->restore_retained_on_cancel = false;
+    slot->phase = SlotPhase::GpuReady;
+    return {};
+  }
+
+  std::expected<void, core::AppError>
+  WindowsRenderStack::Impl::discard_completed_source(const SlotKey key) noexcept
+  {
+    auto *const slot = find_slot(key, SlotPhase::ProducerPending);
+    if (slot == nullptr) {
+      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
+    }
+    slot->phase = SlotPhase::Empty;
+    slot->restore_retained_on_cancel = false;
+    slot->gpu_copy = false;
+    slot->producer_wait = {};
+    return {};
+  }
+
   void WindowsRenderStack::Impl::submit(
     platform::windows::WindowsCapturedFrame &&frame)
   {
-    auto *const slot = empty_slot();
     const auto content = frame.content_size();
-    if (!ready_for_frame() || slot == nullptr ||
-        find_slot(slot->key, SlotPhase::Empty) != slot) {
+    const auto key = reserve_source_slot();
+    if (!key) {
       ++dropped_frames_;
       observe_performance(PerformanceCounter::Dropped);
       throw graphics_error(core::AppErrorCode::InvalidValue);
     }
 
     const FrameStamp stamp{captured_frames_ + 1, frame.capture_timestamp()};
-    const bool gpu_copy = active_bridge_mode_ == core::BridgeMode::GpuInterop;
-    const auto submitted = frame_bridge_->submit(
-      slot->key, std::move(frame), stamp);
+    const auto submitted = [&]() {
+      try {
+        return frame_bridge_->submit(*key, std::move(frame), stamp);
+      } catch (...) {
+        // Texture projection throws only before adoption/native enqueue. Cancel
+        // while the old retained metadata and completed wait are still intact.
+        if (!cancel_source_reservation(*key)) {
+          std::terminate();
+        }
+        throw;
+      }
+    }();
     if (!submitted) {
+      if (!cancel_source_reservation(*key)) {
+        std::terminate();
+      }
       if (submitted.error().code == core::AppErrorCode::InvalidValue) {
         ++dropped_frames_;
         observe_performance(PerformanceCounter::Dropped);
       }
       throw submitted.error();
     }
-    // Failed validation/projection leaves retained redraw intact. A successful
-    // adoption may reuse that storage, including a safe pre-copy fallback.
-    if (slot == retained_slot_) {
-      retained_slot_ = nullptr;
-    }
-    slot->content = content;
     performance_content_ = content;
     if (submitted->d3_copy_bytes != 0) {
       observe_performance(PerformanceCounter::D3CopyBytes, submitted->d3_copy_bytes);
@@ -2479,13 +2687,11 @@ namespace avb::render {
     }
     if (submitted->disposition ==
         platform::windows::BridgeSubmitDisposition::SafeDiscard) {
-      slot->gpu_copy = false;
-      slot->producer_wait = {};
+      if (!discard_completed_source(*key)) {
+        std::terminate();
+      }
       return;
     }
-    slot->gpu_copy = gpu_copy;
-    slot->stamp = stamp;
-    slot->phase = SlotPhase::ProducerPending;
     ++captured_frames_;
     observe_performance(PerformanceCounter::Admitted);
   }
@@ -2685,16 +2891,11 @@ namespace avb::render {
       interop_fallback_pending_ = false;
       throw started.error();
     }
+    RingInstallOperations operations{*this, ring_serial_};
+    platform::windows::detail::GraphicsConstructionGuard guard{operations};
     for (auto &slot : slots_) {
       if (auto created = create_capture_slot(slot); !created) {
-        auto failure = created.error();
-        const bool allocation_lost_device =
-          failure.native_detail == static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST);
-        if (auto detached = destroy_capture_slots(); !detached) {
-          if (!allocation_lost_device) {
-            failure = detached.error();
-          }
-        }
+        const auto failure = created.error();
         interop_fallback_pending_ = false;
         const bool d3_lost = frame_bridge_->d3_device_removed();
         const bool vulkan_lost =
@@ -2723,8 +2924,10 @@ namespace avb::render {
     }
     bridge_selection_ = *fallback;
     interop_fallback_pending_ = false;
+    ring_ready_ = true;
     accepting_frames_ = !draining_ && !terminal_error_;
     result.made_progress = true;
+    guard.disarm();
   }
 
   void WindowsRenderStack::Impl::set_presentation(
@@ -2918,7 +3121,15 @@ namespace avb::render {
       now, draining_ || vulkan_device_lost_ || interop_fallback_pending_,
       [this, &result](const SlotKey key, const CpuRowsView rows,
                       const FrameStamp stamp) {
-        return consume_cpu_rows(key, rows, stamp, result);
+        const auto completed = complete_cpu_input(key, rows, stamp);
+        if (completed) {
+          result.made_progress = true;
+        }
+        else if (completed.error().native_detail ==
+                 static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
+          mark_vulkan_device_lost(result);
+        }
+        return completed;
       });
     result.made_progress = result.made_progress || progress.made_progress;
     if (progress.next_deadline) {
@@ -2940,31 +3151,43 @@ namespace avb::render {
     for (std::size_t index{}; index < progress.completion_count; ++index) {
       const auto &completion = progress.completions[index];
       using platform::windows::BridgeCompletionKind;
-      const auto required_phase = completion.kind == BridgeCompletionKind::CpuConsumed
-                                    ? SlotPhase::CpuReady
-                                    : SlotPhase::ProducerPending;
-      auto *const slot = find_slot(completion.key, required_phase);
-      if (slot == nullptr) {
+      const auto failed_transition = [this, &result](const core::AppError error) {
+        terminal_error_ = error;
+        accepting_frames_ = false;
+        result.terminal_error = terminal_error_;
+      };
+      // CPU readiness was committed inside the synchronous mapped-row callback.
+      // Every other event still owns the matching ProducerPending reservation.
+      if (completion.kind == BridgeCompletionKind::CpuConsumed &&
+          find_slot(completion.key, SlotPhase::CpuReady) == nullptr) {
         terminal_error_ = graphics_error(core::AppErrorCode::RuntimeStateLost);
         accepting_frames_ = false;
         result.terminal_error = terminal_error_;
         continue;
       }
       switch (completion.kind) {
-      case BridgeCompletionKind::ExternalReady:
-        slot->content = completion.content;
-        slot->stamp = completion.stamp;
-        slot->producer_wait = completion.external_wait;
-        slot->phase = SlotPhase::GpuReady;
+      case BridgeCompletionKind::ExternalReady: {
+        const auto completed = complete_external_input(
+          completion.key, completion.content, completion.stamp,
+          completion.external_wait);
+        if (!completed) {
+          // The event already proves producer completion. Invalid publication
+          // must consume its reservation without restoring superseded redraw.
+          static_cast<void>(discard_completed_source(completion.key));
+          failed_transition(completed.error());
+        }
         break;
+      }
       case BridgeCompletionKind::CpuConsumed:
         // The synchronous consumer already committed upload and readiness.
         break;
       case BridgeCompletionKind::SafeDiscard:
       case BridgeCompletionKind::CpuConsumerFailed:
-        slot->phase = SlotPhase::Empty;
-        slot->gpu_copy = false;
-        slot->producer_wait = {};
+        if (const auto discarded = discard_completed_source(completion.key);
+            !discarded) {
+          failed_transition(discarded.error());
+          break;
+        }
         if (completion.count_as_dropped) {
           ++dropped_frames_;
           observe_performance(PerformanceCounter::Dropped);
@@ -2987,21 +3210,22 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::consume_cpu_rows(
-    const SlotKey key, const CpuRowsView rows, const FrameStamp stamp,
-    RenderTickResult &result) noexcept
+  WindowsRenderStack::Impl::complete_cpu_input(
+    const SlotKey key, const CpuRowsView rows, const FrameStamp stamp) noexcept
   {
     auto *const matched = find_slot(key, SlotPhase::ProducerPending);
     const auto byte_count = checked_pixel_bytes(capture_allocation_);
-    if (matched == nullptr || !byte_count || !checked_pixel_bytes(rows.content) ||
+    if (matched == nullptr || !ring_ready_ || !byte_count || !checked_pixel_bytes(rows.content) ||
         rows.allocation != capture_allocation_ ||
         rows.content.width > rows.allocation.width ||
         rows.content.height > rows.allocation.height ||
-        matched->gpu_copy || matched->mapped_upload == nullptr ||
+        matched->external_image.image != VK_NULL_HANDLE ||
+        matched->upload_buffer == VK_NULL_HANDLE ||
+        matched->upload_memory == VK_NULL_HANDLE ||
+        matched->sampled_image == VK_NULL_HANDLE ||
+        matched->sampled_view == VK_NULL_HANDLE ||
+        matched->mapped_upload == nullptr ||
         *byte_count > matched->upload_allocation_size ||
-        matched->content != rows.content ||
-        matched->stamp.sequence != stamp.sequence ||
-        matched->stamp.intake_observed_at != stamp.intake_observed_at ||
         draining_ || vulkan_device_lost_) {
       return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
     }
@@ -3023,13 +3247,13 @@ namespace avb::render {
     const auto *const source = rows.bytes.data();
     const auto destination_pitch =
       static_cast<std::size_t>(capture_allocation_.width) * bytes_per_pixel;
-    for (std::uint32_t row = 0; row < slot.content.height; ++row) {
+    for (std::uint32_t row = 0; row < rows.content.height; ++row) {
       std::memcpy(destination + static_cast<std::size_t>(row) * destination_pitch,
                   source + static_cast<std::size_t>(row) * rows.row_pitch,
                   row_bytes);
     }
 
-    observe_performance(PerformanceCounter::CpuCopyBytes, static_cast<std::uint64_t>(row_bytes) * slot.content.height);
+    observe_performance(PerformanceCounter::CpuCopyBytes, static_cast<std::uint64_t>(row_bytes) * rows.content.height);
 
     if (!slot.upload_coherent) {
       // Flush whole noncoherent atoms. If rounding would overflow or extend past
@@ -3057,7 +3281,8 @@ namespace avb::render {
       if (flush_result == VK_ERROR_DEVICE_LOST) {
         // Latch loss before the bridge can visit another input and before this
         // tick reaches any later Vulkan operation. The bridge discards its rest.
-        mark_vulkan_device_lost(result);
+        vulkan_device_lost_ = true;
+        accepting_frames_ = false;
       }
       if (flush_result != VK_SUCCESS) {
         return std::unexpected{vulkan_error(core::AppErrorCode::RuntimeStateLost,
@@ -3065,8 +3290,12 @@ namespace avb::render {
       }
     }
 
+    slot.content = rows.content;
+    slot.stamp = stamp;
+    slot.producer_wait = {};
+    slot.gpu_copy = false;
+    slot.restore_retained_on_cancel = false;
     slot.phase = SlotPhase::CpuReady;
-    result.made_progress = true;
     return {};
   }
 
