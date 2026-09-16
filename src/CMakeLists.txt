@@ -35,11 +35,13 @@ add_library(avb0795_app
   app/application.cpp
   app/config_store.cpp
   app/controller_view_state.cpp
+  app/localized_presentation.cpp
 )
 
 target_link_libraries(avb0795_app
   PUBLIC
     avb0795_core
+    avb0795_i18n
   PRIVATE
     nlohmann_json::nlohmann_json
 )

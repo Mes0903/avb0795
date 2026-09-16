@@ -1,4 +1,5 @@
-/// @file Strict V1 JSON preferences with default recovery and temporary-file replacement.
+/// @file
+/// @brief Strict V1 JSON preferences with default recovery and temporary-file replacement.
 #include "avb/app/config_store.hpp"
 
 #include "avb/core/hotkey.hpp"
@@ -99,9 +100,20 @@ namespace avb::app {
       return {};
     }
 
+    [[nodiscard]] std::string_view serialize_mode(core::OverlayMode mode) noexcept
+    {
+      switch (mode) {
+      case core::OverlayMode::Editable:
+        return "editable";
+      case core::OverlayMode::PassThrough:
+        return "pass_through";
+      }
+      return {};
+    }
+
     // Reject extra keys as well as omissions: the persistence boundary excludes
-    // source identities, titles, pixel data, window geometry and session mode.
-    // `extensions` is an optional V1 object for legacy default-off documents;
+    // source identities, titles, pixels, window geometry, crop and editing drafts.
+    // General preferences added after the four required keys are optional V1 fields;
     // old binaries are not promised forward reads of newer V1 documents.
     [[nodiscard]] bool has_exact_keys(const nlohmann::json &document)
     {
@@ -109,7 +121,12 @@ namespace avb::app {
         return false;
       }
 
-      const auto expected_size = document.contains("extensions") ? 5U : 4U;
+      const auto expected_size =
+        4U + (document.contains("extensions") ? 1U : 0U) +
+        (document.contains("language") ? 1U : 0U) +
+        (document.contains("opacity_percent") ? 1U : 0U) +
+        (document.contains("mode") ? 1U : 0U) +
+        (document.contains("auto_refresh_enabled") ? 1U : 0U);
       return document.size() == expected_size &&
              document.contains("version") && document.contains("hotkey") &&
              document.contains("fps_cap") && document.contains("border");
@@ -132,6 +149,25 @@ namespace avb::app {
       return core::ExtensionSettings{
         .browser_capture_keep_alive =
           extensions.at("browser_capture_keep_alive").get<bool>()};
+    }
+
+    [[nodiscard]] int parse_opacity(const nlohmann::json &document)
+    {
+      const auto opacity = document.find("opacity_percent");
+      if (opacity == document.end()) {
+        return 100;
+      }
+      // Check the JSON integer width before narrowing. Booleans and floats are
+      // not percentages, and malformed opacity recovers without losing other fields.
+      if (opacity->is_number_unsigned()) {
+        const auto percent = opacity->get<std::uint64_t>();
+        return percent <= 100 ? static_cast<int>(percent) : 100;
+      }
+      if (opacity->is_number_integer()) {
+        const auto percent = opacity->get<std::int64_t>();
+        return percent >= 0 && percent <= 100 ? static_cast<int>(percent) : 100;
+      }
+      return 100;
     }
 
     [[nodiscard]] std::optional<UserConfig>
@@ -166,11 +202,35 @@ namespace avb::app {
         return std::nullopt;
       }
 
+      // Optional scalar preferences recover independently of each other and the
+      // validated required fields; malformed extensions retain their V1 policy.
+      auto language = i18n::LanguagePreference::System;
+      if (document.contains("language") &&
+          document.at("language").is_string()) {
+        language = i18n::parse_language_preference(
+                     document.at("language")
+                       .get_ref<const std::string &>())
+                     .value_or(i18n::LanguagePreference::System);
+      }
+      auto mode = core::OverlayMode::Editable;
+      const auto mode_value = document.find("mode");
+      if (mode_value != document.end() && mode_value->is_string() &&
+          mode_value->get_ref<const std::string &>() == "pass_through") {
+        mode = core::OverlayMode::PassThrough;
+      }
+      const auto refresh = document.find("auto_refresh_enabled");
+      const bool auto_refresh_enabled =
+        refresh != document.end() && refresh->is_boolean() && refresh->get<bool>();
+
       return UserConfig{.version = config_version,
                         .hotkey = *hotkey,
                         .fps_cap = *fps_cap,
                         .border = *border,
-                        .extensions = *extensions};
+                        .extensions = *extensions,
+                        .language = language,
+                        .opacity_percent = parse_opacity(document),
+                        .mode = mode,
+                        .auto_refresh_enabled = auto_refresh_enabled};
     }
 
     [[nodiscard]] nlohmann::json serialize_config(const UserConfig &config)
@@ -181,7 +241,12 @@ namespace avb::app {
                             {"border", serialize_border(config.border)},
                             {"extensions",
                              {{"browser_capture_keep_alive",
-                               config.extensions.browser_capture_keep_alive}}}};
+                               config.extensions.browser_capture_keep_alive}}},
+                            {"language",
+                             i18n::language_preference_token(config.language)},
+                            {"opacity_percent", config.opacity_percent},
+                            {"mode", serialize_mode(config.mode)},
+                            {"auto_refresh_enabled", config.auto_refresh_enabled}};
     }
 
   }    // namespace
@@ -190,8 +255,20 @@ namespace avb::app {
       : atomic_replace_(std::move(atomic_replace)) {}
 
   std::expected<UserConfig, core::AppError>
-  ConfigStore::load(const std::filesystem::path &path) const
+  ConfigStore::load(const std::filesystem::path &path,
+                    const std::filesystem::path &legacy_path) const
   {
+    if (!legacy_path.empty()) {
+      std::error_code error;
+      const bool exists = std::filesystem::exists(path, error);
+      if (error) {
+        return std::unexpected{read_failure()};
+      }
+      if (!exists) {
+        return load(legacy_path);
+      }
+    }
+
     std::ifstream input{path, std::ios::binary};
     if (!input.is_open()) {
       std::error_code error;
@@ -220,8 +297,9 @@ namespace avb::app {
       }
     }
 
-    // Detect growth after file_size as well as the short reads checked above;
-    // do not accept a partial snapshot of a file that changed during the read.
+    // Detect growth after file_size as well as the short reads checked above.
+    // This rejects observed size changes; equal-size concurrent replacement or
+    // rewriting is not detected and still requires external writer coordination.
     char extra{};
     input.read(&extra, 1);
     if (input.gcount() != 0 || input.bad() || !input.eof()) {
@@ -247,7 +325,10 @@ namespace avb::app {
   ConfigStore::save(const std::filesystem::path &path,
                     const UserConfig &config) const
   {
-    if (config.version != config_version) {
+    if (config.version != config_version ||
+        config.opacity_percent < 0 || config.opacity_percent > 100 ||
+        serialize_mode(config.mode).empty() ||
+        i18n::language_preference_token(config.language).empty()) {
       return std::unexpected{core::AppError{core::AppErrorCode::InvalidValue}};
     }
 

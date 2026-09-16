@@ -153,7 +153,7 @@ function(avb0795_assert_target_boundaries)
   if(TARGET avb0795_app)
     _avb0795_assert_sources(avb0795_app "src/app")
     _avb0795_assert_links(
-      avb0795_app avb0795_core nlohmann_json::nlohmann_json)
+      avb0795_app avb0795_core avb0795_i18n nlohmann_json::nlohmann_json)
   endif()
 
   if(TARGET avb0795_ui)
