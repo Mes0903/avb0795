@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <span>
 
 namespace avb::render {
@@ -24,6 +26,29 @@ namespace avb::render {
     std::uint32_t index{};
     friend bool operator==(const SlotKey &, const SlotKey &) = default;
   };
+
+  /// @brief Allocate an installation identity independently of capture generation.
+  /// Every attempted install consumes its candidate, including rollback/fallback.
+  /// Exhaustion returns nullopt so the owner enters terminal recovery before reuse.
+  [[nodiscard]] constexpr std::optional<std::uint64_t>
+  next_ring_serial(const std::uint64_t last_issued) noexcept
+  {
+    if (last_issued == (std::numeric_limits<std::uint64_t>::max)()) {
+      return std::nullopt;
+    }
+    return last_issued + 1;
+  }
+
+  /// @brief Validate identity and bounds before indexing the owner's live ring.
+  /// The caller additionally validates its required canonical phase. Serial zero
+  /// denotes a detached ring; a key is usable solely within its installed capacity.
+  [[nodiscard]] constexpr bool matches_slot_key(
+    const SlotKey key, const std::uint64_t installed_serial,
+    const std::size_t capacity) noexcept
+  {
+    return installed_serial != 0 && key.ring_serial == installed_serial &&
+           key.index < capacity;
+  }
 
   /// @brief Source-frame ordering and intake observation carried through a draw.
   ///

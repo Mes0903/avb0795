@@ -10,6 +10,7 @@
 #include "platform/windows/windows_captured_frame.hpp"
 #include "render/graphics_retry_policy.hpp"
 #include "render/render_math.hpp"
+#include "render/vulkan_input.hpp"
 
 #ifndef VK_USE_PLATFORM_WIN32_KHR
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -235,8 +236,7 @@ namespace avb::render {
       std::optional<platform::windows::WindowsCapturedFrame> frame;
       core::Extent content{};
       SlotPhase phase{SlotPhase::Empty};
-      std::uint64_t content_sequence{};
-      std::chrono::steady_clock::time_point intake_observed_at{};
+      FrameStamp stamp;
       PresentationSnapshot recorded_presentation{};
 
       // CPU transport owns host-visible upload storage plus a separate sampled
@@ -2955,7 +2955,7 @@ namespace avb::render {
     // Keep the pool checkout alive across asynchronous D3 access. A texture
     // interface alone would not prevent WGC from recycling its pool buffer.
     slot->frame.emplace(std::move(frame));
-    slot->intake_observed_at = slot->frame->capture_timestamp();
+    slot->stamp.intake_observed_at = slot->frame->capture_timestamp();
     slot->content = content;
     performance_content_ = content;
     slot->gpu_copy = active_bridge_mode_ == core::BridgeMode::GpuInterop;
@@ -3006,7 +3006,7 @@ namespace avb::render {
     slot->phase = SlotPhase::ProducerPending;
     ++captured_frames_;
     observe_performance(PerformanceCounter::Admitted);
-    slot->content_sequence = captured_frames_;
+    slot->stamp.sequence = captured_frames_;
   }
 
   bool WindowsRenderStack::Impl::has_unsafe_native_work() const noexcept
@@ -3089,7 +3089,7 @@ namespace avb::render {
     std::array<RenderFrameCandidate, cpu_slot_count> candidates{};
     for (std::size_t index{}; index < slots_.size(); ++index) {
       const auto &slot = slots_[index];
-      candidates[index] = {slot.phase, slot.content_sequence,
+      candidates[index] = {slot.phase, slot.stamp.sequence,
                            &slot == retained_slot_};
     }
     const auto selected = select_render_frame(
@@ -3852,7 +3852,7 @@ namespace avb::render {
     if (completed_content && !draining_ && !terminal_error_ &&
         !interop_fallback_pending_ &&
         (!retained_slot_ ||
-         slot.content_sequence >= retained_slot_->content_sequence)) {
+         slot.stamp.sequence >= retained_slot_->stamp.sequence)) {
       // Retain only our completed sampled image, never a WGC checkout. GPU
       // replay reacquires it from EXTERNAL and waits on the same completed D3
       // timeline value; no D3 writer touches this slot before it is reused.
@@ -4113,15 +4113,15 @@ namespace avb::render {
         const auto submitted_at = std::chrono::steady_clock::now();
         performance_->observe_runtime({observation_instance_, generation_}, submitted_at);
         performance_->observe_counter(PerformanceOwner::Replica, PerformanceCounter::Submitted, 1, submitted_at);
-        if (slot.content_sequence > last_submitted_sequence_) {
+        if (slot.stamp.sequence > last_submitted_sequence_) {
           performance_->observe_sample(PerformanceSample::IntakeToSubmit,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(submitted_at - slot.intake_observed_at), submitted_at);
+            std::chrono::duration_cast<std::chrono::nanoseconds>(submitted_at - slot.stamp.intake_observed_at), submitted_at);
         }
         else {
           performance_->observe_counter(PerformanceOwner::Replica, PerformanceCounter::RetainedRedraws, 1, submitted_at);
         }
       }
-      last_submitted_sequence_ = slot.content_sequence;
+      last_submitted_sequence_ = slot.stamp.sequence;
       if (gpu_submit) {
         ++gpu_interop_frames_submitted_;
       }
