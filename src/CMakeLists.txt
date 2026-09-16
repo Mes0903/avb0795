@@ -87,6 +87,7 @@ if(WIN32)
   add_library(avb0795_vulkan_renderer
     ${PROJECT_SOURCE_DIR}/render/graphics_retry_policy.cpp
     ${PROJECT_SOURCE_DIR}/render/render_math.cpp
+    ${PROJECT_SOURCE_DIR}/render/vulkan_device.cpp
     ${PROJECT_SOURCE_DIR}/render/vulkan_renderer.cpp
     ${AVB0795_REPLICA_SHADER_SOURCE}
   )

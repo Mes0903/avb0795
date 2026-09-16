@@ -19,6 +19,8 @@ flowchart LR
 
 主要入口是 [`vulkan_renderer.hpp`](../../render/vulkan_renderer.hpp)。跨 owner 的資料契約位於 [`vulkan_input.hpp`](../../render/vulkan_input.hpp)，繪製實作位於 [`vulkan_renderer.cpp`](../../render/vulkan_renderer.cpp)。Windows 組合入口位於 [`windows_render_stack.hpp`](../../platform/windows/windows_render_stack.hpp)，producer 與 import ownership 見 [Windows frame bridge](windows-frame-bridge.md)。
 
+為了依生命週期閱讀 renderer 內部實作，程式需要集中保存資源狀態，並依操作責任安排 translation units。[`vulkan_renderer_impl.hpp`](../../render/detail/vulkan_renderer_impl.hpp) 定義同一個私有 `Impl` 與其持有的資源；[`vulkan_device.cpp`](../../render/vulkan_device.cpp) 實作 instance、surface bootstrap、device 選擇、queues 與共用 graphics resources。Constructor、整體 teardown 與 canonical transitions 維持由 renderer 實作串接。
+
 目前 graphics dependency configuration 與原生驗證使用 Windows。`avb0795_vulkan_renderer` 擁有獨立的 source／link 邊界，連結 core、Vulkan、GLFW 與 diagnostics。Linux 的 Portal／PipeWire 接入屬於後續平台工作。
 
 ## Device bootstrap 與借用
