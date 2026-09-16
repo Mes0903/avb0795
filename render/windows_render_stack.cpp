@@ -8,6 +8,7 @@
 #include "platform/windows/detail/windows_graphics_policy.hpp"
 #include "platform/windows/overlay_window.hpp"
 #include "platform/windows/windows_captured_frame.hpp"
+#include "platform/windows/windows_frame_bridge.hpp"
 #include "render/graphics_retry_policy.hpp"
 #include "render/render_math.hpp"
 #include "render/vulkan_input.hpp"
@@ -226,14 +227,10 @@ namespace avb::render {
     using SlotPhase = RenderSlotPhase;
 
     /// @brief One of three stable ring slots, with CPU or imported-GPU destination.
-    /// frame owns only the WGC source-copy lease; sampled images survive that
+    /// The key names bridge-owned source work; sampled images survive its WGC
     /// checkout and can remain as safe redraw content after submission retires.
     struct CaptureSlot final {
-      // Source-copy lease and completion query. These can outlive Vulkan loss
-      // because the D3 device has an independent completion/removal obligation.
-      ComPtr<ID3D11Texture2D> readback_texture;
-      ComPtr<ID3D11Query> copy_query;
-      std::optional<platform::windows::WindowsCapturedFrame> frame;
+      SlotKey key;
       core::Extent content{};
       SlotPhase phase{SlotPhase::Empty};
       FrameStamp stamp;
@@ -274,7 +271,6 @@ namespace avb::render {
       bool interop_requires_dedicated{};
       std::uint64_t d3_fence_target{};
       bool gpu_copy{};
-      bool query_completion{};
     };
 
     /// @brief Independent presentation lease: semaphore and WSI outlive the submission
@@ -327,7 +323,7 @@ namespace avb::render {
     /// Borrow the D3 device while this graphics generation remains owned.
     [[nodiscard]] ID3D11Device &capture_device() const noexcept
     {
-      return *d3_device_.Get();
+      return frame_bridge_->capture_device();
     }
 
     /// Check admission and bounded ring capacity without pulling a WGC frame.
@@ -394,8 +390,6 @@ namespace avb::render {
   private:
     void observe_performance(PerformanceCounter counter, std::uint64_t value = 1) noexcept;
     void observe_performance_metadata(std::chrono::steady_clock::time_point now) noexcept;
-    /// Create the hardware BGRA device used by WGC and all source copies.
-    void create_d3_device();
     /// Enable GLFW surface and mandatory maintenance1 requirements before use.
     void create_vulkan_instance();
     /// Create WSI against the borrowed overlay, whose window must outlive the stack.
@@ -425,6 +419,11 @@ namespace avb::render {
     /// Construct CPU staging/query, mapped upload and sampled-image resources.
     [[nodiscard]] std::expected<void, core::AppError>
     create_capture_slot(CaptureSlot &slot);
+    /// Issue fresh identities for each attempted allocation, including fallback.
+    /// The bridge and canonical slots share keys but never mirror phase ownership.
+    [[nodiscard]] std::expected<void, core::AppError>
+    start_source_ring(std::uint64_t generation, core::Extent allocation,
+                      DXGI_FORMAT format) noexcept;
     /// Create a shared D3 texture and query its NT handle's Vulkan memory-type
     /// intersection; device-level capability alone does not prove a handle usable.
     [[nodiscard]] std::expected<bool, core::AppError>
@@ -473,6 +472,8 @@ namespace avb::render {
     [[nodiscard]] std::size_t presentations_in_flight() const noexcept;
     /// Prefer non-retained empty storage while keeping all three slots reusable.
     [[nodiscard]] CaptureSlot *empty_slot() noexcept;
+    /// Reject detached/stale identities and the wrong phase before slot mutation.
+    [[nodiscard]] CaptureSlot *find_slot(SlotKey key, SlotPhase phase) noexcept;
     /// Choose the newest eligible sequence or one requested retained redraw;
     /// older ready content can be dropped because its D3 checkout has retired.
     [[nodiscard]] CaptureSlot *ready_slot() noexcept;
@@ -500,7 +501,11 @@ namespace avb::render {
                         std::chrono::steady_clock::time_point now);
     /// Poll D3 completion before checking in WGC. CPU then maps rows into upload
     /// storage; GPU becomes ready only with an already-satisfiable timeline wait.
-    void progress_d3_copy(CaptureSlot &slot, RenderTickResult &result, std::chrono::steady_clock::time_point now);
+    void progress_d3_copy(RenderTickResult &result, std::chrono::steady_clock::time_point now);
+    /// Copy borrowed mapped rows and flush before the bridge unmaps its staging.
+    [[nodiscard]] std::expected<void, core::AppError>
+    consume_cpu_rows(SlotKey key, CpuRowsView rows, FrameStamp stamp,
+                     RenderTickResult &result) noexcept;
     /// Poll acquire or submission proof by phase, then recycle or release the
     /// acquired image that was never handed to presentation.
     void progress_submission(CaptureSlot &slot, RenderTickResult &result, std::chrono::steady_clock::time_point now);
@@ -574,8 +579,7 @@ namespace avb::render {
     DXGI_FORMAT capture_format_{DXGI_FORMAT_UNKNOWN};
 
     // D3 source-copy owners are independent of Vulkan device-loss evidence.
-    ComPtr<ID3D11Device> d3_device_;
-    ComPtr<ID3D11DeviceContext> d3_context_;
+    std::unique_ptr<platform::windows::WindowsFrameBridge> frame_bridge_;
     ComPtr<ID3D11Device5> d3_device5_;
     ComPtr<ID3D11DeviceContext4> d3_context4_;
     ComPtr<ID3D11Fence> interop_fence_;
@@ -616,6 +620,8 @@ namespace avb::render {
     VkSemaphore interop_timeline_{VK_NULL_HANDLE};
     // Stable addresses permit one borrowed retained_slot_ without another owner.
     std::array<CaptureSlot, cpu_slot_count> slots_{};
+    std::uint64_t last_ring_serial_{};
+    std::uint64_t ring_serial_{};
     // Borrowed from the stable ring; Empty still means there is no native work.
     // Prefer another empty slot for capture, but keep all three reusable.
     CaptureSlot *retained_slot_{};
@@ -737,7 +743,7 @@ namespace avb::render {
       if (window_ == nullptr || generation_ == 0) {
         throw graphics_error(core::AppErrorCode::InvalidValue);
       }
-      create_d3_device();
+      frame_bridge_ = std::make_unique<platform::windows::WindowsFrameBridge>();
       create_vulkan_instance();
       create_surface();
       select_physical_device();
@@ -800,22 +806,6 @@ namespace avb::render {
       vkDestroyInstance(instance_, nullptr);
       instance_ = VK_NULL_HANDLE;
     }
-  }
-
-  void WindowsRenderStack::Impl::create_d3_device()
-  {
-    constexpr std::array requested_levels{D3D_FEATURE_LEVEL_11_1,
-                                          D3D_FEATURE_LEVEL_11_0};
-    D3D_FEATURE_LEVEL selected_level{};
-    const auto result = D3D11CreateDevice(
-      nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-      D3D11_CREATE_DEVICE_BGRA_SUPPORT, requested_levels.data(),
-      static_cast<UINT>(requested_levels.size()), D3D11_SDK_VERSION,
-      d3_device_.GetAddressOf(), &selected_level, d3_context_.GetAddressOf());
-    if (FAILED(result)) {
-      throw d3_error(core::AppErrorCode::UnsupportedGraphics, result);
-    }
-    static_cast<void>(selected_level);
   }
 
   void WindowsRenderStack::Impl::create_vulkan_instance()
@@ -953,7 +943,7 @@ namespace avb::render {
     ComPtr<IDXGIAdapter> d3_adapter;
     DXGI_ADAPTER_DESC d3_adapter_description{};
     const bool d3_luid_available =
-      SUCCEEDED(d3_device_.As(&dxgi_device)) &&
+      SUCCEEDED(capture_device().QueryInterface(IID_PPV_ARGS(&dxgi_device))) &&
       SUCCEEDED(dxgi_device->GetAdapter(d3_adapter.GetAddressOf())) &&
       SUCCEEDED(d3_adapter->GetDesc(&d3_adapter_description));
     const auto matches_d3_adapter =
@@ -1277,7 +1267,7 @@ namespace avb::render {
       ComPtr<IDXGIAdapter> adapter;
       DXGI_ADAPTER_DESC adapter_description{};
       const auto has_d3_luid =
-        SUCCEEDED(d3_device_.As(&dxgi_device)) &&
+        SUCCEEDED(capture_device().QueryInterface(IID_PPV_ARGS(&dxgi_device))) &&
         SUCCEEDED(dxgi_device->GetAdapter(adapter.GetAddressOf())) &&
         SUCCEEDED(adapter->GetDesc(&adapter_description));
 
@@ -1332,8 +1322,11 @@ namespace avb::render {
         (external_memory.externalMemoryFeatures &
          VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
 
-      const auto has_interfaces = SUCCEEDED(d3_device_.As(&d3_device5_)) &&
-                                  SUCCEEDED(d3_context_.As(&d3_context4_));
+      ComPtr<ID3D11DeviceContext> immediate_context;
+      capture_device().GetImmediateContext(immediate_context.GetAddressOf());
+      const auto has_interfaces =
+        SUCCEEDED(capture_device().QueryInterface(IID_PPV_ARGS(&d3_device5_))) &&
+        SUCCEEDED(immediate_context.As(&d3_context4_));
       HRESULT fence_result = E_NOINTERFACE;
       if (has_interfaces) {
         fence_result = d3_device5_->CreateFence(0, D3D11_FENCE_FLAG_SHARED,
@@ -2388,28 +2381,8 @@ namespace avb::render {
   std::expected<void, core::AppError>
   WindowsRenderStack::Impl::create_capture_slot(CaptureSlot &slot)
   {
-    D3D11_TEXTURE2D_DESC texture_info{};
-    texture_info.Width = capture_allocation_.width;
-    texture_info.Height = capture_allocation_.height;
-    texture_info.MipLevels = 1;
-    texture_info.ArraySize = 1;
-    texture_info.Format = capture_format_;
-    texture_info.SampleDesc.Count = 1;
-    texture_info.Usage = D3D11_USAGE_STAGING;
-    texture_info.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    auto d3_result = d3_device_->CreateTexture2D(
-      &texture_info, nullptr, slot.readback_texture.GetAddressOf());
-    if (FAILED(d3_result)) {
-      return std::unexpected{
-        d3_error(core::AppErrorCode::RuntimeConstructionFailure, d3_result)};
-    }
-    D3D11_QUERY_DESC query_info{};
-    query_info.Query = D3D11_QUERY_EVENT;
-    d3_result =
-      d3_device_->CreateQuery(&query_info, slot.copy_query.GetAddressOf());
-    if (FAILED(d3_result)) {
-      return std::unexpected{
-        d3_error(core::AppErrorCode::RuntimeConstructionFailure, d3_result)};
+    if (auto created = frame_bridge_->create_cpu_slot(slot.key); !created) {
+      return created;
     }
 
     const auto byte_count = checked_pixel_bytes(capture_allocation_);
@@ -2493,19 +2466,14 @@ namespace avb::render {
     // stays with the existing shared fence; this is not a keyed-mutex texture.
     texture_info.MiscFlags =
       D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-    auto d3_result = d3_device_->CreateTexture2D(
+    auto d3_result = capture_device().CreateTexture2D(
       &texture_info, nullptr, slot.interop_texture.GetAddressOf());
     if (FAILED(d3_result)) {
       return std::unexpected{
         d3_error(core::AppErrorCode::RuntimeConstructionFailure, d3_result)};
     }
-    D3D11_QUERY_DESC query_info{};
-    query_info.Query = D3D11_QUERY_EVENT;
-    d3_result =
-      d3_device_->CreateQuery(&query_info, slot.copy_query.GetAddressOf());
-    if (FAILED(d3_result)) {
-      return std::unexpected{
-        d3_error(core::AppErrorCode::RuntimeConstructionFailure, d3_result)};
+    if (auto created = frame_bridge_->create_query_slot(slot.key); !created) {
+      return std::unexpected{created.error()};
     }
 
     ComPtr<IDXGIResource1> shared_resource;
@@ -2648,7 +2616,6 @@ namespace avb::render {
     slot.interop_memory = VK_NULL_HANDLE;
     slot.d3_fence_target = 0;
     slot.gpu_copy = false;
-    slot.query_completion = false;
   }
 
   void WindowsRenderStack::Impl::destroy_capture_slot(
@@ -2657,9 +2624,6 @@ namespace avb::render {
     // Pools span capture allocations. Preserve the command buffer for the next
     // ring while clearing every allocation-local owner and borrowed mapping.
     const auto command_buffer = slot.command_buffer;
-    slot.frame.reset();
-    slot.copy_query.Reset();
-    slot.readback_texture.Reset();
     if (device_ != VK_NULL_HANDLE) {
       if (slot.render_finished_semaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(device_, slot.render_finished_semaphore, nullptr);
@@ -2703,12 +2667,54 @@ namespace avb::render {
 
   void WindowsRenderStack::Impl::destroy_capture_slots() noexcept
   {
+    if (frame_bridge_ && frame_bridge_->has_pending_inputs()) {
+      std::terminate();
+    }
     retained_slot_ = nullptr;
     for (auto &slot : slots_) {
       destroy_capture_slot(slot);
     }
+    // Renderer references are detached before the producer releases allocation
+    // state. A partial ring follows the same path and never had native users.
+    if (ring_serial_ != 0) {
+      if (!frame_bridge_->release_ring(ring_serial_)) {
+        std::terminate();
+      }
+      ring_serial_ = 0;
+    }
     capture_allocation_ = {};
     capture_format_ = DXGI_FORMAT_UNKNOWN;
+  }
+
+  std::expected<void, core::AppError>
+  WindowsRenderStack::Impl::start_source_ring(
+    const std::uint64_t generation, const core::Extent allocation,
+    const DXGI_FORMAT format) noexcept
+  {
+    if (ring_serial_ != 0) {
+      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
+    }
+    const auto serial = next_ring_serial(last_ring_serial_);
+    if (!serial) {
+      terminal_error_ = graphics_error(core::AppErrorCode::RuntimeStateLost);
+      accepting_frames_ = false;
+      return std::unexpected{*terminal_error_};
+    }
+    last_ring_serial_ = *serial;
+    for (std::size_t index{}; index < slots_.size(); ++index) {
+      slots_[index].key = {*serial, static_cast<std::uint32_t>(index)};
+    }
+    if (auto started = frame_bridge_->start_ring(*serial, generation, allocation,
+                                                 format); !started) {
+      for (auto &slot : slots_) {
+        slot.key = {};
+      }
+      return started;
+    }
+    ring_serial_ = *serial;
+    capture_allocation_ = allocation;
+    capture_format_ = format;
+    return {};
   }
 
   std::expected<void, core::AppError>
@@ -2742,9 +2748,6 @@ namespace avb::render {
       return std::unexpected{vulkan_error(
         core::AppErrorCode::RuntimeConstructionFailure, reset_result)};
     }
-    capture_allocation_ = allocation;
-    capture_format_ = format;
-
     const auto create_cpu_ring = [this]() -> std::expected<void, core::AppError> {
       for (auto &slot : slots_) {
         if (auto created = create_capture_slot(slot); !created) {
@@ -2780,6 +2783,9 @@ namespace avb::render {
 
     bool interop_operation_failed{};
     if (probe_interop) {
+      if (auto started = start_source_ring(generation, allocation, format); !started) {
+        return started;
+      }
       interop_created_handle_count_ = 0;
       interop_compatible_handle_count_ = 0;
       for (auto &slot : slots_) {
@@ -2832,8 +2838,9 @@ namespace avb::render {
         return std::unexpected{vulkan_error(
           core::AppErrorCode::RuntimeConstructionFailure, descriptor_reset)};
       }
-      capture_allocation_ = allocation;
-      capture_format_ = format;
+      if (auto started = start_source_ring(generation, allocation, format); !started) {
+        return started;
+      }
       if (auto created = create_cpu_ring(); !created) {
         return created;
       }
@@ -2888,7 +2895,7 @@ namespace avb::render {
   bool WindowsRenderStack::Impl::ready_for_frame() const noexcept
   {
     return accepting_frames_ && !terminal_error_ && !d3_device_removed_ &&
-           capture_format_ != DXGI_FORMAT_UNKNOWN &&
+           ring_serial_ != 0 && capture_format_ != DXGI_FORMAT_UNKNOWN &&
            std::ranges::any_of(slots_, [](const CaptureSlot &slot) noexcept {
              return slot.phase == SlotPhase::Empty;
            });
@@ -2914,107 +2921,85 @@ namespace avb::render {
     auto *const slot = empty_slot();
     const auto content = frame.content_size();
     if (!ready_for_frame() || slot == nullptr ||
-        frame.resource_generation() != generation_ ||
-        frame.allocation_extent() != capture_allocation_ ||
-        frame.expected_pool_format() !=
-          winrt::Windows::Graphics::DirectX::DirectXPixelFormat::
-            B8G8R8A8UIntNormalized ||
-        has_zero_dimension(content) ||
-        content.width > capture_allocation_.width ||
-        content.height > capture_allocation_.height) {
+        find_slot(slot->key, SlotPhase::Empty) != slot) {
       ++dropped_frames_;
       observe_performance(PerformanceCounter::Dropped);
       throw graphics_error(core::AppErrorCode::InvalidValue);
     }
 
-    auto source_texture = frame.texture();
-    D3D11_TEXTURE2D_DESC source_info{};
-    source_texture->GetDesc(&source_info);
-    ComPtr<ID3D11Device> source_device;
-    source_texture->GetDevice(source_device.GetAddressOf());
-    if (source_device.Get() != d3_device_.Get() ||
-        source_info.Width < content.width ||
-        source_info.Height < content.height ||
-        source_info.Format != capture_format_) {
-      ++dropped_frames_;
-      observe_performance(PerformanceCounter::Dropped);
-      throw graphics_error(core::AppErrorCode::InvalidValue);
-    }
-
-    const D3D11_BOX source_box{
-      .left = 0,
-      .top = 0,
-      .front = 0,
-      .right = content.width,
-      .bottom = content.height,
-      .back = 1,
+    const FrameStamp stamp{captured_frames_ + 1, frame.capture_timestamp()};
+    const bool gpu_copy = active_bridge_mode_ == core::BridgeMode::GpuInterop;
+    const platform::windows::ExternalCopyBorrow external{
+      .destination = slot->interop_texture.Get(),
+      .fence = interop_fence_.Get(),
+      .signal_context = d3_context4_.Get(),
+      .target = next_d3_fence_target_,
     };
+    const auto submitted = frame_bridge_->submit(
+      slot->key, std::move(frame), stamp, gpu_copy ? &external : nullptr);
+    if (!submitted) {
+      if (submitted.error().code == core::AppErrorCode::InvalidValue) {
+        ++dropped_frames_;
+        observe_performance(PerformanceCounter::Dropped);
+      }
+      throw submitted.error();
+    }
+    // Failed validation/projection leaves retained redraw intact. A successful
+    // adoption may reuse that storage, including a safe pre-copy fallback.
     if (slot == retained_slot_) {
       retained_slot_ = nullptr;
     }
-    // Keep the pool checkout alive across asynchronous D3 access. A texture
-    // interface alone would not prevent WGC from recycling its pool buffer.
-    slot->frame.emplace(std::move(frame));
-    slot->stamp.intake_observed_at = slot->frame->capture_timestamp();
     slot->content = content;
     performance_content_ = content;
-    slot->gpu_copy = active_bridge_mode_ == core::BridgeMode::GpuInterop;
-    if (slot->gpu_copy) {
-      if (next_d3_fence_target_ == (std::numeric_limits<std::uint64_t>::max)()) {
-        slot->frame.reset();
-        slot->gpu_copy = false;
-        ++dropped_frames_;
-        observe_performance(PerformanceCounter::Dropped);
-        request_interop_fallback();
-        return;
-      }
-      slot->d3_fence_target = next_d3_fence_target_++;
-      d3_context_->CopySubresourceRegion(slot->interop_texture.Get(), 0, 0, 0, 0,
-                                         source_texture.Get(), 0, &source_box);
-      observe_performance(PerformanceCounter::D3CopyBytes, static_cast<std::uint64_t>(content.width) * content.height * bytes_per_pixel);
-      const auto signal_result =
-        d3_context4_->Signal(interop_fence_.Get(), slot->d3_fence_target);
-      if (FAILED(signal_result)) {
-        // Copy was issued before Signal failed. A healthy device still owes copy
-        // completion, so append a query and retain the checkout while falling back.
-        const auto removal = d3_device_->GetDeviceRemovedReason();
-        if (FAILED(removal)) {
-          d3_device_removed_ = true;
-          accepting_frames_ = false;
-          slot->frame.reset();
-          slot->phase = SlotPhase::Empty;
-          ++dropped_frames_;
-          observe_performance(PerformanceCounter::Dropped);
-          return;
-        }
-        d3_context_->End(slot->copy_query.Get());
-        d3_context_->Flush();
-        slot->query_completion = true;
-        request_interop_fallback();
-      }
-      else {
-        d3_context_->Flush();
+    if (submitted->d3_copy_bytes != 0) {
+      observe_performance(PerformanceCounter::D3CopyBytes, submitted->d3_copy_bytes);
+      if (gpu_copy) {
+        slot->d3_fence_target = next_d3_fence_target_++;
       }
     }
-    else {
-      d3_context_->CopySubresourceRegion(slot->readback_texture.Get(), 0, 0, 0, 0,
-                                         source_texture.Get(), 0, &source_box);
-      observe_performance(PerformanceCounter::D3CopyBytes, static_cast<std::uint64_t>(content.width) * content.height * bytes_per_pixel);
-      d3_context_->End(slot->copy_query.Get());
-      d3_context_->Flush();
+    if (submitted->count_as_dropped) {
+      ++dropped_frames_;
+      observe_performance(PerformanceCounter::Dropped);
     }
+    if (submitted->fallback_requested) {
+      request_interop_fallback();
+    }
+    if (submitted->d3_device_removed) {
+      d3_device_removed_ = true;
+      accepting_frames_ = false;
+    }
+    if (submitted->disposition ==
+        platform::windows::BridgeSubmitDisposition::SafeDiscard) {
+      slot->gpu_copy = false;
+      slot->d3_fence_target = 0;
+      return;
+    }
+    slot->gpu_copy = gpu_copy;
+    slot->stamp = stamp;
     slot->phase = SlotPhase::ProducerPending;
     ++captured_frames_;
     observe_performance(PerformanceCounter::Admitted);
-    slot->stamp.sequence = captured_frames_;
+  }
+
+  WindowsRenderStack::Impl::CaptureSlot *
+  WindowsRenderStack::Impl::find_slot(const SlotKey key,
+                                     const SlotPhase phase) noexcept
+  {
+    if (!matches_slot_key(key, ring_serial_, slots_.size())) {
+      return nullptr;
+    }
+    auto &slot = slots_[key.index];
+    return slot.key == key && slot.phase == phase ? &slot : nullptr;
   }
 
   bool WindowsRenderStack::Impl::has_unsafe_native_work() const noexcept
   {
     // Test D3 before the Vulkan-loss shortcut: loss of one API does not discharge
     // the source-pool lease held by a healthy asynchronous copy on the other.
-    if (!d3_device_removed_ &&
-        std::ranges::any_of(slots_, [](const CaptureSlot &slot) noexcept {
+    if (frame_bridge_ && frame_bridge_->has_pending_inputs()) {
+      return true;
+    }
+    if (std::ranges::any_of(slots_, [](const CaptureSlot &slot) noexcept {
           return slot.phase == SlotPhase::ProducerPending;
         })) {
       return true;
@@ -3076,7 +3061,8 @@ namespace avb::render {
     // A pending present owns its semaphore and swapchain in a separate record.
     // Once slot submission retires it no longer references the capture image or
     // descriptor, so those allocation-local resources can be reconstructed.
-    return std::ranges::all_of(slots_, [](const CaptureSlot &slot) noexcept {
+    return (!frame_bridge_ || !frame_bridge_->has_pending_inputs()) &&
+           std::ranges::all_of(slots_, [](const CaptureSlot &slot) noexcept {
       return slot.phase == SlotPhase::Empty ||
              slot.phase == SlotPhase::CpuReady ||
              slot.phase == SlotPhase::GpuReady;
@@ -3185,14 +3171,16 @@ namespace avb::render {
       interop_fallback_pending_ = false;
       throw vulkan_error(core::AppErrorCode::RuntimeStateLost, reset_result);
     }
-    capture_allocation_ = allocation;
-    capture_format_ = format;
+    if (auto started = start_source_ring(generation_, allocation, format); !started) {
+      interop_fallback_pending_ = false;
+      throw started.error();
+    }
     for (auto &slot : slots_) {
       if (auto created = create_capture_slot(slot); !created) {
         const auto failure = created.error();
         destroy_capture_slots();
         interop_fallback_pending_ = false;
-        const bool d3_lost = FAILED(d3_device_->GetDeviceRemovedReason());
+        const bool d3_lost = FAILED(capture_device().GetDeviceRemovedReason());
         const bool vulkan_lost =
           failure.native_detail &&
           *failure.native_detail ==
@@ -3302,16 +3290,21 @@ namespace avb::render {
     }
     else {
       d3_device_removed_ = true;
+      frame_bridge_->note_d3_device_removed();
     }
 
     for (auto &slot : slots_) {
+      // Even confirmed D3 removal is consumed as a keyed producer event. Keep
+      // its reservation until progress observes it and the bridge releases it.
+      if (slot.phase == SlotPhase::ProducerPending) {
+        continue;
+      }
       if (plan_device_recovery_slot(kind, slot.phase) !=
           DeviceRecoverySlotAction::ClearWithoutWait) {
         continue;
       }
       progress_pending_ = progress_pending_ || slot.phase != SlotPhase::Empty ||
-                          slot.frame.has_value() || slot.acquired_image;
-      slot.frame.reset();
+                          slot.acquired_image;
       slot.phase = SlotPhase::Empty;
       slot.acquired_image = false;
     }
@@ -3330,6 +3323,7 @@ namespace avb::render {
     RenderTickResult &result) noexcept
   {
     d3_device_removed_ = true;
+    frame_bridge_->note_d3_device_removed();
     accepting_frames_ = false;
     result.d3_device_removed = true;
     result.device_loss = DeviceLossKind::D3DeviceRemoved;
@@ -3410,125 +3404,107 @@ namespace avb::render {
   }
 
   void WindowsRenderStack::Impl::progress_d3_copy(
-    CaptureSlot &slot, RenderTickResult &result, const std::chrono::steady_clock::time_point now)
+    RenderTickResult &result, const std::chrono::steady_clock::time_point now)
   {
-    if (d3_device_removed_) {
-      slot.frame.reset();
-      slot.phase = SlotPhase::Empty;
-      result.made_progress = true;
-      return;
+    const auto progress = frame_bridge_->progress(
+      now, draining_ || vulkan_device_lost_ || interop_fallback_pending_,
+      [this, &result](const SlotKey key, const CpuRowsView rows,
+                      const FrameStamp stamp) {
+        return consume_cpu_rows(key, rows, stamp, result);
+      });
+    result.made_progress = result.made_progress || progress.made_progress;
+    if (progress.next_deadline) {
+      earlier_deadline(result.next_deadline, *progress.next_deadline);
     }
-
-    if (slot.gpu_copy && !slot.query_completion) {
-      const auto completion = classify_d3_completed_value(
-        interop_fence_->GetCompletedValue(), slot.d3_fence_target);
-      if (completion == D3CompletionStatus::Pending) {
-        schedule_poll(result, now);
-        return;
-      }
-      if (completion == D3CompletionStatus::DeviceRemoved) {
-        mark_d3_device_removed(result);
-        slot.frame.reset();
-        slot.phase = SlotPhase::Empty;
-        result.made_progress = true;
-        return;
-      }
-      slot.frame.reset();
-      result.made_progress = true;
-      if (draining_ || vulkan_device_lost_ || interop_fallback_pending_) {
-        slot.phase = SlotPhase::Empty;
-        ++dropped_frames_;
-        observe_performance(PerformanceCounter::Dropped);
-        return;
-      }
-      slot.phase = SlotPhase::GpuReady;
-      return;
+    if (progress.d3_device_removed) {
+      mark_d3_device_removed(result);
     }
-
-    BOOL complete{};
-    const auto query_result =
-      d3_context_->GetData(slot.copy_query.Get(), &complete, sizeof(complete),
-                           D3D11_ASYNC_GETDATA_DONOTFLUSH);
-    if (query_result == S_FALSE || (query_result == S_OK && complete == FALSE)) {
-      schedule_poll(result, now);
-      return;
+    if (progress.fallback_requested) {
+      request_interop_fallback();
     }
-    if (FAILED(query_result)) {
-      const auto removal = d3_device_->GetDeviceRemovedReason();
-      if (FAILED(removal)) {
-        mark_d3_device_removed(result);
-        slot.frame.reset();
-        slot.phase = SlotPhase::Empty;
-        result.made_progress = true;
-      }
-      else {
-        terminal_error_ =
-          d3_error(core::AppErrorCode::RuntimeStateLost, query_result);
-        accepting_frames_ = false;
-        result.terminal_error = terminal_error_;
-      }
-      return;
-    }
-
-    // The event query follows CopySubresourceRegion, so the WGC checkout is no
-    // longer referenced even if the staging texture is not yet host-mappable.
-    if (slot.frame) {
-      slot.frame.reset();
-      result.made_progress = true;
-    }
-    if (slot.gpu_copy) {
-      slot.phase = SlotPhase::Empty;
-      slot.gpu_copy = false;
-      slot.query_completion = false;
-      ++dropped_frames_;
-      observe_performance(PerformanceCounter::Dropped);
-      result.made_progress = true;
-      return;
-    }
-    if (draining_ || vulkan_device_lost_) {
-      slot.phase = SlotPhase::Empty;
-      ++dropped_frames_;
-      observe_performance(PerformanceCounter::Dropped);
-      result.made_progress = true;
-      return;
-    }
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    const auto map_result =
-      d3_context_->Map(slot.readback_texture.Get(), 0, D3D11_MAP_READ,
-                       D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
-    if (map_result == DXGI_ERROR_WAS_STILL_DRAWING) {
-      schedule_poll(result, now);
-      return;
-    }
-    if (FAILED(map_result)) {
-      const auto removal = d3_device_->GetDeviceRemovedReason();
-      if (FAILED(removal)) {
-        mark_d3_device_removed(result);
-        slot.phase = SlotPhase::Empty;
-        result.made_progress = true;
-      }
-      else {
-        terminal_error_ =
-          d3_error(core::AppErrorCode::RuntimeStateLost, map_result);
-        accepting_frames_ = false;
-        result.terminal_error = terminal_error_;
-        slot.phase = SlotPhase::Empty;
-        result.made_progress = true;
-      }
-      return;
-    }
-
-    const auto row_bytes =
-      static_cast<std::size_t>(slot.content.width) * bytes_per_pixel;
-    const auto byte_count = checked_pixel_bytes(capture_allocation_);
-    if (!byte_count || mapped.RowPitch < row_bytes || mapped.pData == nullptr) {
-      d3_context_->Unmap(slot.readback_texture.Get(), 0);
-      terminal_error_ = graphics_error(core::AppErrorCode::RuntimeStateLost);
+    // Native failures retain D3 provenance even if a numeric HRESULT happens
+    // to overlap a Vulkan result. Only consumer failures came from upload work.
+    if (progress.terminal_error) {
+      terminal_error_ = progress.terminal_error;
       accepting_frames_ = false;
       result.terminal_error = terminal_error_;
-      slot.phase = SlotPhase::Empty;
-      result.made_progress = true;
-      return;
+    }
+    for (std::size_t index{}; index < progress.completion_count; ++index) {
+      const auto &completion = progress.completions[index];
+      using platform::windows::BridgeCompletionKind;
+      const auto required_phase = completion.kind == BridgeCompletionKind::CpuConsumed
+                                    ? SlotPhase::CpuReady
+                                    : SlotPhase::ProducerPending;
+      auto *const slot = find_slot(completion.key, required_phase);
+      if (slot == nullptr) {
+        terminal_error_ = graphics_error(core::AppErrorCode::RuntimeStateLost);
+        accepting_frames_ = false;
+        result.terminal_error = terminal_error_;
+        continue;
+      }
+      switch (completion.kind) {
+      case BridgeCompletionKind::ExternalReady:
+        slot->content = completion.content;
+        slot->stamp = completion.stamp;
+        slot->d3_fence_target = completion.external_fence_target;
+        slot->phase = SlotPhase::GpuReady;
+        break;
+      case BridgeCompletionKind::CpuConsumed:
+        // The synchronous consumer already committed upload and readiness.
+        break;
+      case BridgeCompletionKind::SafeDiscard:
+      case BridgeCompletionKind::CpuConsumerFailed:
+        slot->phase = SlotPhase::Empty;
+        slot->gpu_copy = false;
+        slot->d3_fence_target = 0;
+        if (completion.count_as_dropped) {
+          ++dropped_frames_;
+          observe_performance(PerformanceCounter::Dropped);
+        }
+        if (completion.error) {
+          if (completion.kind == BridgeCompletionKind::CpuConsumerFailed &&
+              completion.error->native_detail ==
+                static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
+            mark_vulkan_device_lost(result);
+          }
+          else {
+            terminal_error_ = completion.error;
+            accepting_frames_ = false;
+            result.terminal_error = terminal_error_;
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  std::expected<void, core::AppError>
+  WindowsRenderStack::Impl::consume_cpu_rows(
+    const SlotKey key, const CpuRowsView rows, const FrameStamp stamp,
+    RenderTickResult &result) noexcept
+  {
+    auto *const matched = find_slot(key, SlotPhase::ProducerPending);
+    const auto byte_count = checked_pixel_bytes(capture_allocation_);
+    if (matched == nullptr || !byte_count || !checked_pixel_bytes(rows.content) ||
+        rows.allocation != capture_allocation_ ||
+        rows.content.width > rows.allocation.width ||
+        rows.content.height > rows.allocation.height ||
+        matched->gpu_copy || matched->mapped_upload == nullptr ||
+        *byte_count > matched->upload_allocation_size ||
+        matched->content != rows.content ||
+        matched->stamp.sequence != stamp.sequence ||
+        matched->stamp.intake_observed_at != stamp.intake_observed_at ||
+        draining_ || vulkan_device_lost_) {
+      return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
+    }
+    auto &slot = *matched;
+    const auto row_bytes = static_cast<std::size_t>(rows.content.width) * bytes_per_pixel;
+    const auto last_row = static_cast<std::size_t>(rows.content.height - 1);
+    constexpr auto maximum = (std::numeric_limits<std::size_t>::max)();
+    if (rows.bytes.data() == nullptr || rows.row_pitch < row_bytes ||
+        (last_row != 0 && rows.row_pitch > (maximum - row_bytes) / last_row) ||
+        rows.bytes.size() < last_row * rows.row_pitch + row_bytes) {
+      return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
     }
     // Upload commands copy the entire allocation, but capture only defines the
     // content rectangle. Clear the remaining bytes and translate D3's row pitch
@@ -3536,15 +3512,14 @@ namespace avb::render {
     std::memset(slot.mapped_upload, 0, static_cast<std::size_t>(*byte_count));
     observe_performance(PerformanceCounter::CpuClearBytes, *byte_count);
     auto *const destination = static_cast<std::byte *>(slot.mapped_upload);
-    const auto *const source = static_cast<const std::byte *>(mapped.pData);
+    const auto *const source = rows.bytes.data();
     const auto destination_pitch =
       static_cast<std::size_t>(capture_allocation_.width) * bytes_per_pixel;
     for (std::uint32_t row = 0; row < slot.content.height; ++row) {
       std::memcpy(destination + static_cast<std::size_t>(row) * destination_pitch,
-                  source + static_cast<std::size_t>(row) * mapped.RowPitch,
+                  source + static_cast<std::size_t>(row) * rows.row_pitch,
                   row_bytes);
     }
-    d3_context_->Unmap(slot.readback_texture.Get(), 0);
 
     observe_performance(PerformanceCounter::CpuCopyBytes, static_cast<std::uint64_t>(row_bytes) * slot.content.height);
 
@@ -3572,21 +3547,19 @@ namespace avb::render {
       };
       const auto flush_result = vkFlushMappedMemoryRanges(device_, 1, &range);
       if (flush_result == VK_ERROR_DEVICE_LOST) {
+        // Latch loss before the bridge can visit another input and before this
+        // tick reaches any later Vulkan operation. The bridge discards its rest.
         mark_vulkan_device_lost(result);
-        slot.phase = SlotPhase::Empty;
-        result.made_progress = true;
-        return;
       }
       if (flush_result != VK_SUCCESS) {
-        set_terminal(flush_result, result);
-        slot.phase = SlotPhase::Empty;
-        result.made_progress = true;
-        return;
+        return std::unexpected{vulkan_error(core::AppErrorCode::RuntimeStateLost,
+                                            flush_result)};
       }
     }
 
     slot.phase = SlotPhase::CpuReady;
     result.made_progress = true;
+    return {};
   }
 
   VkResult WindowsRenderStack::Impl::record_commands(
@@ -3830,7 +3803,6 @@ namespace avb::render {
     slot.acquired_image = false;
     slot.owning_swapchain = VK_NULL_HANDLE;
     slot.phase = SlotPhase::Empty;
-    slot.query_completion = false;
     const std::array fences{slot.acquire_fence, slot.submission_fence};
     const auto reset_result = vkResetFences(
       device_, static_cast<std::uint32_t>(fences.size()), fences.data());
@@ -3987,10 +3959,10 @@ namespace avb::render {
   void WindowsRenderStack::Impl::progress_slots(
     RenderTickResult &result, const std::chrono::steady_clock::time_point now)
   {
+    progress_d3_copy(result, now);
     for (auto &slot : slots_) {
       switch (slot.phase) {
       case SlotPhase::ProducerPending:
-        progress_d3_copy(slot, result, now);
         break;
       case SlotPhase::Submitted:
       case SlotPhase::PresentNotEnqueued:
@@ -4649,7 +4621,8 @@ namespace avb::render {
     // This is graphics-owner drain proof only. Capture callback/checkout barriers
     // are combined with it by the caller before releasing the whole runtime.
     result.drain_complete =
-      draining_ && slots_in_flight() == 0 && presentations_in_flight() == 0;
+      draining_ && !frame_bridge_->has_pending_inputs() &&
+      slots_in_flight() == 0 && presentations_in_flight() == 0;
     result.cleanup_pending =
       interop_fallback_pending_ || surface_recovery_pending_ ||
       swapchain_recreate_pending_ || !retired_swapchains_.empty();
