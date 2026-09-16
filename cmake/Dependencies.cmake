@@ -53,7 +53,7 @@ if(WIN32)
   if(NOT imgui_vulkan_backend_hash STREQUAL
       "435e04fba9de28ff2c88e3cccb883c24ae387d4cea052648b0a0447921027ec0")
     message(FATAL_ERROR
-      "Dear ImGui 1.92.9 Vulkan backend is missing Airelinna's safe-failure patch")
+      "Dear ImGui 1.92.9 Vulkan backend is missing avb0795's safe-failure patch")
   endif()
   unset(imgui_vulkan_backend_hash)
 
@@ -84,10 +84,10 @@ if(WIN32)
   FetchContent_MakeAvailable(glfw)
 
   include(${PROJECT_SOURCE_DIR}/cmake/VerifyGlfwPatch.cmake)
-  airelinna_verify_glfw_patch("${glfw_SOURCE_DIR}")
+  avb0795_verify_glfw_patch("${glfw_SOURCE_DIR}")
 endif()
 
-if(AIRELINNA_BUILD_TESTS)
+if(AVB0795_BUILD_TESTS)
   set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "" FORCE)
   set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(

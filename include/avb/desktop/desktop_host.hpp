@@ -1,11 +1,11 @@
 /// @file
 /// Controller-window infrastructure and the main-thread application event loop.
-#ifndef AIRELINNA_DESKTOP_DESKTOP_HOST_HPP
-#define AIRELINNA_DESKTOP_DESKTOP_HOST_HPP
+#ifndef AVB0795_DESKTOP_DESKTOP_HOST_HPP
+#define AVB0795_DESKTOP_DESKTOP_HOST_HPP
 
-#include "airelinna/app/application.hpp"
-#include "airelinna/app/commands.hpp"
-#include "airelinna/app/controller_view_state.hpp"
+#include "avb/app/application.hpp"
+#include "avb/app/commands.hpp"
+#include "avb/app/controller_view_state.hpp"
 
 #include <expected>
 #include <cstddef>
@@ -15,7 +15,7 @@
 
 struct GLFWwindow;
 
-namespace airelinna::desktop {
+namespace avb::desktop {
 
   /// Process handoff from run(). abandon_process requires non-unwinding exit
   /// while owners remain alive; exit_code alone is not cleanup permission.
@@ -67,6 +67,6 @@ namespace airelinna::desktop {
     std::unique_ptr<Impl> impl_;
   };
 
-}    // namespace airelinna::desktop
+}    // namespace avb::desktop
 
-#endif    // AIRELINNA_DESKTOP_DESKTOP_HOST_HPP
+#endif    // AVB0795_DESKTOP_DESKTOP_HOST_HPP

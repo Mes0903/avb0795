@@ -2,16 +2,16 @@
 /// @brief Construction and publication of the complete Windows replica aggregate.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_RUNTIME_FACTORY_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_RUNTIME_FACTORY_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_RUNTIME_FACTORY_HPP
+#define AVB0795_PLATFORM_WINDOWS_WINDOWS_RUNTIME_FACTORY_HPP
 
-#include "airelinna/app/ports.hpp"
+#include "avb/app/ports.hpp"
 #include "platform/windows/windows_source_registry.hpp"
 #include "render/bridge_policy.hpp"
 
 #include <functional>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   /// Composition adapter that borrows discovery identity and constructs one runtime.
   /// Partial native owners remain local until StartCapture guarantees publication.
@@ -38,6 +38,6 @@ namespace airelinna::platform::windows {
     render::WindowsBridgePreference bridge_preference_;
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_RUNTIME_FACTORY_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WINDOWS_RUNTIME_FACTORY_HPP

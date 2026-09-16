@@ -2,10 +2,10 @@
 /// @brief Generation-scoped source IDs, runtime leases, and shared Closed observations.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP
+#define AVB0795_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   namespace detail {
     class ItemObservationState;
@@ -118,6 +118,6 @@ namespace airelinna::platform::windows {
     std::shared_ptr<detail::WindowsSourceRegistryControl> control_;
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WINDOWS_SOURCE_REGISTRY_HPP

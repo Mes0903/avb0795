@@ -2,8 +2,8 @@
 /// @brief Value-only runtime event coalescing, resize barriers, and drain observation.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP
+#define AVB0795_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP
 
 #include "platform/windows/wgc_capture_job.hpp"
 #include "render/bridge_policy.hpp"
@@ -12,7 +12,7 @@
 #include <chrono>
 #include <optional>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
 
   /// Published/pending bridge selection, so unchanged status does not emit duplicate events.
   struct RuntimeBridgeEventState final {
@@ -253,6 +253,6 @@ namespace airelinna::platform::windows::detail {
             .drain = drain};
   }
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_DETAIL_WINDOWS_RUNTIME_POLICY_HPP

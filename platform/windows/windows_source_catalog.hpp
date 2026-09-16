@@ -2,10 +2,10 @@
 /// @brief Native candidate filtering and descriptor publication with stable item identity.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_CATALOG_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_CATALOG_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_SOURCE_CATALOG_HPP
+#define AVB0795_PLATFORM_WINDOWS_WINDOWS_SOURCE_CATALOG_HPP
 
-#include "airelinna/app/ports.hpp"
+#include "avb/app/ports.hpp"
 #include "platform/windows/windows_source_registry.hpp"
 
 // DXGI's shared declarations rely on Win32 scalar types being defined first.
@@ -16,7 +16,7 @@
 
 #include <optional>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   /// Native enumeration facts reduced to values for deterministic filtering.
   struct WindowEligibilityFacts {
@@ -54,6 +54,6 @@ namespace airelinna::platform::windows {
     WindowsSourceRegistry &registry_;
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_SOURCE_CATALOG_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WINDOWS_SOURCE_CATALOG_HPP

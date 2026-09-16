@@ -22,10 +22,10 @@
 #include <optional>
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
   namespace {
 
-    constexpr wchar_t overlay_adapter_property[]{L"Airelinna.Win32OverlayThunk.v1"};
+    constexpr wchar_t overlay_adapter_property[]{L"avb0795.Win32OverlayThunk.v1"};
     constexpr std::uint32_t logical_resize_band{8};
 
     static_assert(detail::class_style_own_dc_bit == CS_OWNDC);
@@ -767,4 +767,4 @@ namespace airelinna::platform::windows {
                                              long_parameter);
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

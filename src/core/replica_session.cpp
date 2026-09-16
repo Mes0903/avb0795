@@ -1,9 +1,9 @@
 /// @file Domain transition guards; no operation acquires or releases native owners.
-#include "airelinna/core/replica_session.hpp"
+#include "avb/core/replica_session.hpp"
 
 #include <utility>
 
-namespace airelinna::core {
+namespace avb::core {
 
   const std::optional<SourceDescriptor> &
   ReplicaSession::selected_source() const noexcept
@@ -131,4 +131,4 @@ namespace airelinna::core {
     return {};
   }
 
-}    // namespace airelinna::core
+}    // namespace avb::core

@@ -1,14 +1,14 @@
 /// @file Platform-independent typed hotkey parsing and canonical text conversion.
-#ifndef AIRELINNA_CORE_HOTKEY_HPP
-#define AIRELINNA_CORE_HOTKEY_HPP
+#ifndef AVB0795_CORE_HOTKEY_HPP
+#define AVB0795_CORE_HOTKEY_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <expected>
 #include <string>
 #include <string_view>
 
-namespace airelinna::core {
+namespace avb::core {
 
   /// Parse case-insensitive '+' tokens for Ctrl/Alt/Shift/Meta and one A-Z, 0-9,
   /// or F1-F12 key. Reject duplicate modifiers, extra keys and empty tokens with
@@ -22,6 +22,6 @@ namespace airelinna::core {
   /// Derive display text from the same spelling used for persistence.
   [[nodiscard]] std::string hotkey_display_text(const HotkeyChord &chord);
 
-}    // namespace airelinna::core
+}    // namespace avb::core
 
-#endif    // AIRELINNA_CORE_HOTKEY_HPP
+#endif    // AVB0795_CORE_HOTKEY_HPP

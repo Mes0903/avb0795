@@ -1,10 +1,10 @@
 /// @file Allocation-free chord validation and canonical owned text formatting.
-#include "airelinna/core/hotkey.hpp"
+#include "avb/core/hotkey.hpp"
 
 #include <cstddef>
 #include <string_view>
 
-namespace airelinna::core {
+namespace avb::core {
   namespace {
 
     // Hotkey grammar is ASCII and independent of the process/user locale.
@@ -184,4 +184,4 @@ namespace airelinna::core {
     return serialize_hotkey_chord(chord);
   }
 
-}    // namespace airelinna::core
+}    // namespace avb::core

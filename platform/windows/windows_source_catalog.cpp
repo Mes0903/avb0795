@@ -26,7 +26,7 @@
 #include <utility>
 #include <vector>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   bool is_window_source_eligible(const WindowEligibilityFacts &facts) noexcept
   {
@@ -598,4 +598,4 @@ namespace airelinna::platform::windows {
     }
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

@@ -1,7 +1,7 @@
 /// @file ImGui widget projection and value-command emission on the host's main thread.
-#include "airelinna/ui/controller_view.hpp"
+#include "avb/ui/controller_view.hpp"
 
-#include "airelinna/core/hotkey.hpp"
+#include "avb/core/hotkey.hpp"
 
 #include <imgui.h>
 
@@ -11,7 +11,7 @@
 #include <string_view>
 #include <utility>
 
-namespace airelinna::ui {
+namespace avb::ui {
   namespace {
 
     // Treat external labels as literal bytes, never as format strings.
@@ -75,7 +75,7 @@ namespace airelinna::ui {
                               const CommandSink &command_sink)
   {
     // Begin must be paired with End even when the window is collapsed.
-    if (!ImGui::Begin("Airelinna Controller")) {
+    if (!ImGui::Begin("avb0795 Controller")) {
       ImGui::End();
       return;
     }
@@ -251,4 +251,4 @@ namespace airelinna::ui {
     ImGui::End();
   }
 
-}    // namespace airelinna::ui
+}    // namespace avb::ui

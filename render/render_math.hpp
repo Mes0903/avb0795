@@ -1,9 +1,9 @@
 /// @file
 /// Value-only geometry and presentation choices used by the replica renderer.
-#ifndef AIRELINNA_RENDER_RENDER_MATH_HPP
-#define AIRELINNA_RENDER_RENDER_MATH_HPP
+#ifndef AVB0795_RENDER_RENDER_MATH_HPP
+#define AVB0795_RENDER_RENDER_MATH_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <vulkan/vulkan_core.h>
 
@@ -11,7 +11,7 @@
 #include <optional>
 #include <span>
 
-namespace airelinna::render {
+namespace avb::render {
 
   /// Centered physical-pixel rectangle within the destination framebuffer.
   struct Viewport final {
@@ -38,6 +38,6 @@ namespace airelinna::render {
   [[nodiscard]] std::optional<VkSurfaceFormatKHR>
   select_sdr_surface_format(std::span<const VkSurfaceFormatKHR> advertised) noexcept;
 
-}    // namespace airelinna::render
+}    // namespace avb::render
 
-#endif    // AIRELINNA_RENDER_RENDER_MATH_HPP
+#endif    // AVB0795_RENDER_RENDER_MATH_HPP

@@ -20,7 +20,7 @@
 #include <new>
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
   namespace {
 
     using Clock = std::chrono::steady_clock;
@@ -1045,4 +1045,4 @@ namespace airelinna::platform::windows {
     }
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

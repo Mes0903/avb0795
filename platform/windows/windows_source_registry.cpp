@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   namespace {
 
@@ -156,7 +156,7 @@ namespace airelinna::platform::windows {
 
     void WindowsSourceIdGeneration::rebuild_prefix()
     {
-      prefix_ = "airelinna-source-" + std::to_string(generation_) + '-';
+      prefix_ = "avb0795-source-" + std::to_string(generation_) + '-';
     }
 
     // Shared control outlives the wrapper if leases remain; its count gates refresh.
@@ -466,4 +466,4 @@ namespace airelinna::platform::windows {
 
   }    // namespace detail
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

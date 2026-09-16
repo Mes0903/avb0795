@@ -1,8 +1,8 @@
 /// @file Native-free service boundaries and synchronous runtime event batches.
-#ifndef AIRELINNA_APP_PORTS_HPP
-#define AIRELINNA_APP_PORTS_HPP
+#ifndef AVB0795_APP_PORTS_HPP
+#define AVB0795_APP_PORTS_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <array>
 #include <chrono>
@@ -14,7 +14,7 @@
 #include <variant>
 #include <vector>
 
-namespace airelinna::app {
+namespace avb::app {
 
   /// Three status edges plus five pre-stop lifecycle candidates fit without allocation.
   inline constexpr std::size_t max_runtime_events_per_tick{8};
@@ -118,6 +118,6 @@ namespace airelinna::app {
     virtual void clear() noexcept = 0;
   };
 
-}    // namespace airelinna::app
+}    // namespace avb::app
 
-#endif    // AIRELINNA_APP_PORTS_HPP
+#endif    // AVB0795_APP_PORTS_HPP

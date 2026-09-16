@@ -2,16 +2,16 @@
 /// @brief Best-effort capture exclusion and validation of the patched GLFW window class.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_CAPTURE_EXCLUSION_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_CAPTURE_EXCLUSION_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_CAPTURE_EXCLUSION_HPP
+#define AVB0795_PLATFORM_WINDOWS_CAPTURE_EXCLUSION_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <windows.h>
 
 #include <expected>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   // Applies the strongest capture exclusion supported by the current Windows
   // compositor. Excluded means Windows accepted the requested affinity; it is
@@ -27,6 +27,6 @@ namespace airelinna::platform::windows {
   [[nodiscard]] std::expected<core::CaptureExclusionStatus, core::AppError>
   prepare_controller_window(HWND window) noexcept;
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_CAPTURE_EXCLUSION_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_CAPTURE_EXCLUSION_HPP

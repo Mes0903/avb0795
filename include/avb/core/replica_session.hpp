@@ -1,13 +1,13 @@
 /// @file Pure session values and guarded visible lifecycle transitions.
-#ifndef AIRELINNA_CORE_REPLICA_SESSION_HPP
-#define AIRELINNA_CORE_REPLICA_SESSION_HPP
+#ifndef AVB0795_CORE_REPLICA_SESSION_HPP
+#define AVB0795_CORE_REPLICA_SESSION_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <expected>
 #include <optional>
 
-namespace airelinna::core {
+namespace avb::core {
 
   /// Stores selection/settings and enforces lifecycle edges without native side effects.
   /// Settings setters do not enforce application command availability; Application
@@ -64,6 +64,6 @@ namespace airelinna::core {
     ReplicaSettings settings_;
   };
 
-}    // namespace airelinna::core
+}    // namespace avb::core
 
-#endif    // AIRELINNA_CORE_REPLICA_SESSION_HPP
+#endif    // AVB0795_CORE_REPLICA_SESSION_HPP

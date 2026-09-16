@@ -1,9 +1,9 @@
 /// @file Demand-latched FPS policy driven by externally supplied steady-clock time.
-#include "airelinna/core/frame_scheduler.hpp"
+#include "avb/core/frame_scheduler.hpp"
 
 #include <cstdint>
 
-namespace airelinna::core {
+namespace avb::core {
 
   FrameScheduler::FrameScheduler(FpsCap fps_cap, Clock::time_point now) noexcept
       : fps_cap_(fps_cap), period_(period_for(fps_cap))
@@ -62,4 +62,4 @@ namespace airelinna::core {
                                     static_cast<double>(frames_per_second)});
   }
 
-}    // namespace airelinna::core
+}    // namespace avb::core

@@ -2,7 +2,7 @@
 /// Stable bridge-reason precedence, separated from concrete capability queries.
 #include "render/bridge_policy.hpp"
 
-namespace airelinna::render {
+namespace avb::render {
 
   BridgeSelection select_bridge(const BridgeCapabilityFacts facts) noexcept
   {
@@ -53,4 +53,4 @@ namespace airelinna::render {
     return std::nullopt;
   }
 
-}    // namespace airelinna::render
+}    // namespace avb::render

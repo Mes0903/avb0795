@@ -8,7 +8,7 @@
 
 #include <cstdint>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   std::expected<void, core::AppError>
   establish_per_monitor_v2_dpi_awareness() noexcept
@@ -32,4 +32,4 @@ namespace airelinna::platform::windows {
       static_cast<std::int64_t>(establish_error)}};
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

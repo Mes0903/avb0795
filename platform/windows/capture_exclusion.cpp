@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <optional>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   namespace {
 
@@ -125,4 +125,4 @@ namespace airelinna::platform::windows {
     return attempt_capture_exclusion(window);
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

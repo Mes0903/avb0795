@@ -2,11 +2,11 @@
 /// @brief Main-thread replica aggregate, native progress, and ordered safe teardown.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_REPLICA_RUNTIME_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_REPLICA_RUNTIME_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_REPLICA_RUNTIME_HPP
+#define AVB0795_PLATFORM_WINDOWS_WINDOWS_REPLICA_RUNTIME_HPP
 
-#include "airelinna/app/ports.hpp"
-#include "airelinna/core/frame_scheduler.hpp"
+#include "avb/app/ports.hpp"
+#include "avb/core/frame_scheduler.hpp"
 #include "platform/windows/detail/windows_runtime_policy.hpp"
 #include "render/graphics_retry_policy.hpp"
 #include "render/windows_render_stack.hpp"
@@ -18,7 +18,7 @@
 #include <memory>
 #include <optional>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   namespace features {
     class BrowserCaptureKeepAlive;
@@ -172,6 +172,6 @@ namespace airelinna::platform::windows {
     detail::RuntimeDrainState drain_state_;
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_REPLICA_RUNTIME_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WINDOWS_REPLICA_RUNTIME_HPP

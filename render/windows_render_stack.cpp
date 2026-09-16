@@ -3,7 +3,7 @@
 /// D3-to-Vulkan ring and independent WSI retirement without synchronous waits.
 #include "render/windows_render_stack.hpp"
 
-#include "airelinna/render/replica_shaders.hpp"
+#include "avb/render/replica_shaders.hpp"
 #include "platform/windows/overlay_window.hpp"
 #include "platform/windows/windows_captured_frame.hpp"
 #include "render/graphics_retry_policy.hpp"
@@ -36,7 +36,7 @@
 #include <utility>
 #include <vector>
 
-namespace airelinna::render {
+namespace avb::render {
   namespace {
 
     using Microsoft::WRL::ComPtr;
@@ -91,13 +91,13 @@ namespace airelinna::render {
 #if defined(VK_KHR_surface_maintenance1) && \
   defined(VK_KHR_swapchain_maintenance1) && \
   defined(VK_KHR_get_surface_capabilities2)
-#define AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT 1
+#define AVB0795_HAS_KHR_MAINTENANCE_VARIANT 1
 #endif
 
 #if defined(VK_EXT_surface_maintenance1) && \
   defined(VK_EXT_swapchain_maintenance1) && \
   defined(VK_KHR_get_surface_capabilities2)
-#define AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT 1
+#define AVB0795_HAS_EXT_MAINTENANCE_VARIANT 1
 #endif
 
     /// Feature/entry-point pair enabled on this concrete Vulkan device.
@@ -546,12 +546,12 @@ namespace airelinna::render {
     bool timeline_semaphore_supported_{};
     bool khr_surface_maintenance_enabled_{};
     bool ext_surface_maintenance_enabled_{};
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
     PFN_vkReleaseSwapchainImagesKHR release_images_khr_{};
 #endif
     PFN_vkGetMemoryWin32HandlePropertiesKHR get_memory_handle_properties_{};
     PFN_vkImportSemaphoreWin32HandleKHR import_semaphore_handle_{};
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
     PFN_vkReleaseSwapchainImagesEXT release_images_ext_{};
 #endif
 
@@ -740,13 +740,13 @@ namespace airelinna::render {
 #else
     constexpr auto capabilities2_available = false;
 #endif
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
     khr_surface_maintenance_enabled_ =
       capabilities2_available &&
       extension_available(available_extensions,
                           VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
 #endif
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
     ext_surface_maintenance_enabled_ =
       capabilities2_available &&
       extension_available(available_extensions,
@@ -758,12 +758,12 @@ namespace airelinna::render {
 #if defined(VK_KHR_get_surface_capabilities2)
     append_unique(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
 #endif
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
     if (khr_surface_maintenance_enabled_) {
       append_unique(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
     }
 #endif
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
     if (ext_surface_maintenance_enabled_) {
       append_unique(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
     }
@@ -772,9 +772,9 @@ namespace airelinna::render {
     const VkApplicationInfo application{
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .pNext = nullptr,
-      .pApplicationName = "Airelinna",
+      .pApplicationName = "avb0795",
       .applicationVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
-      .pEngineName = "Airelinna",
+      .pEngineName = "avb0795",
       .engineVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
       .apiVersion = VK_API_VERSION_1_3,
     };
@@ -874,7 +874,7 @@ namespace airelinna::render {
       }
 
       auto candidate_variant = MaintenanceVariant::None;
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
       if (khr_surface_maintenance_enabled_ &&
           extension_available(extensions,
                               VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)) {
@@ -894,7 +894,7 @@ namespace airelinna::render {
         }
       }
 #endif
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
       if (candidate_variant == MaintenanceVariant::None &&
           ext_surface_maintenance_enabled_ &&
           extension_available(extensions,
@@ -1015,7 +1015,7 @@ namespace airelinna::render {
       queue_info_count = 2;
     }
 
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
     VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR maintenance_khr{
       .sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR,
@@ -1023,7 +1023,7 @@ namespace airelinna::render {
       .swapchainMaintenance1 = VK_TRUE,
     };
 #endif
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
     VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance_ext{
       .sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT,
@@ -1040,13 +1040,13 @@ namespace airelinna::render {
     const char *maintenance_extension{};
     switch (maintenance_variant_) {
     case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
       maintenance_features = &maintenance_khr;
       maintenance_extension = VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
 #endif
       break;
     case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
       maintenance_features = &maintenance_ext;
       maintenance_extension = VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
 #endif
@@ -1060,12 +1060,12 @@ namespace airelinna::render {
     if (timeline_semaphore_supported_) {
       switch (maintenance_variant_) {
       case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
         maintenance_khr.pNext = &timeline_features;
 #endif
         break;
       case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
         maintenance_ext.pNext = &timeline_features;
 #endif
         break;
@@ -1103,14 +1103,14 @@ namespace airelinna::render {
     auto release_function_loaded = false;
     switch (maintenance_variant_) {
     case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
       release_images_khr_ = reinterpret_cast<PFN_vkReleaseSwapchainImagesKHR>(
         vkGetDeviceProcAddr(device_, "vkReleaseSwapchainImagesKHR"));
       release_function_loaded = release_images_khr_ != nullptr;
 #endif
       break;
     case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
       release_images_ext_ = reinterpret_cast<PFN_vkReleaseSwapchainImagesEXT>(
         vkGetDeviceProcAddr(device_, "vkReleaseSwapchainImagesEXT"));
       release_function_loaded = release_images_ext_ != nullptr;
@@ -3577,7 +3577,7 @@ namespace airelinna::render {
   {
     switch (maintenance_variant_) {
     case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
       if (release_images_khr_ != nullptr) {
         const VkReleaseSwapchainImagesInfoKHR release_info{
           .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_KHR,
@@ -3591,7 +3591,7 @@ namespace airelinna::render {
 #endif
       break;
     case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
       if (release_images_ext_ != nullptr) {
         const VkReleaseSwapchainImagesInfoEXT release_info{
           .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_EXT,
@@ -3839,7 +3839,7 @@ namespace airelinna::render {
       return;
     }
 
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
     const VkSwapchainPresentFenceInfoKHR present_fence_khr{
       .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR,
       .pNext = nullptr,
@@ -3847,7 +3847,7 @@ namespace airelinna::render {
       .pFences = &present_fence,
     };
 #endif
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
     const VkSwapchainPresentFenceInfoEXT present_fence_ext{
       .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT,
       .pNext = nullptr,
@@ -3858,12 +3858,12 @@ namespace airelinna::render {
     const void *present_fence_info{};
     switch (maintenance_variant_) {
     case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_HAS_KHR_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
       present_fence_info = &present_fence_khr;
 #endif
       break;
     case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_HAS_EXT_MAINTENANCE_VARIANT)
+#if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
       present_fence_info = &present_fence_ext;
 #endif
       break;
@@ -4434,4 +4434,4 @@ namespace airelinna::render {
     return implementation_->take_bridge_mode_change();
   }
 
-}    // namespace airelinna::render
+}    // namespace avb::render

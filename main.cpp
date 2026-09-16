@@ -1,10 +1,10 @@
 /// @file
 /// Windows composition root: initialize process services, connect concrete
 /// adapters to portable application ports, and honor the host's exit decision.
-#include "airelinna/app/app_command_queue.hpp"
-#include "airelinna/app/application.hpp"
-#include "airelinna/app/config_store.hpp"
-#include "airelinna/desktop/desktop_host.hpp"
+#include "avb/app/app_command_queue.hpp"
+#include "avb/app/application.hpp"
+#include "avb/app/config_store.hpp"
+#include "avb/desktop/desktop_host.hpp"
 #include "platform/windows/capture_exclusion.hpp"
 #include "platform/windows/controller_font.hpp"
 #include "platform/windows/process_dpi_awareness.hpp"
@@ -35,7 +35,7 @@ namespace {
 
   // Static UI capabilities describe behavior; actual bridge support is measured
   // only after a concrete capture/graphics generation has been constructed.
-  constexpr airelinna::core::PlatformCapabilities windows_capabilities{
+  constexpr avb::core::PlatformCapabilities windows_capabilities{
     .display_capture = true,
     .window_capture = true,
     .pass_through = true,
@@ -47,7 +47,7 @@ namespace {
 
   /// Print fixed diagnostics/native codes without source titles or pixel data.
   void report_error(std::string_view context,
-                    const airelinna::core::AppError error) noexcept
+                    const avb::core::AppError error) noexcept
   {
     const auto label = error.diagnostic_label();
     std::fprintf(stderr, "%.*s: %.*s", static_cast<int>(context.size()),
@@ -69,7 +69,7 @@ namespace {
   /// Resolve config beside the executable, independent of the launch directory.
   /// Path/projection failure becomes a typed startup error rather than an escape.
   [[nodiscard]] std::expected<std::filesystem::path,
-                              airelinna::core::AppError>
+                              avb::core::AppError>
   executable_config_path() noexcept
   {
     try {
@@ -82,8 +82,8 @@ namespace {
         if (detail == ERROR_SUCCESS) {
           detail = ERROR_INSUFFICIENT_BUFFER;
         }
-        return std::unexpected{airelinna::core::AppError{
-          airelinna::core::AppErrorCode::RuntimeConstructionFailure,
+        return std::unexpected{avb::core::AppError{
+          avb::core::AppErrorCode::RuntimeConstructionFailure,
           static_cast<std::int64_t>(detail)}};
       }
 
@@ -91,8 +91,8 @@ namespace {
         std::filesystem::path{path.data(), path.data() + length};
       return executable.parent_path() / L"airelinna.json";
     } catch (...) {
-      return std::unexpected{airelinna::core::AppError{
-        airelinna::core::AppErrorCode::RuntimeConstructionFailure}};
+      return std::unexpected{avb::core::AppError{
+        avb::core::AppErrorCode::RuntimeConstructionFailure}};
     }
   }
 
@@ -100,7 +100,7 @@ namespace {
   /// target alive through host-driven shutdown. No session sequencing lives here.
   [[nodiscard]] int run_application()
   {
-    using namespace airelinna;
+    using namespace avb;
 
     // Queue outlives callbacks; the host is constructed before native services
     // whose admitted wake operations borrow it.
@@ -167,7 +167,7 @@ namespace {
     // would violate its destruction invariant, so process exit owns final cleanup.
     if (result.abandon_process) {
       std::fputs(
-        "Airelinna retained uncertain native ownership; "
+        "avb0795 retained uncertain native ownership; "
         "terminating without stack unwinding.\n",
         stderr);
       std::fflush(nullptr);
@@ -183,7 +183,7 @@ namespace {
 int main()
 {
   const auto dpi =
-    airelinna::platform::windows::establish_per_monitor_v2_dpi_awareness();
+    avb::platform::windows::establish_per_monitor_v2_dpi_awareness();
   if (!dpi) {
     report_error("DPI awareness", dpi.error());
     return 2;
@@ -194,15 +194,15 @@ int main()
   } catch (const winrt::hresult_error &error) {
     report_error(
       "COM initialization",
-      airelinna::core::AppError{
-        airelinna::core::AppErrorCode::RuntimeConstructionFailure,
+      avb::core::AppError{
+        avb::core::AppErrorCode::RuntimeConstructionFailure,
         static_cast<std::int64_t>(error.code().value)});
     return 3;
   } catch (...) {
     report_error(
       "COM initialization",
-      airelinna::core::AppError{
-        airelinna::core::AppErrorCode::RuntimeConstructionFailure});
+      avb::core::AppError{
+        avb::core::AppErrorCode::RuntimeConstructionFailure});
     return 3;
   }
 
@@ -210,8 +210,8 @@ int main()
   if (glfwInit() != GLFW_TRUE) {
     report_error(
       "GLFW initialization",
-      airelinna::core::AppError{
-        airelinna::core::AppErrorCode::RuntimeConstructionFailure});
+      avb::core::AppError{
+        avb::core::AppErrorCode::RuntimeConstructionFailure});
     winrt::uninit_apartment();
     return 4;
   }
@@ -219,14 +219,14 @@ int main()
   int exit_code{};
   try {
     exit_code = run_application();
-  } catch (const airelinna::core::AppError &error) {
+  } catch (const avb::core::AppError &error) {
     report_error("application startup", error);
     exit_code = 6;
   } catch (...) {
     report_error(
       "application startup",
-      airelinna::core::AppError{
-        airelinna::core::AppErrorCode::RuntimeConstructionFailure});
+      avb::core::AppError{
+        avb::core::AppErrorCode::RuntimeConstructionFailure});
     exit_code = 6;
   }
 

@@ -1,14 +1,14 @@
 /// @file Pure controller projection: all runtime facts arrive as portable values.
-#include "airelinna/app/controller_view_state.hpp"
+#include "avb/app/controller_view_state.hpp"
 
-#include "airelinna/app/config_store.hpp"
-#include "airelinna/core/application_state.hpp"
-#include "airelinna/core/hotkey.hpp"
+#include "avb/app/config_store.hpp"
+#include "avb/core/application_state.hpp"
+#include "avb/core/hotkey.hpp"
 
 #include <optional>
 #include <string_view>
 
-namespace airelinna::app {
+namespace avb::app {
   namespace {
 
     constexpr std::string_view stopping_explanation{
@@ -251,4 +251,4 @@ namespace airelinna::app {
     return view;
   }
 
-}    // namespace airelinna::app
+}    // namespace avb::app

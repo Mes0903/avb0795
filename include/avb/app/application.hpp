@@ -1,11 +1,11 @@
 /// @file Sole application orchestrator for commands, domain transitions and runtime ownership.
-#ifndef AIRELINNA_APP_APPLICATION_HPP
-#define AIRELINNA_APP_APPLICATION_HPP
+#ifndef AVB0795_APP_APPLICATION_HPP
+#define AVB0795_APP_APPLICATION_HPP
 
-#include "airelinna/app/commands.hpp"
-#include "airelinna/app/config_store.hpp"
-#include "airelinna/app/controller_view_state.hpp"
-#include "airelinna/core/application_state.hpp"
+#include "avb/app/commands.hpp"
+#include "avb/app/config_store.hpp"
+#include "avb/app/controller_view_state.hpp"
+#include "avb/core/application_state.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -13,7 +13,7 @@
 #include <optional>
 #include <vector>
 
-namespace airelinna::app {
+namespace avb::app {
 
   class AppCommandQueue;
   class IGlobalHotkey;
@@ -179,6 +179,6 @@ namespace airelinna::app {
     std::unique_ptr<IReplicaRuntime> runtime_;
   };
 
-}    // namespace airelinna::app
+}    // namespace avb::app
 
-#endif    // AIRELINNA_APP_APPLICATION_HPP
+#endif    // AVB0795_APP_APPLICATION_HPP

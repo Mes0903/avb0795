@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace airelinna::render {
+namespace avb::render {
 
   std::optional<Viewport> aspect_fit(const core::Extent source,
                                      const core::Extent destination) noexcept
@@ -69,4 +69,4 @@ namespace airelinna::render {
     return *preferred;
   }
 
-}    // namespace airelinna::render
+}    // namespace avb::render

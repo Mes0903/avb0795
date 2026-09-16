@@ -2,8 +2,8 @@
 /// @brief Shared item identity and weak, counted runtime wake lifetime.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_ITEM_OBSERVATION_STATE_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_DETAIL_ITEM_OBSERVATION_STATE_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_DETAIL_ITEM_OBSERVATION_STATE_HPP
+#define AVB0795_PLATFORM_WINDOWS_DETAIL_ITEM_OBSERVATION_STATE_HPP
 
 #include "platform/windows/detail/srw_lock.hpp"
 
@@ -20,7 +20,7 @@
 #include <optional>
 #include <utility>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
 
   /// Counts borrowed host wake calls through their complete execution.
   /// A shared atomic word linearizes admission against terminal source stop.
@@ -123,6 +123,6 @@ namespace airelinna::platform::windows::detail {
     std::weak_ptr<RuntimeWakeState> runtime_wake_;
   };
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_DETAIL_ITEM_OBSERVATION_STATE_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_DETAIL_ITEM_OBSERVATION_STATE_HPP

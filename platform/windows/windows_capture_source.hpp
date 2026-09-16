@@ -2,8 +2,8 @@
 /// @brief Stable registry-item lease and publication-gated runtime wake binding.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_CAPTURE_SOURCE_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_CAPTURE_SOURCE_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_CAPTURE_SOURCE_HPP
+#define AVB0795_PLATFORM_WINDOWS_WINDOWS_CAPTURE_SOURCE_HPP
 
 #include "platform/windows/windows_source_registry.hpp"
 
@@ -14,7 +14,7 @@
 #include <functional>
 #include <memory>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   class WgcCaptureJob;
 
@@ -73,6 +73,6 @@ namespace airelinna::platform::windows {
     std::unique_ptr<Impl> implementation_;
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_CAPTURE_SOURCE_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WINDOWS_CAPTURE_SOURCE_HPP

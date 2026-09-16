@@ -1,7 +1,7 @@
 /// @file Strict V1 JSON preferences with default recovery and temporary-file replacement.
-#include "airelinna/app/config_store.hpp"
+#include "avb/app/config_store.hpp"
 
-#include "airelinna/core/hotkey.hpp"
+#include "avb/core/hotkey.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -13,7 +13,7 @@
 #include <system_error>
 #include <utility>
 
-namespace airelinna::app {
+namespace avb::app {
   namespace {
 
     constexpr std::uint32_t config_version{1};
@@ -295,4 +295,4 @@ namespace airelinna::app {
     return {};
   }
 
-}    // namespace airelinna::app
+}    // namespace avb::app

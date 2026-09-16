@@ -1,12 +1,12 @@
 /// @file Portable user intentions consumed only by Application on the main thread.
-#ifndef AIRELINNA_APP_COMMANDS_HPP
-#define AIRELINNA_APP_COMMANDS_HPP
+#ifndef AVB0795_APP_COMMANDS_HPP
+#define AVB0795_APP_COMMANDS_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <variant>
 
-namespace airelinna::app {
+namespace avb::app {
 
   /// Request a catalog refresh while no runtime is retained.
   struct RefreshSources {};
@@ -68,6 +68,6 @@ namespace airelinna::app {
   using AppCommand =
     std::variant<RefreshSources, SelectSource, Start, Stop, SetMode, SetBorder, SetFps, SetExtensions, ReplaceHotkey, RestoreActiveReplicaEditable, Quit>;
 
-}    // namespace airelinna::app
+}    // namespace avb::app
 
-#endif    // AIRELINNA_APP_COMMANDS_HPP
+#endif    // AVB0795_APP_COMMANDS_HPP

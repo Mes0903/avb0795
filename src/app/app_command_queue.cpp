@@ -1,9 +1,9 @@
 /// @file Main-thread FIFO transfer; commands retain ordering and owning value payloads.
-#include "airelinna/app/app_command_queue.hpp"
+#include "avb/app/app_command_queue.hpp"
 
 #include <utility>
 
-namespace airelinna::app {
+namespace avb::app {
 
   bool AppCommandQueue::push(AppCommand command)
   {
@@ -30,4 +30,4 @@ namespace airelinna::app {
     commands_.clear();
   }
 
-}    // namespace airelinna::app
+}    // namespace avb::app

@@ -2,8 +2,8 @@
 /// @brief One WGC session/pool generation, contained intake, and nonblocking stop.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WGC_CAPTURE_JOB_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WGC_CAPTURE_JOB_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WGC_CAPTURE_JOB_HPP
+#define AVB0795_PLATFORM_WINDOWS_WGC_CAPTURE_JOB_HPP
 
 #include "platform/windows/windows_capture_source.hpp"
 #include "platform/windows/windows_captured_frame.hpp"
@@ -16,7 +16,7 @@
 #include <memory>
 #include <optional>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   /// Fixed callback failure vocabulary; no dynamically allocated diagnostic text.
   enum class CaptureFatalCategory {
@@ -134,6 +134,6 @@ namespace airelinna::platform::windows {
     const core::Extent initial_allocation_;
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WGC_CAPTURE_JOB_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WGC_CAPTURE_JOB_HPP

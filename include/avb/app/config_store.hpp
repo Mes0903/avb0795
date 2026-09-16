@@ -1,15 +1,15 @@
 /// @file Versioned preference persistence with one injected atomic-replace operation.
-#ifndef AIRELINNA_APP_CONFIG_STORE_HPP
-#define AIRELINNA_APP_CONFIG_STORE_HPP
+#ifndef AVB0795_APP_CONFIG_STORE_HPP
+#define AVB0795_APP_CONFIG_STORE_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <functional>
 
-namespace airelinna::app {
+namespace avb::app {
 
   /// Persisted V1 preferences only: no source/title/pixels/position or session input mode.
   struct UserConfig {
@@ -52,6 +52,6 @@ namespace airelinna::app {
     AtomicReplaceFn atomic_replace_;
   };
 
-}    // namespace airelinna::app
+}    // namespace avb::app
 
-#endif    // AIRELINNA_APP_CONFIG_STORE_HPP
+#endif    // AVB0795_APP_CONFIG_STORE_HPP

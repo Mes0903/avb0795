@@ -2,13 +2,13 @@
 /// @brief Nonblocking serialization of native frame pull through mailbox publication.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_FRAME_INTAKE_GATE_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_DETAIL_FRAME_INTAKE_GATE_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_DETAIL_FRAME_INTAKE_GATE_HPP
+#define AVB0795_PLATFORM_WINDOWS_DETAIL_FRAME_INTAKE_GATE_HPP
 
 #include <atomic>
 #include <cstdint>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
 
   /// Serializes native acquisition, validation, and mailbox publication as one unit.
   /// A losing callback only records contention; it does not wait for the claimant.
@@ -45,6 +45,6 @@ namespace airelinna::platform::windows::detail {
     std::atomic_uint32_t state_{};
   };
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_DETAIL_FRAME_INTAKE_GATE_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_DETAIL_FRAME_INTAKE_GATE_HPP

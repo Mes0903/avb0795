@@ -2,8 +2,8 @@
 /// @brief Capture admission epochs, bounded latches, publication, and stop proofs.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_WGC_CAPTURE_STATE_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_DETAIL_WGC_CAPTURE_STATE_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_DETAIL_WGC_CAPTURE_STATE_HPP
+#define AVB0795_PLATFORM_WINDOWS_DETAIL_WGC_CAPTURE_STATE_HPP
 
 #include "platform/windows/detail/srw_lock.hpp"
 #include "platform/windows/wgc_capture_job.hpp"
@@ -19,7 +19,7 @@
 #include <optional>
 #include <utility>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
 
   using CapturePixelFormat =
     winrt::Windows::Graphics::DirectX::DirectXPixelFormat;
@@ -260,6 +260,6 @@ namespace airelinna::platform::windows::detail {
   /// Fail fast rather than unwind a published pool with uncertain internal users.
   void enforce_wgc_job_destruction_invariant(bool safe_to_destroy) noexcept;
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_DETAIL_WGC_CAPTURE_STATE_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_DETAIL_WGC_CAPTURE_STATE_HPP

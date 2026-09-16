@@ -2,10 +2,10 @@
 /// @brief Move-only WGC frame checkout ownership and borrowed D3D texture access.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_CAPTURED_FRAME_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_CAPTURED_FRAME_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_CAPTURED_FRAME_HPP
+#define AVB0795_PLATFORM_WINDOWS_WINDOWS_CAPTURED_FRAME_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <d3d11.h>
 #include <winrt/Windows.Graphics.Capture.h>
@@ -15,7 +15,7 @@
 #include <chrono>
 #include <cstdint>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   /// Owns the WGC pool checkout, not merely a reference to its texture.
   /// Moving transfers exactly-once Close responsibility to the next owner.
@@ -67,6 +67,6 @@ namespace airelinna::platform::windows {
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame frame_{nullptr};
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_CAPTURED_FRAME_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WINDOWS_CAPTURED_FRAME_HPP

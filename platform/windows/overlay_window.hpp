@@ -2,21 +2,21 @@
 /// @brief Main-thread GLFW overlay ownership and decoration changes.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_OVERLAY_WINDOW_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_OVERLAY_WINDOW_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_OVERLAY_WINDOW_HPP
+#define AVB0795_PLATFORM_WINDOWS_OVERLAY_WINDOW_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <expected>
 #include <memory>
 
 struct GLFWwindow;
 
-namespace airelinna::render {
+namespace avb::render {
   class WindowsRenderStack;
 }
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   class Win32OverlayAdapter;
   class WindowsRuntimeFactory;
@@ -70,12 +70,12 @@ namespace airelinna::platform::windows {
   private:
     friend class Win32OverlayAdapter;
     friend class WindowsRuntimeFactory;
-    friend class airelinna::render::WindowsRenderStack;
+    friend class avb::render::WindowsRenderStack;
     [[nodiscard]] GLFWwindow *native_window() const noexcept;
 
     std::unique_ptr<Impl> implementation_;
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_OVERLAY_WINDOW_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_OVERLAY_WINDOW_HPP

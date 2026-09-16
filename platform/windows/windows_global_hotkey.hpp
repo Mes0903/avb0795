@@ -2,12 +2,12 @@
 /// @brief Owner-thread hotkey registration, rollback, and command-only dispatch.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WINDOWS_GLOBAL_HOTKEY_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WINDOWS_GLOBAL_HOTKEY_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_GLOBAL_HOTKEY_HPP
+#define AVB0795_PLATFORM_WINDOWS_WINDOWS_GLOBAL_HOTKEY_HPP
 
-#include "airelinna/app/commands.hpp"
-#include "airelinna/app/ports.hpp"
-#include "airelinna/core/types.hpp"
+#include "avb/app/commands.hpp"
+#include "avb/app/ports.hpp"
+#include "avb/core/types.hpp"
 
 #include <windows.h>
 
@@ -18,7 +18,7 @@
 #include <optional>
 #include <string>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   /// Emits portable commands only; dispatch never receives a runtime or session owner.
   using HotkeyCommandSink = std::function<void(app::AppCommand)>;
@@ -205,6 +205,6 @@ namespace airelinna::platform::windows {
     std::unique_ptr<Impl> implementation_;
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WINDOWS_GLOBAL_HOTKEY_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WINDOWS_GLOBAL_HOTKEY_HPP

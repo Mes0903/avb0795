@@ -28,7 +28,7 @@
 #include <optional>
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
   namespace {
 
     constexpr std::uint64_t initial_resource_generation{1};
@@ -202,4 +202,4 @@ namespace airelinna::platform::windows {
     }
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

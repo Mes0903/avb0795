@@ -1,10 +1,10 @@
 /// @file
 /// Concrete replica graphics boundary: the runtime supplies capture checkouts
 /// and receives native facts/deadlines, without exposing graphics to the UI.
-#ifndef AIRELINNA_RENDER_WINDOWS_RENDER_STACK_HPP
-#define AIRELINNA_RENDER_WINDOWS_RENDER_STACK_HPP
+#ifndef AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP
+#define AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 #include "render/bridge_policy.hpp"
 #include "render/graphics_retry_policy.hpp"
 
@@ -19,12 +19,12 @@
 
 struct ID3D11Device;
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
   class OverlayWindow;
   class WindowsCapturedFrame;
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-namespace airelinna::render {
+namespace avb::render {
 
   /// Allocation-free snapshot of one main-thread progress pass.
   /// Device-loss flags are independent; drain_complete is release evidence,
@@ -119,6 +119,6 @@ namespace airelinna::render {
     std::unique_ptr<Impl> implementation_;
   };
 
-}    // namespace airelinna::render
+}    // namespace avb::render
 
-#endif    // AIRELINNA_RENDER_WINDOWS_RENDER_STACK_HPP
+#endif    // AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP

@@ -2,16 +2,16 @@
 /// @brief Installed Windows font loading for the independent controller UI.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_CONTROLLER_FONT_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_CONTROLLER_FONT_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_CONTROLLER_FONT_HPP
+#define AVB0795_PLATFORM_WINDOWS_CONTROLLER_FONT_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <cstddef>
 #include <expected>
 #include <vector>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   // Microsoft JhengHei is a Windows 11 core font. Only read the installed
   // system copy; no font is redistributed or downloaded by the application.
@@ -20,6 +20,6 @@ namespace airelinna::platform::windows {
   [[nodiscard]] std::expected<std::vector<std::byte>, core::AppError>
   load_controller_font();
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_CONTROLLER_FONT_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_CONTROLLER_FONT_HPP

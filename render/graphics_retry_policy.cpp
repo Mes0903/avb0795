@@ -7,7 +7,7 @@
 #include <chrono>
 #include <limits>
 
-namespace airelinna::render {
+namespace avb::render {
 
   namespace {
 
@@ -92,4 +92,4 @@ namespace airelinna::render {
               std::min(ownership_poll_interval, stalled_threshold - elapsed)};
   }
 
-}    // namespace airelinna::render
+}    // namespace avb::render

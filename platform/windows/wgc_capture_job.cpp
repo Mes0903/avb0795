@@ -7,7 +7,7 @@
 #include "platform/windows/detail/frame_intake_gate.hpp"
 #include "platform/windows/detail/wgc_capture_state.hpp"
 
-#include "airelinna/core/latest_value_mailbox.hpp"
+#include "avb/core/latest_value_mailbox.hpp"
 
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <winrt/Windows.Foundation.h>
@@ -20,7 +20,7 @@
 #include <new>
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   namespace {
 
@@ -638,4 +638,4 @@ namespace airelinna::platform::windows {
     return implementation_->cleanup_failure();
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

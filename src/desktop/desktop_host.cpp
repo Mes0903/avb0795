@@ -1,10 +1,10 @@
 /// @file
 /// Controller-only GLFW/ImGui/Vulkan infrastructure and deadline-aware host
 /// loop. Native replica resources are composed elsewhere and remain separate.
-#include "airelinna/desktop/desktop_host.hpp"
+#include "avb/desktop/desktop_host.hpp"
 #include "controller_font.hpp"
 
-#include "airelinna/ui/controller_view.hpp"
+#include "avb/ui/controller_view.hpp"
 #include "render/graphics_retry_policy.hpp"
 
 #include <vulkan/vulkan.h>
@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace airelinna::desktop {
+namespace avb::desktop {
   namespace {
 
     using namespace std::chrono_literals;
@@ -38,13 +38,13 @@ namespace airelinna::desktop {
 #if defined(VK_KHR_surface_maintenance1) && \
   defined(VK_KHR_swapchain_maintenance1) && \
   defined(VK_KHR_get_surface_capabilities2)
-#define AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE 1
+#define AVB0795_DESKTOP_HAS_KHR_MAINTENANCE 1
 #endif
 
 #if defined(VK_EXT_surface_maintenance1) && \
   defined(VK_EXT_swapchain_maintenance1) && \
   defined(VK_KHR_get_surface_capabilities2)
-#define AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE 1
+#define AVB0795_DESKTOP_HAS_EXT_MAINTENANCE 1
 #endif
 
     constexpr int controller_width{520};
@@ -382,10 +382,10 @@ namespace airelinna::desktop {
     MaintenanceVariant maintenance_variant_{MaintenanceVariant::None};
     bool khr_surface_maintenance_enabled_{};
     bool ext_surface_maintenance_enabled_{};
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
     PFN_vkReleaseSwapchainImagesKHR release_images_khr_{};
 #endif
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
     PFN_vkReleaseSwapchainImagesEXT release_images_ext_{};
 #endif
 
@@ -539,13 +539,13 @@ namespace airelinna::desktop {
 #else
     constexpr bool capabilities2_available = false;
 #endif
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
     khr_surface_maintenance_enabled_ =
       capabilities2_available &&
       extension_available(available,
                           VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
 #endif
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
     ext_surface_maintenance_enabled_ =
       capabilities2_available &&
       extension_available(available,
@@ -556,12 +556,12 @@ namespace airelinna::desktop {
       throw graphics_error(core::AppErrorCode::UnsupportedGraphics);
     }
     append_unique(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
     if (khr_surface_maintenance_enabled_) {
       append_unique(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
     }
 #endif
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
     if (ext_surface_maintenance_enabled_) {
       append_unique(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
     }
@@ -570,9 +570,9 @@ namespace airelinna::desktop {
     const VkApplicationInfo application_info{
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .pNext = nullptr,
-      .pApplicationName = "Airelinna",
+      .pApplicationName = "avb0795",
       .applicationVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
-      .pEngineName = "Airelinna controller",
+      .pEngineName = "avb0795 controller",
       .engineVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
       .apiVersion = VK_API_VERSION_1_3,
     };
@@ -645,7 +645,7 @@ namespace airelinna::desktop {
       }
 
       auto maintenance = MaintenanceVariant::None;
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
       if (khr_surface_maintenance_enabled_ &&
           extension_available(
             extensions, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)) {
@@ -664,7 +664,7 @@ namespace airelinna::desktop {
         }
       }
 #endif
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
       if (maintenance == MaintenanceVariant::None &&
           ext_surface_maintenance_enabled_ &&
           extension_available(
@@ -758,14 +758,14 @@ namespace airelinna::desktop {
       queue_info_count = 2;
     }
 
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
     VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR khr_features{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR,
       .pNext = nullptr,
       .swapchainMaintenance1 = VK_TRUE,
     };
 #endif
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
     VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT ext_features{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT,
       .pNext = nullptr,
@@ -776,14 +776,14 @@ namespace airelinna::desktop {
     const char *maintenance_extension{};
     switch (maintenance_variant_) {
     case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
       enabled_features = &khr_features;
       maintenance_extension =
         VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
 #endif
       break;
     case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
       enabled_features = &ext_features;
       maintenance_extension =
         VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
@@ -821,7 +821,7 @@ namespace airelinna::desktop {
     bool release_loaded{};
     switch (maintenance_variant_) {
     case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
       release_images_khr_ =
         reinterpret_cast<PFN_vkReleaseSwapchainImagesKHR>(
           vkGetDeviceProcAddr(device_, "vkReleaseSwapchainImagesKHR"));
@@ -829,7 +829,7 @@ namespace airelinna::desktop {
 #endif
       break;
     case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
       release_images_ext_ =
         reinterpret_cast<PFN_vkReleaseSwapchainImagesEXT>(
           vkGetDeviceProcAddr(device_, "vkReleaseSwapchainImagesEXT"));
@@ -1251,7 +1251,7 @@ namespace airelinna::desktop {
     }
 
     // The stock 1.92 backend uploads dynamic textures with vkQueueWaitIdle.
-    // Airelinna keeps texture work on its classified, fence-owned submission
+    // avb0795 keeps texture work on its classified, fence-owned submission
     // path instead, so the backend must never process ImDrawData::Textures.
     ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_RendererHasTextures;
   }
@@ -1823,7 +1823,7 @@ namespace airelinna::desktop {
     });
     auto &present = presents_.back();
 
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
     const VkSwapchainPresentFenceInfoKHR present_fence_khr{
       .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR,
       .pNext = nullptr,
@@ -1831,7 +1831,7 @@ namespace airelinna::desktop {
       .pFences = &present.fence,
     };
 #endif
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
     const VkSwapchainPresentFenceInfoEXT present_fence_ext{
       .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT,
       .pNext = nullptr,
@@ -1842,12 +1842,12 @@ namespace airelinna::desktop {
     const void *present_fence_info{};
     switch (maintenance_variant_) {
     case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
       present_fence_info = &present_fence_khr;
 #endif
       break;
     case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
       present_fence_info = &present_fence_ext;
 #endif
       break;
@@ -1926,7 +1926,7 @@ namespace airelinna::desktop {
   {
     switch (maintenance_variant_) {
     case MaintenanceVariant::Khr:
-#if defined(AIRELINNA_DESKTOP_HAS_KHR_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
       if (release_images_khr_ != nullptr) {
         const VkReleaseSwapchainImagesInfoKHR release_info{
           .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_KHR,
@@ -1940,7 +1940,7 @@ namespace airelinna::desktop {
 #endif
       break;
     case MaintenanceVariant::Ext:
-#if defined(AIRELINNA_DESKTOP_HAS_EXT_MAINTENANCE)
+#if defined(AVB0795_DESKTOP_HAS_EXT_MAINTENANCE)
       if (release_images_ext_ != nullptr) {
         const VkReleaseSwapchainImagesInfoEXT release_info{
           .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_EXT,
@@ -2358,7 +2358,7 @@ namespace airelinna::desktop {
     stopping_controller_ = true;
     if (promote) {
       const auto label = error.diagnostic_label();
-      std::fprintf(stderr, "Airelinna controller failure: %.*s\n",
+      std::fprintf(stderr, "avb0795 controller failure: %.*s\n",
                    static_cast<int>(label.size()), label.data());
     }
   }
@@ -2708,7 +2708,7 @@ namespace airelinna::desktop {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     GLFWwindow *const window = glfwCreateWindow(
-      controller_width, controller_height, "Airelinna", nullptr, nullptr);
+      controller_width, controller_height, "avb0795", nullptr, nullptr);
     if (window == nullptr) {
       const char *description{};
       const int detail = glfwGetError(&description);
@@ -2762,4 +2762,4 @@ namespace airelinna::desktop {
                                  .abandon_process = true};
   }
 
-}    // namespace airelinna::desktop
+}    // namespace avb::desktop

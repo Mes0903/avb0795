@@ -1,15 +1,15 @@
 /// @file
 /// Pure bridge decisions; native capability queries and resource ownership stay
 /// in WindowsRenderStack. No policy in this file performs GPU work.
-#ifndef AIRELINNA_RENDER_BRIDGE_POLICY_HPP
-#define AIRELINNA_RENDER_BRIDGE_POLICY_HPP
+#ifndef AVB0795_RENDER_BRIDGE_POLICY_HPP
+#define AVB0795_RENDER_BRIDGE_POLICY_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <cstdint>
 #include <optional>
 
-namespace airelinna::render {
+namespace avb::render {
 
   /// Construction preference; ForceCpuBaseline exercises the real CPU path.
   enum class WindowsBridgePreference { Automatic,
@@ -73,6 +73,6 @@ namespace airelinna::render {
            (!cpu_fallback_selected || current_generation != requested_generation);
   }
 
-}    // namespace airelinna::render
+}    // namespace avb::render
 
-#endif    // AIRELINNA_RENDER_BRIDGE_POLICY_HPP
+#endif    // AVB0795_RENDER_BRIDGE_POLICY_HPP

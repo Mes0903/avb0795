@@ -1,14 +1,14 @@
 foreach(required_variable
-        AIRELINNA_VERTEX_SPIRV
-        AIRELINNA_FRAGMENT_SPIRV
-        AIRELINNA_OUTPUT_HEADER
-        AIRELINNA_OUTPUT_SOURCE)
+        AVB0795_VERTEX_SPIRV
+        AVB0795_FRAGMENT_SPIRV
+        AVB0795_OUTPUT_HEADER
+        AVB0795_OUTPUT_SOURCE)
   if(NOT DEFINED ${required_variable})
     message(FATAL_ERROR "${required_variable} is required")
   endif()
 endforeach()
 
-function(_airelinna_spirv_words input output_words output_count)
+function(_avb0795_spirv_words input output_words output_count)
   if(NOT EXISTS "${input}")
     message(FATAL_ERROR "SPIR-V input does not exist: ${input}")
   endif()
@@ -48,15 +48,15 @@ function(_airelinna_spirv_words input output_words output_count)
   set(${output_count} "${word_count}" PARENT_SCOPE)
 endfunction()
 
-_airelinna_spirv_words(
-  "${AIRELINNA_VERTEX_SPIRV}" vertex_words vertex_word_count)
-_airelinna_spirv_words(
-  "${AIRELINNA_FRAGMENT_SPIRV}" fragment_words fragment_word_count)
+_avb0795_spirv_words(
+  "${AVB0795_VERTEX_SPIRV}" vertex_words vertex_word_count)
+_avb0795_spirv_words(
+  "${AVB0795_FRAGMENT_SPIRV}" fragment_words fragment_word_count)
 
 get_filename_component(output_header_directory
-  "${AIRELINNA_OUTPUT_HEADER}" DIRECTORY)
+  "${AVB0795_OUTPUT_HEADER}" DIRECTORY)
 get_filename_component(output_source_directory
-  "${AIRELINNA_OUTPUT_SOURCE}" DIRECTORY)
+  "${AVB0795_OUTPUT_SOURCE}" DIRECTORY)
 file(MAKE_DIRECTORY
   "${output_header_directory}"
   "${output_source_directory}")
@@ -66,17 +66,17 @@ set(header_contents [=[#pragma once
 #include <cstdint>
 #include <span>
 
-namespace airelinna::render {
+namespace avb::render {
 
 [[nodiscard]] std::span<const std::uint32_t> replica_vertex_shader() noexcept;
 [[nodiscard]] std::span<const std::uint32_t> replica_fragment_shader() noexcept;
 
-}  // namespace airelinna::render
+}  // namespace avb::render
 ]=])
 
-set(source_contents "#include \"airelinna/render/replica_shaders.hpp\"\n\n")
+set(source_contents "#include \"avb/render/replica_shaders.hpp\"\n\n")
 string(APPEND source_contents "#include <array>\n\n")
-string(APPEND source_contents "namespace airelinna::render {\nnamespace {\n\n")
+string(APPEND source_contents "namespace avb::render {\nnamespace {\n\n")
 string(APPEND source_contents
   "constexpr std::array<std::uint32_t, ${vertex_word_count}> replica_vertex_shader_words{\n"
   "        ${vertex_words}\n};\n\n")
@@ -90,7 +90,7 @@ string(APPEND source_contents
 string(APPEND source_contents
   "std::span<const std::uint32_t> replica_fragment_shader() noexcept {\n"
   "  return replica_fragment_shader_words;\n}\n\n")
-string(APPEND source_contents "}  // namespace airelinna::render\n")
+string(APPEND source_contents "}  // namespace avb::render\n")
 
-file(WRITE "${AIRELINNA_OUTPUT_HEADER}" "${header_contents}")
-file(WRITE "${AIRELINNA_OUTPUT_SOURCE}" "${source_contents}")
+file(WRITE "${AVB0795_OUTPUT_HEADER}" "${header_contents}")
+file(WRITE "${AVB0795_OUTPUT_SOURCE}" "${source_contents}")

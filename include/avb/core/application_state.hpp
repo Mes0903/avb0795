@@ -1,12 +1,12 @@
 /// @file Generation-checked access to the single V1 domain session.
-#ifndef AIRELINNA_CORE_APPLICATION_STATE_HPP
-#define AIRELINNA_CORE_APPLICATION_STATE_HPP
+#ifndef AVB0795_CORE_APPLICATION_STATE_HPP
+#define AVB0795_CORE_APPLICATION_STATE_HPP
 
-#include "airelinna/core/replica_session.hpp"
+#include "avb/core/replica_session.hpp"
 
 #include <expected>
 
-namespace airelinna::core {
+namespace avb::core {
 
   /// Owns one session value and its generation, with no runtime resources or I/O.
   /// Application sequences mutations on the main thread; this class does not lock.
@@ -75,6 +75,6 @@ namespace airelinna::core {
     ReplicaSession current_session_;
   };
 
-}    // namespace airelinna::core
+}    // namespace avb::core
 
-#endif    // AIRELINNA_CORE_APPLICATION_STATE_HPP
+#endif    // AVB0795_CORE_APPLICATION_STATE_HPP

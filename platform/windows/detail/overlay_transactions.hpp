@@ -2,10 +2,10 @@
 /// @brief Verified native-state transactions and factory-local attachment cleanup.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_TRANSACTIONS_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_TRANSACTIONS_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_DETAIL_OVERLAY_TRANSACTIONS_HPP
+#define AVB0795_PLATFORM_WINDOWS_DETAIL_OVERLAY_TRANSACTIONS_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 #include "platform/windows/detail/overlay_policy.hpp"
 
 #include <cstdint>
@@ -13,7 +13,7 @@
 #include <limits>
 #include <optional>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
 
   /// Observed property cleanup result; missing and still-bound are different failures.
   enum class OverlayPropertyRemoval {
@@ -66,7 +66,7 @@ namespace airelinna::platform::windows::detail {
     .flags = layered_alpha_flag,
   };
 
-  /// Full extended style plus layered attributes, not only the bits Airelinna modifies.
+  /// Full extended style plus layered attributes, not only the bits avb0795 modifies.
   struct NativeWindowState final {
     std::uintptr_t extended_style{};
     std::optional<LayeredAttributes> layered_attributes;
@@ -348,6 +348,6 @@ namespace airelinna::platform::windows::detail {
     bool armed_{};
   };
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_TRANSACTIONS_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_DETAIL_OVERLAY_TRANSACTIONS_HPP

@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <expected>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
   namespace {
 
     [[nodiscard]] constexpr std::expected<void, core::AppError>
@@ -39,4 +39,4 @@ namespace airelinna::platform::windows {
     return {};
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

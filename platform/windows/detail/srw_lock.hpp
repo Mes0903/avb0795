@@ -2,12 +2,12 @@
 /// @brief Small exclusive SRW guard for short callback-state critical sections.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_SRW_LOCK_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_DETAIL_SRW_LOCK_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_DETAIL_SRW_LOCK_HPP
+#define AVB0795_PLATFORM_WINDOWS_DETAIL_SRW_LOCK_HPP
 
 #include <windows.h>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
 
   /// Nonrecursive lock used only for short state transitions, never native intake.
   /// Do not invoke wake callbacks or potentially reentrant WinRT calls while held.
@@ -45,6 +45,6 @@ namespace airelinna::platform::windows::detail {
     SRWLOCK lock_ = SRWLOCK_INIT;
   };
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_DETAIL_SRW_LOCK_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_DETAIL_SRW_LOCK_HPP

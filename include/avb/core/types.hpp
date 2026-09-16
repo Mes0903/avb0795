@@ -1,14 +1,14 @@
 /// @file Portable identities, settings and diagnostics shared across layer boundaries.
 /// Native handles and resource lifetimes belong to platform/render owners.
-#ifndef AIRELINNA_CORE_TYPES_HPP
-#define AIRELINNA_CORE_TYPES_HPP
+#ifndef AVB0795_CORE_TYPES_HPP
+#define AVB0795_CORE_TYPES_HPP
 
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
 
-namespace airelinna::core {
+namespace avb::core {
 
   /// Generation token used to reject commands targeting a replaced session.
   struct SessionId {
@@ -278,6 +278,6 @@ namespace airelinna::core {
     friend bool operator==(const HotkeyChord &, const HotkeyChord &) = default;
   };
 
-}    // namespace airelinna::core
+}    // namespace avb::core
 
-#endif    // AIRELINNA_CORE_TYPES_HPP
+#endif    // AVB0795_CORE_TYPES_HPP

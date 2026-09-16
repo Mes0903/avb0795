@@ -9,7 +9,7 @@
 
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   WindowsCapturedFrame::WindowsCapturedFrame(
     const std::uint64_t sequence, const std::uint64_t resource_generation, const core::Extent allocation_extent, const core::Extent content_size, const winrt::Windows::Graphics::DirectX::DirectXPixelFormat expected_pool_format, const std::chrono::steady_clock::time_point capture_timestamp, winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame frame)
@@ -115,4 +115,4 @@ namespace airelinna::platform::windows {
     }
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

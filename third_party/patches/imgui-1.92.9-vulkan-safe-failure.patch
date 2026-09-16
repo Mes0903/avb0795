@@ -1,5 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Airelinna project
+From: avb0795 project
 Subject: [PATCH] ALTERED SOURCE: commit Vulkan outputs only after success
 
 Dear ImGui's Vulkan backend expects CheckVkResultFn to stop control flow on a

@@ -2,14 +2,14 @@
 /// @brief Value-only Win32 hit-test, aspect, DPI, and work-area geometry policies.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_POLICY_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_POLICY_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_DETAIL_OVERLAY_POLICY_HPP
+#define AVB0795_PLATFORM_WINDOWS_DETAIL_OVERLAY_POLICY_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <cstdint>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
 
   inline constexpr std::uintptr_t class_style_own_dc_bit{0x0020};
   inline constexpr std::uintptr_t class_style_class_dc_bit{0x0040};
@@ -86,7 +86,7 @@ namespace airelinna::platform::windows::detail {
     return (style & layered_style_bit) != 0;
   }
 
-  /// Derive only Airelinna-owned transparency bits, preserving unrelated style bits.
+  /// Derive only avb0795-owned transparency bits, preserving unrelated style bits.
   [[nodiscard]] constexpr std::uintptr_t
   input_transparency_style(const std::uintptr_t style,
                            const core::OverlayMode mode) noexcept
@@ -123,6 +123,6 @@ namespace airelinna::platform::windows::detail {
   [[nodiscard]] NativeRect
   clamp_outer_rect_to_work_area(NativeRect outer, NativeRect work_area) noexcept;
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_DETAIL_OVERLAY_POLICY_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_DETAIL_OVERLAY_POLICY_HPP

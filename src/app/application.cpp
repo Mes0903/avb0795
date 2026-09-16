@@ -1,14 +1,14 @@
 /// @file Main-thread use-case sequencing and the published-runtime ownership firewall.
-#include "airelinna/app/application.hpp"
+#include "avb/app/application.hpp"
 
-#include "airelinna/app/app_command_queue.hpp"
-#include "airelinna/app/ports.hpp"
+#include "avb/app/app_command_queue.hpp"
+#include "avb/app/ports.hpp"
 
 #include <algorithm>
 #include <utility>
 #include <variant>
 
-namespace airelinna::app {
+namespace avb::app {
 
   Application::Application(
     AppCommandQueue &commands, ISourceCatalog &source_catalog, IReplicaRuntimeFactory &runtime_factory, IGlobalHotkey &global_hotkey, ConfigStore &config_store, std::filesystem::path config_path, core::PlatformCapabilities capabilities, core::CaptureExclusionStatus controller_exclusion)
@@ -853,4 +853,4 @@ namespace airelinna::app {
     }
   }
 
-}    // namespace airelinna::app
+}    // namespace avb::app

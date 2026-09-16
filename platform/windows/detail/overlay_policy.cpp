@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
   namespace {
 
     [[nodiscard]] std::int64_t
@@ -250,4 +250,4 @@ namespace airelinna::platform::windows::detail {
             .bottom = vertical.last};
   }
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail

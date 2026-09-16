@@ -1,9 +1,9 @@
 /// @file
 /// Startup-only font-atlas configuration; native font loading is platform-owned.
-#ifndef AIRELINNA_DESKTOP_CONTROLLER_FONT_HPP
-#define AIRELINNA_DESKTOP_CONTROLLER_FONT_HPP
+#ifndef AVB0795_DESKTOP_CONTROLLER_FONT_HPP
+#define AVB0795_DESKTOP_CONTROLLER_FONT_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <imgui.h>
 
@@ -12,7 +12,7 @@
 #include <limits>
 #include <span>
 
-namespace airelinna::desktop {
+namespace avb::desktop {
 
   /// Register the supplied system font and fixed Latin/CJK glyph coverage.
   /// The caller retains the bytes until the atlas is destroyed. Baking/upload
@@ -40,6 +40,6 @@ namespace airelinna::desktop {
     return {};
   }
 
-}    // namespace airelinna::desktop
+}    // namespace avb::desktop
 
-#endif    // AIRELINNA_DESKTOP_CONTROLLER_FONT_HPP
+#endif    // AVB0795_DESKTOP_CONTROLLER_FONT_HPP

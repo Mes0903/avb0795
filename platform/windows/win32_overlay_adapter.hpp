@@ -2,10 +2,10 @@
 /// @brief Win32 overlay subclass, input-transparency transactions, and DPI geometry.
 /// Native implementation details remain below the portable application ports.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_WIN32_OVERLAY_ADAPTER_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_WIN32_OVERLAY_ADAPTER_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WIN32_OVERLAY_ADAPTER_HPP
+#define AVB0795_PLATFORM_WINDOWS_WIN32_OVERLAY_ADAPTER_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 #include "platform/windows/detail/overlay_policy.hpp"
 #include "platform/windows/detail/overlay_transactions.hpp"
 
@@ -16,7 +16,7 @@
 #include <memory>
 #include <optional>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   class OverlayWindow;
 
@@ -113,6 +113,6 @@ namespace airelinna::platform::windows {
     bool window_destruction_required_{};
   };
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
 
-#endif    // AIRELINNA_PLATFORM_WINDOWS_WIN32_OVERLAY_ADAPTER_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WIN32_OVERLAY_ADAPTER_HPP

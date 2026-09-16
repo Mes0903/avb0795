@@ -1,13 +1,13 @@
 /// @file One-slot owning handoff with replacement instead of a frame backlog.
-#ifndef AIRELINNA_CORE_LATEST_VALUE_MAILBOX_HPP
-#define AIRELINNA_CORE_LATEST_VALUE_MAILBOX_HPP
+#ifndef AVB0795_CORE_LATEST_VALUE_MAILBOX_HPP
+#define AVB0795_CORE_LATEST_VALUE_MAILBOX_HPP
 
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <utility>
 
-namespace airelinna::core {
+namespace avb::core {
 
   /// Mutex-protected newest-value handoff; supports move-only owning payloads.
   /// The mailbox owns at most one pending value. Destruction of displaced payload
@@ -104,6 +104,6 @@ namespace airelinna::core {
     bool closed_{};
   };
 
-}    // namespace airelinna::core
+}    // namespace avb::core
 
-#endif    // AIRELINNA_CORE_LATEST_VALUE_MAILBOX_HPP
+#endif    // AVB0795_CORE_LATEST_VALUE_MAILBOX_HPP

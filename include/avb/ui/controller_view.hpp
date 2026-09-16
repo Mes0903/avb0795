@@ -1,15 +1,15 @@
 /// @file ImGui-only controller widgets using immutable view data and command values.
-#ifndef AIRELINNA_UI_CONTROLLER_VIEW_HPP
-#define AIRELINNA_UI_CONTROLLER_VIEW_HPP
+#ifndef AVB0795_UI_CONTROLLER_VIEW_HPP
+#define AVB0795_UI_CONTROLLER_VIEW_HPP
 
-#include "airelinna/app/commands.hpp"
-#include "airelinna/app/controller_view_state.hpp"
+#include "avb/app/commands.hpp"
+#include "avb/app/controller_view_state.hpp"
 
 #include <functional>
 #include <optional>
 #include <string>
 
-namespace airelinna::ui {
+namespace avb::ui {
 
   /// Main-thread command delivery supplied by the host; the view never owns the queue.
   using CommandSink = std::function<void(app::AppCommand)>;
@@ -29,6 +29,6 @@ namespace airelinna::ui {
     std::optional<std::string> hotkey_edit_text_;
   };
 
-}    // namespace airelinna::ui
+}    // namespace avb::ui
 
-#endif    // AIRELINNA_UI_CONTROLLER_VIEW_HPP
+#endif    // AVB0795_UI_CONTROLLER_VIEW_HPP

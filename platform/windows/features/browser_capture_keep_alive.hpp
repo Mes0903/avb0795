@@ -1,8 +1,8 @@
 /// @file
 /// @brief Thread-bound owner of the browser capture visibility helper.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_FEATURES_BROWSER_CAPTURE_KEEP_ALIVE_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_FEATURES_BROWSER_CAPTURE_KEEP_ALIVE_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_FEATURES_BROWSER_CAPTURE_KEEP_ALIVE_HPP
+#define AVB0795_PLATFORM_WINDOWS_FEATURES_BROWSER_CAPTURE_KEEP_ALIVE_HPP
 
 #include "platform/windows/features/detail/browser_capture_keep_alive_policy.hpp"
 
@@ -12,7 +12,7 @@
 #include <expected>
 #include <optional>
 
-namespace airelinna::platform::windows::features {
+namespace avb::platform::windows::features {
 
   class BrowserCaptureKeepAlive final {
   public:
@@ -56,6 +56,6 @@ namespace airelinna::platform::windows::features {
     bool cleanup_uncertain_{};
   };
 
-}    // namespace airelinna::platform::windows::features
+}    // namespace avb::platform::windows::features
 
 #endif

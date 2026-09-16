@@ -1,8 +1,8 @@
 /// @file Portable controller snapshot and pure projection from Application-owned facts.
-#ifndef AIRELINNA_APP_CONTROLLER_VIEW_STATE_HPP
-#define AIRELINNA_APP_CONTROLLER_VIEW_STATE_HPP
+#ifndef AVB0795_APP_CONTROLLER_VIEW_STATE_HPP
+#define AVB0795_APP_CONTROLLER_VIEW_STATE_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <optional>
 #include <span>
@@ -10,11 +10,11 @@
 #include <string_view>
 #include <vector>
 
-namespace airelinna::core {
+namespace avb::core {
   class ApplicationState;
 }
 
-namespace airelinna::app {
+namespace avb::app {
 
   struct UserConfig;
 
@@ -96,6 +96,6 @@ namespace airelinna::app {
   [[nodiscard]] ControllerViewState build_controller_view(
     const core::ApplicationState &state, core::SessionId current_session_id, std::span<const core::SourceDescriptor> sources, core::PlatformCapabilities capabilities, const UserConfig &config, bool hotkey_binding_confirmed, core::CaptureExclusionStatus controller_exclusion, const RuntimeFeedback &runtime_feedback, bool runtime_present, bool stop_requested, std::optional<core::AppError> application_notice = std::nullopt);
 
-}    // namespace airelinna::app
+}    // namespace avb::app
 
-#endif    // AIRELINNA_APP_CONTROLLER_VIEW_STATE_HPP
+#endif    // AVB0795_APP_CONTROLLER_VIEW_STATE_HPP

@@ -9,7 +9,7 @@
 #include <exception>
 #include <string_view>
 
-namespace airelinna::platform::windows::features {
+namespace avb::platform::windows::features {
 
   namespace {
     constexpr wchar_t helper_class_name[] = L"TaskListThumbnailWnd";
@@ -381,4 +381,4 @@ namespace airelinna::platform::windows::features {
     return deadline && *deadline > Clock::now() ? deadline : std::nullopt;
   }
 
-}    // namespace airelinna::platform::windows::features
+}    // namespace avb::platform::windows::features

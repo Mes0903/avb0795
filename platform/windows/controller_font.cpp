@@ -10,7 +10,7 @@
 #include <filesystem>
 #include <fstream>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   std::expected<std::vector<std::byte>, core::AppError> load_controller_font()
   {
@@ -49,4 +49,4 @@ namespace airelinna::platform::windows {
     }
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

@@ -1,10 +1,10 @@
 /// @file
 /// Shared value policies for both Vulkan owners. Results describe evidence and
 /// required actions; each concrete owner retains its own handles and timers.
-#ifndef AIRELINNA_RENDER_GRAPHICS_RETRY_POLICY_HPP
-#define AIRELINNA_RENDER_GRAPHICS_RETRY_POLICY_HPP
+#ifndef AVB0795_RENDER_GRAPHICS_RETRY_POLICY_HPP
+#define AVB0795_RENDER_GRAPHICS_RETRY_POLICY_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <vulkan/vulkan_core.h>
 
@@ -15,7 +15,7 @@
 #include <optional>
 #include <span>
 
-namespace airelinna::render {
+namespace avb::render {
 
   /// Smallest resource scope that must be reconstructed after a native failure.
   enum class GraphicsFailureCategory { Swapchain,
@@ -605,6 +605,6 @@ namespace airelinna::render {
     evaluate(RuntimeDrainInput input) const noexcept;
   };
 
-}    // namespace airelinna::render
+}    // namespace avb::render
 
-#endif    // AIRELINNA_RENDER_GRAPHICS_RETRY_POLICY_HPP
+#endif    // AVB0795_RENDER_GRAPHICS_RETRY_POLICY_HPP

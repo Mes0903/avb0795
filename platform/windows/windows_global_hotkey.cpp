@@ -11,7 +11,7 @@
 #include <string>
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
   namespace detail {
     namespace {
 
@@ -504,7 +504,7 @@ namespace airelinna::platform::windows {
       }
 
       auto class_name =
-        std::wstring{L"Airelinna.WindowsGlobalHotkey."} +
+        std::wstring{L"avb0795.WindowsGlobalHotkey."} +
         std::to_wstring(GetCurrentProcessId()) + L'.' +
         std::to_wstring(reinterpret_cast<std::uintptr_t>(context.get()));
       WNDCLASSEXW window_class{};
@@ -719,4 +719,4 @@ namespace airelinna::platform::windows {
 
   void WindowsGlobalHotkey::clear() noexcept { implementation_->clear(); }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

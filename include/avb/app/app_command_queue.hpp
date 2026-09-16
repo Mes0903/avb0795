@@ -1,12 +1,12 @@
 /// @file Main-thread command handoff between host/UI callbacks and Application.
-#ifndef AIRELINNA_APP_APP_COMMAND_QUEUE_HPP
-#define AIRELINNA_APP_APP_COMMAND_QUEUE_HPP
+#ifndef AVB0795_APP_APP_COMMAND_QUEUE_HPP
+#define AVB0795_APP_APP_COMMAND_QUEUE_HPP
 
-#include "airelinna/app/commands.hpp"
+#include "avb/app/commands.hpp"
 
 #include <deque>
 
-namespace airelinna::app {
+namespace avb::app {
 
   /// FIFO of owning command values, confined to the main thread with no locking.
   /// It is separate from the mutex-protected newest-frame mailbox in core.
@@ -24,6 +24,6 @@ namespace airelinna::app {
     bool closed_{};
   };
 
-}    // namespace airelinna::app
+}    // namespace avb::app
 
-#endif    // AIRELINNA_APP_APP_COMMAND_QUEUE_HPP
+#endif    // AVB0795_APP_APP_COMMAND_QUEUE_HPP

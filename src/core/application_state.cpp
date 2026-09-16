@@ -1,10 +1,10 @@
 /// @file Generation validation delegates every accepted operation to one session.
-#include "airelinna/core/application_state.hpp"
+#include "avb/core/application_state.hpp"
 
 #include <limits>
 #include <utility>
 
-namespace airelinna::core {
+namespace avb::core {
 
   SessionId ApplicationState::current_session_id() const noexcept
   {
@@ -188,4 +188,4 @@ namespace airelinna::core {
     return current_session_.mark_error();
   }
 
-}    // namespace airelinna::core
+}    // namespace avb::core

@@ -1,12 +1,12 @@
 include_guard(GLOBAL)
 
-set(_AIRELINNA_BOUNDARY_SCRIPT "${CMAKE_CURRENT_LIST_FILE}")
+set(_AVB0795_BOUNDARY_SCRIPT "${CMAKE_CURRENT_LIST_FILE}")
 
-function(_airelinna_boundary_failure detail)
-  message(FATAL_ERROR "Airelinna architecture boundary violation: ${detail}")
+function(_avb0795_boundary_failure detail)
+  message(FATAL_ERROR "avb0795 architecture boundary violation: ${detail}")
 endfunction()
 
-function(_airelinna_normalize_link output link)
+function(_avb0795_normalize_link output link)
   set(value "${link}")
   if(value MATCHES "^\\$<LINK_ONLY:(.*)>$")
     set(value "${CMAKE_MATCH_1}")
@@ -16,7 +16,7 @@ function(_airelinna_normalize_link output link)
   set(${output} "${value}" PARENT_SCOPE)
 endfunction()
 
-function(_airelinna_assert_links target)
+function(_avb0795_assert_links target)
   set(allowed ${ARGN})
   foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
     get_target_property(links "${target}" "${property}")
@@ -25,27 +25,27 @@ function(_airelinna_assert_links target)
     endif()
 
     foreach(link IN LISTS links)
-      _airelinna_normalize_link(normalized "${link}")
+      _avb0795_normalize_link(normalized "${link}")
       if(normalized IN_LIST allowed)
         continue()
       endif()
-      _airelinna_boundary_failure(
+      _avb0795_boundary_failure(
         "${target} has disallowed direct link '${normalized}' in ${property}")
     endforeach()
   endforeach()
 endfunction()
 
-function(_airelinna_assert_sources target)
+function(_avb0795_assert_sources target)
   set(allowed_roots ${ARGN})
   get_target_property(source_dir "${target}" SOURCE_DIR)
   get_target_property(sources "${target}" SOURCES)
   if(NOT sources OR sources MATCHES "-NOTFOUND$")
-    _airelinna_boundary_failure("${target} has no sources")
+    _avb0795_boundary_failure("${target} has no sources")
   endif()
 
   foreach(source IN LISTS sources)
     if(source MATCHES "^\\$<")
-      _airelinna_boundary_failure(
+      _avb0795_boundary_failure(
         "${target} uses an unchecked generator-expression source '${source}'")
     endif()
 
@@ -75,13 +75,13 @@ function(_airelinna_assert_sources target)
     endforeach()
 
     if(NOT source_allowed)
-      _airelinna_boundary_failure(
+      _avb0795_boundary_failure(
         "${target} owns source outside its layer: ${absolute_source}")
     endif()
   endforeach()
 endfunction()
 
-function(_airelinna_collect_project_targets output directory)
+function(_avb0795_collect_project_targets output directory)
   get_property(
     directory_targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
   set(project_targets ${directory_targets})
@@ -101,25 +101,25 @@ function(_airelinna_collect_project_targets output directory)
       continue()
     endif()
 
-    _airelinna_collect_project_targets(child_targets "${subdirectory}")
+    _avb0795_collect_project_targets(child_targets "${subdirectory}")
     list(APPEND project_targets ${child_targets})
   endforeach()
 
   set(${output} ${project_targets} PARENT_SCOPE)
 endfunction()
 
-function(_airelinna_assert_known_production_targets)
+function(_avb0795_assert_known_production_targets)
   set(known_targets
-      airelinna_core
-      airelinna_app
-      airelinna_ui
-      airelinna_windows
-      airelinna_windows_graphics
-      airelinna_desktop
-      airelinna
-      Airelinna
+      avb0795_core
+      avb0795_app
+      avb0795_ui
+      avb0795_windows
+      avb0795_windows_graphics
+      avb0795_desktop
+      avb0795
+      avb0795
       imgui)
-  _airelinna_collect_project_targets(project_targets "${PROJECT_SOURCE_DIR}")
+  _avb0795_collect_project_targets(project_targets "${PROJECT_SOURCE_DIR}")
   list(REMOVE_DUPLICATES project_targets)
 
   foreach(target IN LISTS project_targets)
@@ -131,53 +131,53 @@ function(_airelinna_assert_known_production_targets)
     if(target_type STREQUAL "UTILITY")
       continue()
     endif()
-    _airelinna_boundary_failure(
+    _avb0795_boundary_failure(
       "${target} is a project production target without an explicit layer allowlist")
   endforeach()
 endfunction()
 
-function(airelinna_assert_target_boundaries)
-  _airelinna_assert_known_production_targets()
+function(avb0795_assert_target_boundaries)
+  _avb0795_assert_known_production_targets()
 
-  if(TARGET airelinna_core)
-    _airelinna_assert_sources(airelinna_core "src/core")
-    _airelinna_assert_links(airelinna_core)
+  if(TARGET avb0795_core)
+    _avb0795_assert_sources(avb0795_core "src/core")
+    _avb0795_assert_links(avb0795_core)
   endif()
 
-  if(TARGET airelinna_app)
-    _airelinna_assert_sources(airelinna_app "src/app")
-    _airelinna_assert_links(
-      airelinna_app airelinna_core nlohmann_json::nlohmann_json)
+  if(TARGET avb0795_app)
+    _avb0795_assert_sources(avb0795_app "src/app")
+    _avb0795_assert_links(
+      avb0795_app avb0795_core nlohmann_json::nlohmann_json)
   endif()
 
-  if(TARGET airelinna_ui)
-    _airelinna_assert_sources(airelinna_ui "src/ui")
-    _airelinna_assert_links(airelinna_ui airelinna_core imgui)
+  if(TARGET avb0795_ui)
+    _avb0795_assert_sources(avb0795_ui "src/ui")
+    _avb0795_assert_links(avb0795_ui avb0795_core imgui)
   endif()
 
-  if(TARGET airelinna_windows)
-    _airelinna_assert_sources(airelinna_windows "platform/windows")
-    _airelinna_assert_links(
-      airelinna_windows
-      airelinna_core
-      airelinna_app
+  if(TARGET avb0795_windows)
+    _avb0795_assert_sources(avb0795_windows "platform/windows")
+    _avb0795_assert_links(
+      avb0795_windows
+      avb0795_core
+      avb0795_app
       user32
       d3d11
       dxgi
       windowsapp)
   endif()
 
-  if(TARGET airelinna_windows_graphics)
-    _airelinna_assert_sources(
-      airelinna_windows_graphics
+  if(TARGET avb0795_windows_graphics)
+    _avb0795_assert_sources(
+      avb0795_windows_graphics
       "platform/windows"
       "render"
-      "${PROJECT_BINARY_DIR}/generated/airelinna/render")
-    _airelinna_assert_links(
-      airelinna_windows_graphics
-      airelinna_core
-      airelinna_app
-      airelinna_windows
+      "${PROJECT_BINARY_DIR}/generated/avb/render")
+    _avb0795_assert_links(
+      avb0795_windows_graphics
+      avb0795_core
+      avb0795_app
+      avb0795_windows
       glfw
       Vulkan::Vulkan
       d3d11
@@ -185,20 +185,20 @@ function(airelinna_assert_target_boundaries)
       user32)
   endif()
 
-  if(TARGET airelinna_desktop)
+  if(TARGET avb0795_desktop)
     if(NOT DEFINED imgui_SOURCE_DIR)
-      _airelinna_boundary_failure(
-        "airelinna_desktop requires the pinned imgui source directory")
+      _avb0795_boundary_failure(
+        "avb0795_desktop requires the pinned imgui source directory")
     endif()
-    _airelinna_assert_sources(
-      airelinna_desktop
+    _avb0795_assert_sources(
+      avb0795_desktop
       "src/desktop"
       "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
       "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
-    _airelinna_assert_links(
-      airelinna_desktop
-      airelinna_app
-      airelinna_ui
+    _avb0795_assert_links(
+      avb0795_desktop
+      avb0795_app
+      avb0795_ui
       glfw
       Vulkan::Vulkan
       imgui
@@ -206,34 +206,34 @@ function(airelinna_assert_target_boundaries)
       imgui_impl_vulkan)
   endif()
 
-  foreach(product_target airelinna Airelinna)
+  foreach(product_target avb0795 avb0795)
     if(TARGET "${product_target}")
       get_target_property(product_type "${product_target}" TYPE)
       if(NOT product_type STREQUAL "EXECUTABLE")
-        _airelinna_boundary_failure(
+        _avb0795_boundary_failure(
           "${product_target} must be the executable composition root")
       endif()
-      _airelinna_assert_sources(
+      _avb0795_assert_sources(
         "${product_target}"
         "main.cpp"
-        "resources/windows/airelinna.rc"
-        "resources/windows/airelinna.manifest")
-      _airelinna_assert_links(
+        "resources/windows/avb0795.rc"
+        "resources/windows/avb0795.manifest")
+      _avb0795_assert_links(
         "${product_target}"
-        airelinna_app
-         airelinna_ui
-         airelinna_desktop
-         airelinna_windows
-         airelinna_windows_graphics
+        avb0795_app
+         avb0795_ui
+         avb0795_desktop
+         avb0795_windows
+         avb0795_windows_graphics
          glfw
          windowsapp)
      endif()
    endforeach()
 endfunction()
 
-function(airelinna_add_source_boundary_target)
+function(avb0795_add_source_boundary_target)
   if(TARGET verify_source_boundaries)
-    _airelinna_boundary_failure(
+    _avb0795_boundary_failure(
       "verify_source_boundaries may be registered only once")
   endif()
 
@@ -241,16 +241,16 @@ function(airelinna_add_source_boundary_target)
     verify_source_boundaries
     COMMAND
       "${CMAKE_COMMAND}"
-      "-DAIRELINNA_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
-      -P "${_AIRELINNA_BOUNDARY_SCRIPT}"
-    COMMENT "Verifying Airelinna source-layer boundaries"
+      "-DAVB0795_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+      -P "${_AVB0795_BOUNDARY_SCRIPT}"
+    COMMENT "Verifying avb0795 source-layer boundaries"
     VERBATIM)
 endfunction()
 
-function(_airelinna_collect_sources output)
+function(_avb0795_collect_sources output)
   set(files)
   foreach(relative_path IN LISTS ARGN)
-    set(path "${AIRELINNA_SOURCE_ROOT}/${relative_path}")
+    set(path "${AVB0795_SOURCE_ROOT}/${relative_path}")
     if(IS_DIRECTORY "${path}")
       file(
         GLOB_RECURSE found
@@ -274,46 +274,46 @@ function(_airelinna_collect_sources output)
   set(${output} "${files}" PARENT_SCOPE)
 endfunction()
 
-function(_airelinna_assert_no_match file contents pattern description)
+function(_avb0795_assert_no_match file contents pattern description)
   if("${contents}" MATCHES "${pattern}")
-    _airelinna_boundary_failure("${file}: ${description}")
+    _avb0795_boundary_failure("${file}: ${description}")
   endif()
 endfunction()
 
-function(_airelinna_assert_app_includes file contents)
+function(_avb0795_assert_app_includes file contents)
   set(allowed ${ARGN})
   string(
     REGEX MATCHALL
-    "(airelinna/)?app/[A-Za-z0-9_./-]+\\.(hpp|h)"
+    "(avb/)?app/[A-Za-z0-9_./-]+\\.(hpp|h)"
     app_includes
     "${contents}")
   foreach(app_include IN LISTS app_includes)
-    string(REGEX REPLACE "^app/" "airelinna/app/" normalized
+    string(REGEX REPLACE "^app/" "avb/app/" normalized
            "${app_include}")
     if(NOT normalized IN_LIST allowed)
-      _airelinna_boundary_failure(
+      _avb0795_boundary_failure(
         "${file}: disallowed application include '${normalized}'")
     endif()
   endforeach()
 endfunction()
 
-function(_airelinna_assert_layer_includes file contents prefix)
+function(_avb0795_assert_layer_includes file contents prefix)
   set(allowed ${ARGN})
   string(
     REGEX MATCHALL
-    "(airelinna/)?${prefix}/[A-Za-z0-9_./-]+\\.(hpp|h)"
+    "(avb/)?${prefix}/[A-Za-z0-9_./-]+\\.(hpp|h)"
     layer_includes
     "${contents}")
   foreach(layer_include IN LISTS layer_includes)
-    string(REGEX REPLACE "^airelinna/" "" normalized "${layer_include}")
+    string(REGEX REPLACE "^avb/" "" normalized "${layer_include}")
     if(NOT normalized IN_LIST allowed)
-      _airelinna_boundary_failure(
+      _avb0795_boundary_failure(
         "${file}: disallowed ${prefix} include '${normalized}'")
     endif()
   endforeach()
 endfunction()
 
-function(_airelinna_scan_files category)
+function(_avb0795_scan_files category)
   set(files ${ARGN})
   set(portable_native_include
       "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|unknwn\\.h|objbase\\.h|objidl[^>\"]*\\.h|vulkan/|glfw/|imgui_impl_(glfw|vulkan)\\.h|platform/windows/)")
@@ -329,21 +329,21 @@ function(_airelinna_scan_files category)
 
     if(category STREQUAL "core" OR category STREQUAL "app" OR
        category STREQUAL "ui")
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}" "${normalized_lower_contents}" "${portable_native_include}"
         "portable source includes a native graphics/platform header")
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}"
         "${normalized_lower_contents}"
         "#[ \t]*include[ \t]+[^<\" \t\r\n]"
         "portable source uses a non-literal include")
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}" "${contents}" "${portable_native_symbol}"
         "portable source mentions a native graphics/platform type")
     endif()
 
     if(category STREQUAL "core" OR category STREQUAL "app")
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}"
         "${normalized_lower_contents}"
         "#[ \t]*include[ \t]*[<\"][^>\"]*imgui(_internal|_stdlib)?\\.h"
@@ -351,143 +351,143 @@ function(_airelinna_scan_files category)
     endif()
 
     if(category STREQUAL "core")
-      _airelinna_assert_app_includes("${file}" "${contents}")
-      _airelinna_assert_layer_includes("${file}" "${contents}" "ui")
-      _airelinna_assert_layer_includes("${file}" "${contents}" "desktop")
-      _airelinna_assert_layer_includes("${file}" "${contents}" "render")
-      _airelinna_assert_layer_includes(
+      _avb0795_assert_app_includes("${file}" "${contents}")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "desktop")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "render")
+      _avb0795_assert_layer_includes(
         "${file}" "${contents}" "platform/windows")
     elseif(category STREQUAL "app")
-      _airelinna_assert_layer_includes("${file}" "${contents}" "ui")
-      _airelinna_assert_layer_includes("${file}" "${contents}" "desktop")
-      _airelinna_assert_layer_includes("${file}" "${contents}" "render")
-      _airelinna_assert_layer_includes(
+      _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "desktop")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "render")
+      _avb0795_assert_layer_includes(
         "${file}" "${contents}" "platform/windows")
     elseif(category STREQUAL "ui")
-      _airelinna_assert_layer_includes("${file}" "${contents}" "render")
-      _airelinna_assert_layer_includes("${file}" "${contents}" "desktop")
-      _airelinna_assert_no_match(
+      _avb0795_assert_layer_includes("${file}" "${contents}" "render")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "desktop")
+      _avb0795_assert_no_match(
         "${file}"
         "${contents}"
-        "(airelinna/)?core/(application_state|replica_session)\\.hpp"
+        "(avb/)?core/(application_state|replica_session)\\.hpp"
         "UI includes mutable domain state")
-      _airelinna_assert_app_includes(
+      _avb0795_assert_app_includes(
         "${file}"
         "${contents}"
-        airelinna/app/commands.hpp
-        airelinna/app/controller_view_state.hpp)
-      _airelinna_assert_no_match(
+        avb/app/commands.hpp
+        avb/app/controller_view_state.hpp)
+      _avb0795_assert_no_match(
         "${file}"
         "${contents}"
         "(^|[^A-Za-z0-9_])(Application|ApplicationState|ReplicaSession|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack)([^A-Za-z0-9_]|$)"
         "UI crosses the frontend command/view-state boundary")
     elseif(category STREQUAL "desktop")
-      _airelinna_assert_layer_includes(
+      _avb0795_assert_layer_includes(
         "${file}"
         "${contents}"
         "render"
         render/graphics_retry_policy.hpp)
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}"
         "${lower_contents}"
         "${desktop_forbidden_include}"
         "desktop shell includes replica-native/platform ownership")
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}"
         "${contents}"
-        "(airelinna/)?core/(application_state|replica_session)\\.hpp|(^|[^A-Za-z0-9_])(ApplicationState|ReplicaSession)([^A-Za-z0-9_]|$)"
+        "(avb/)?core/(application_state|replica_session)\\.hpp|(^|[^A-Za-z0-9_])(ApplicationState|ReplicaSession)([^A-Za-z0-9_]|$)"
         "desktop shell reaches mutable domain state")
-      _airelinna_assert_app_includes(
+      _avb0795_assert_app_includes(
         "${file}"
         "${contents}"
-        airelinna/app/application.hpp
-        airelinna/app/commands.hpp
-        airelinna/app/controller_view_state.hpp)
-      _airelinna_assert_no_match(
+        avb/app/application.hpp
+        avb/app/commands.hpp
+        avb/app/controller_view_state.hpp)
+      _avb0795_assert_no_match(
         "${file}"
         "${contents}"
         "(^|[^A-Za-z0-9_])(ISourceCatalog|IReplicaRuntimeFactory|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack|WgcCaptureJob|WindowsCaptureSource|WindowsCapturedFrame)([^A-Za-z0-9_]|$)"
         "desktop shell reaches a port, replica runtime, config store, or native replica owner")
     elseif(category STREQUAL "windows")
       get_filename_component(file_name "${file}" NAME)
-      set(allowed_windows_app_headers airelinna/app/ports.hpp)
+      set(allowed_windows_app_headers avb/app/ports.hpp)
       set(is_hotkey_file FALSE)
       if(file_name MATCHES
          "^windows_global_hotkey\\.(c|cc|cpp|cxx|h|hpp)$")
         set(is_hotkey_file TRUE)
         list(APPEND
-             allowed_windows_app_headers airelinna/app/commands.hpp)
+             allowed_windows_app_headers avb/app/commands.hpp)
       endif()
-      _airelinna_assert_app_includes(
+      _avb0795_assert_app_includes(
         "${file}"
         "${contents}"
         ${allowed_windows_app_headers})
       if(NOT is_hotkey_file)
-        _airelinna_assert_no_match(
+        _avb0795_assert_no_match(
           "${file}"
           "${contents}"
           "(^|[^A-Za-z0-9_])(AppCommand|RestoreActiveReplicaEditable)([^A-Za-z0-9_]|$)|windows_global_hotkey"
           "non-hotkey Windows adapter reaches the command path")
       endif()
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}"
         "${contents}"
-        "(airelinna/)?core/(application_state|replica_session)|(airelinna/)?(ui|desktop)/"
+        "(avb/)?core/(application_state|replica_session)|(avb/)?(ui|desktop)/"
         "Windows adapter includes domain state or frontend/desktop code")
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}"
         "${contents}"
         "(^|[^A-Za-z0-9_])(Application|ApplicationState|ReplicaSession|ControllerView|DesktopHost)([^A-Za-z0-9_]|$)"
         "Windows adapter mentions an owner outside its boundary")
     elseif(category STREQUAL "render")
-      _airelinna_assert_app_includes("${file}" "${contents}")
-      _airelinna_assert_layer_includes(
+      _avb0795_assert_app_includes("${file}" "${contents}")
+      _avb0795_assert_layer_includes(
         "${file}"
         "${contents}"
         "platform/windows"
         platform/windows/overlay_window.hpp
         platform/windows/windows_captured_frame.hpp)
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}"
         "${contents}"
-        "(airelinna/)?core/(application_state|replica_session)|(airelinna/)?(ui|desktop)/"
+        "(avb/)?core/(application_state|replica_session)|(avb/)?(ui|desktop)/"
         "render source includes application/domain/frontend ownership")
     endif()
   endforeach()
 endfunction()
 
-function(_airelinna_run_source_boundary_scan)
-  if(NOT DEFINED AIRELINNA_SOURCE_ROOT OR
-     NOT IS_DIRECTORY "${AIRELINNA_SOURCE_ROOT}")
-    _airelinna_boundary_failure(
-      "AIRELINNA_SOURCE_ROOT must name the project source directory")
+function(_avb0795_run_source_boundary_scan)
+  if(NOT DEFINED AVB0795_SOURCE_ROOT OR
+     NOT IS_DIRECTORY "${AVB0795_SOURCE_ROOT}")
+    _avb0795_boundary_failure(
+      "AVB0795_SOURCE_ROOT must name the project source directory")
   endif()
 
-  _airelinna_collect_sources(
-    core_files "include/airelinna/core" "src/core")
-  _airelinna_scan_files(core ${core_files})
+  _avb0795_collect_sources(
+    core_files "include/avb/core" "src/core")
+  _avb0795_scan_files(core ${core_files})
 
-  _airelinna_collect_sources(
-    app_files "include/airelinna/app" "src/app")
-  _airelinna_scan_files(app ${app_files})
+  _avb0795_collect_sources(
+    app_files "include/avb/app" "src/app")
+  _avb0795_scan_files(app ${app_files})
 
-  _airelinna_collect_sources(ui_files "include/airelinna/ui" "src/ui")
-  _airelinna_scan_files(ui ${ui_files})
+  _avb0795_collect_sources(ui_files "include/avb/ui" "src/ui")
+  _avb0795_scan_files(ui ${ui_files})
 
-  _airelinna_collect_sources(
-    desktop_files "include/airelinna/desktop" "src/desktop")
-  _airelinna_scan_files(desktop ${desktop_files})
+  _avb0795_collect_sources(
+    desktop_files "include/avb/desktop" "src/desktop")
+  _avb0795_scan_files(desktop ${desktop_files})
 
-  _airelinna_collect_sources(windows_files "platform/windows")
-  _airelinna_scan_files(windows ${windows_files})
+  _avb0795_collect_sources(windows_files "platform/windows")
+  _avb0795_scan_files(windows ${windows_files})
 
-  _airelinna_collect_sources(render_files "render")
-  _airelinna_scan_files(render ${render_files})
+  _avb0795_collect_sources(render_files "render")
+  _avb0795_scan_files(render ${render_files})
 
-  _airelinna_collect_sources(main_files "main.cpp")
+  _avb0795_collect_sources(main_files "main.cpp")
   foreach(file IN LISTS main_files)
     file(READ "${file}" contents)
-    _airelinna_assert_no_match(
+    _avb0795_assert_no_match(
       "${file}"
       "${contents}"
       "(^|[^A-Za-z0-9_])(ApplicationState|ReplicaSession|RuntimeEvent|AppCommand|ControllerView|WgcCaptureJob|WindowsRenderStack)([^A-Za-z0-9_]|$)|[.>](tick|start|request_stop|apply|take_latest|drain_signals|enumerate|step|shutdown|create|view_state|next_deadline|exit_disposition|render)[ \t\r\n]*\\(|ImGui::|vk[A-Z][A-Za-z0-9_]*[ \t\r\n]*\\(|GraphicsCapture"
@@ -504,24 +504,24 @@ function(_airelinna_run_source_boundary_scan)
       ${main_files})
   foreach(file IN LISTS all_files)
     file(READ "${file}" contents)
-    file(RELATIVE_PATH feature_relative "${AIRELINNA_SOURCE_ROOT}" "${file}")
+    file(RELATIVE_PATH feature_relative "${AVB0795_SOURCE_ROOT}" "${file}")
     string(REPLACE "\\" "/" feature_relative "${feature_relative}")
     if(NOT feature_relative MATCHES "^platform/windows/features/")
-      _airelinna_assert_no_match(
+      _avb0795_assert_no_match(
         "${file}"
         "${contents}"
         "TaskListThumbnailWnd|MultitaskingViewFrame"
         "browser workaround constants escape their feature module")
       if(NOT feature_relative MATCHES
          "^platform/windows/windows_(replica_runtime|runtime_factory)\\.(hpp|cpp)$")
-        _airelinna_assert_no_match(
+        _avb0795_assert_no_match(
           "${file}"
           "${contents}"
           "platform/windows/features/|(^|[^A-Za-z0-9_])BrowserCaptureKeepAlive([^A-Za-z0-9_]|$)"
           "non-runtime consumer depends on the browser helper module")
       endif()
     endif()
-    _airelinna_assert_no_match(
+    _avb0795_assert_no_match(
       "${file}"
       "${contents}"
       "(^|[^A-Za-z0-9_])(CapturedFrame|RenderFrame|IFrameBridge|IVulkanDriver)([^A-Za-z0-9_]|$)|void[ \t\r\n]*\\*[ \t\r\n]*native_resource|(std::)?shared_ptr[ \t\r\n]*<[ \t\r\n]*void[ \t\r\n]*>"
@@ -530,5 +530,5 @@ function(_airelinna_run_source_boundary_scan)
 endfunction()
 
 if(CMAKE_SCRIPT_MODE_FILE)
-  _airelinna_run_source_boundary_scan()
+  _avb0795_run_source_boundary_scan()
 endif()

@@ -1,17 +1,17 @@
 /// @file
 /// @brief Feature-local helper visibility transactions and retirement policy.
 
-#ifndef AIRELINNA_PLATFORM_WINDOWS_FEATURES_DETAIL_BROWSER_CAPTURE_KEEP_ALIVE_POLICY_HPP
-#define AIRELINNA_PLATFORM_WINDOWS_FEATURES_DETAIL_BROWSER_CAPTURE_KEEP_ALIVE_POLICY_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_FEATURES_DETAIL_BROWSER_CAPTURE_KEEP_ALIVE_POLICY_HPP
+#define AVB0795_PLATFORM_WINDOWS_FEATURES_DETAIL_BROWSER_CAPTURE_KEEP_ALIVE_POLICY_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <chrono>
 #include <concepts>
 #include <expected>
 #include <optional>
 
-namespace airelinna::platform::windows::features::detail {
+namespace avb::platform::windows::features::detail {
 
   using Clock = std::chrono::steady_clock;
   inline constexpr auto helper_retirement_grace = std::chrono::milliseconds{250};
@@ -133,6 +133,6 @@ namespace airelinna::platform::windows::features::detail {
             .ownership_uncertain = !class_released};
   }
 
-}    // namespace airelinna::platform::windows::features::detail
+}    // namespace avb::platform::windows::features::detail
 
 #endif

@@ -1,8 +1,8 @@
 /// @file Static user and diagnostic labels for the portable error taxonomy.
 /// Keeping text here lets no-throw runtime events carry only fixed-size AppError values.
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
-namespace airelinna::core {
+namespace avb::core {
 
   std::string_view AppError::user_message() const noexcept
   {
@@ -80,4 +80,4 @@ namespace airelinna::core {
     return "unknown_application_error";
   }
 
-}    // namespace airelinna::core
+}    // namespace avb::core

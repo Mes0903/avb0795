@@ -1,5 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Airelinna project
+From: avb0795 project
 Subject: [PATCH] ALTERED SOURCE: omit CS_OWNDC from the main Win32 class
 
 This patch intentionally changes only GLFW's main Win32 window class. The

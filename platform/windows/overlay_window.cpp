@@ -13,7 +13,7 @@
 #include <optional>
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
   namespace {
 
     [[nodiscard]] constexpr core::AppError overlay_error(
@@ -81,7 +81,7 @@ namespace airelinna::platform::windows {
                                      : GLFW_FALSE);
     auto *const window = glfwCreateWindow(static_cast<int>(initial_extent.width),
                                           static_cast<int>(initial_extent.height),
-                                          "Airelinna Replica", nullptr, nullptr);
+                                          "avb0795 Replica", nullptr, nullptr);
     if (window == nullptr) {
       const char *description{};
       const auto native_detail = glfwGetError(&description);
@@ -208,4 +208,4 @@ namespace airelinna::platform::windows {
     return implementation_ ? implementation_->window : nullptr;
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows

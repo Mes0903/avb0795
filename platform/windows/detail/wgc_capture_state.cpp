@@ -9,7 +9,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace airelinna::platform::windows::detail {
+namespace avb::platform::windows::detail {
 
   namespace {
 
@@ -401,4 +401,4 @@ namespace airelinna::platform::windows::detail {
     }
   }
 
-}    // namespace airelinna::platform::windows::detail
+}    // namespace avb::platform::windows::detail

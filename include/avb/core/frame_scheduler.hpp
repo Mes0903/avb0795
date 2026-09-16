@@ -1,13 +1,13 @@
 /// @file Clock-driven frame admission without sleeps or catch-up rendering.
-#ifndef AIRELINNA_CORE_FRAME_SCHEDULER_HPP
-#define AIRELINNA_CORE_FRAME_SCHEDULER_HPP
+#ifndef AVB0795_CORE_FRAME_SCHEDULER_HPP
+#define AVB0795_CORE_FRAME_SCHEDULER_HPP
 
-#include "airelinna/core/types.hpp"
+#include "avb/core/types.hpp"
 
 #include <chrono>
 #include <optional>
 
-namespace airelinna::core {
+namespace avb::core {
 
   /// One polling decision; next_wake is present only for deferred pending work.
   struct FrameSchedule {
@@ -37,6 +37,6 @@ namespace airelinna::core {
     bool pending_work_{};
   };
 
-}    // namespace airelinna::core
+}    // namespace avb::core
 
-#endif    // AIRELINNA_CORE_FRAME_SCHEDULER_HPP
+#endif    // AVB0795_CORE_FRAME_SCHEDULER_HPP

@@ -9,7 +9,7 @@
 #include <new>
 #include <utility>
 
-namespace airelinna::platform::windows {
+namespace avb::platform::windows {
 
   // The lease keeps observation_ valid; shared wake state independently tracks host use.
   class WindowsCaptureSource::Impl final {
@@ -141,4 +141,4 @@ namespace airelinna::platform::windows {
     return implementation_->item();
   }
 
-}    // namespace airelinna::platform::windows
+}    // namespace avb::platform::windows
