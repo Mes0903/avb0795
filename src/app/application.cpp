@@ -1,27 +1,35 @@
-/// @file Main-thread use-case sequencing and the published-runtime ownership firewall.
+/// @file
+/// @brief Main-thread use-case sequencing and the published-runtime ownership firewall.
 #include "avb/app/application.hpp"
 
 #include "avb/app/app_command_queue.hpp"
+#include "avb/app/localized_presentation.hpp"
 #include "avb/app/ports.hpp"
+#include "avb/i18n/catalog.hpp"
 
 #include <algorithm>
+#include <array>
 #include <utility>
 #include <variant>
 
 namespace avb::app {
 
+  namespace {
+    constexpr auto source_refresh_interval = std::chrono::seconds{5};
+  }
+
   Application::Application(
-    AppCommandQueue &commands, ISourceCatalog &source_catalog, IReplicaRuntimeFactory &runtime_factory, IGlobalHotkey &global_hotkey, ConfigStore &config_store, std::filesystem::path config_path, core::PlatformCapabilities capabilities, core::CaptureExclusionStatus controller_exclusion)
-      : commands_{commands}, source_catalog_{source_catalog}, runtime_factory_{runtime_factory}, global_hotkey_{global_hotkey}, config_store_{config_store}, config_path_{std::move(config_path)}, capabilities_{capabilities}, controller_exclusion_{controller_exclusion}
+    AppCommandQueue &commands, ISourceCatalog &source_catalog, IReplicaRuntimeFactory &runtime_factory, IGlobalHotkey &global_hotkey, ConfigStore &config_store, std::filesystem::path config_path, core::PlatformCapabilities capabilities, core::CaptureExclusionStatus controller_exclusion, SystemLanguageQuery system_language_query, const std::filesystem::path &legacy_config_path)
+      : commands_{commands}, source_catalog_{source_catalog}, runtime_factory_{runtime_factory}, global_hotkey_{global_hotkey}, config_store_{config_store}, config_path_{std::move(config_path)}, system_language_query_{std::move(system_language_query)}, capabilities_{capabilities}, controller_exclusion_{controller_exclusion}
   {
-    initialize();
+    initialize(legacy_config_path);
   }
 
   Application::~Application() = default;
 
-  void Application::initialize()
+  void Application::initialize(const std::filesystem::path &legacy_config_path)
   {
-    const auto loaded = config_store_.load(config_path_);
+    const auto loaded = config_store_.load(config_path_, legacy_config_path);
     if (loaded) {
       config_ = *loaded;
     }
@@ -30,12 +38,18 @@ namespace avb::app {
       set_notice(NoticeOperation::ConfigRead, loaded.error());
     }
 
-    // Only persisted preferences seed the session; mode starts Editable and no
-    // source is auto-selected or captured during application initialization.
+    refresh_language();
+
+    // Seed general settings without selecting a source or starting capture. An
+    // unavailable pass-through capability changes only this session's effective
+    // mode; the saved user preference remains available for a supported platform.
     const auto session_id = state_.current_session_id();
+    (void) state_.set_mode(session_id, capabilities_.pass_through
+      ? config_.mode : core::OverlayMode::Editable);
     (void) state_.set_fps(session_id, config_.fps_cap);
     (void) state_.set_border(session_id, config_.border);
     (void) state_.set_extensions(session_id, config_.extensions);
+    (void) state_.set_opacity(session_id, config_.opacity_percent);
 
     refresh_sources();
 
@@ -87,6 +101,7 @@ namespace avb::app {
       }
 
       if (exit_disposition_ != core::ExitDisposition::AbandonProcess) {
+        update_source_refresh(now);
         rebuild_view();
       }
     } catch (...) {
@@ -106,13 +121,14 @@ namespace avb::app {
   {
     // A stop/replacement requested after tick must override that old runtime's
     // empty or distant deadline, otherwise a headless drain could stop advancing.
-    if (runtime_deadline_ && immediate_deadline_) {
-      return (std::min) (*runtime_deadline_, *immediate_deadline_);
+    auto earliest = runtime_deadline_;
+    for (const auto &candidate :
+         std::array{immediate_deadline_, source_refresh_deadline_}) {
+      if (candidate && (!earliest || *candidate < *earliest)) {
+        earliest = candidate;
+      }
     }
-    if (immediate_deadline_) {
-      return immediate_deadline_;
-    }
-    return runtime_deadline_;
+    return earliest;
   }
 
   core::ExitDisposition Application::exit_disposition() const noexcept
@@ -134,7 +150,12 @@ namespace avb::app {
     view_state_ = build_controller_view(
       state_, state_.current_session_id(), sources_, capabilities_, config_,
       hotkey_binding_confirmed_, controller_exclusion_, runtime_feedback_,
-      runtime_ != nullptr, stop_requested_, notice);
+      runtime_ != nullptr, stop_requested_, notice, effective_language_,
+      !quit_intent_ &&
+        exit_disposition_ == core::ExitDisposition::Continue);
+    view_state_.auto_refresh_enabled = config_.auto_refresh_enabled;
+    view_state_.auto_refresh_paused =
+      config_.auto_refresh_enabled && !automatic_refresh_allowed();
   }
 
   void Application::process_command(const AppCommand &command,
@@ -144,7 +165,19 @@ namespace avb::app {
       [this, now](const auto &value) { handle(value, now); }, command);
   }
 
-  void Application::handle(const RefreshSources &, Clock::time_point)
+  void Application::handle(const SetAutoRefresh &command, Clock::time_point)
+  {
+    if (config_.auto_refresh_enabled != command.enabled) {
+      config_.auto_refresh_enabled = command.enabled;
+      source_refresh_deadline_.reset();
+      config_dirty_ = true;
+    }
+    if (config_dirty_) {
+      persist_config();
+    }
+  }
+
+  void Application::handle(const RefreshSources &, Clock::time_point now)
   {
     const auto lifecycle = state_.current_session().lifecycle();
     // Catalog refresh may retire native source observations, so even an Error
@@ -157,6 +190,9 @@ namespace avb::app {
     }
     refresh_sources();
     clear_notice(NoticeOperation::Command);
+    if (config_.auto_refresh_enabled) {
+      source_refresh_deadline_ = now + source_refresh_interval;
+    }
   }
 
   void Application::handle(const SelectSource &command, Clock::time_point)
@@ -182,6 +218,7 @@ namespace avb::app {
       reject(selected.error());
       return;
     }
+    invalidate_region_interaction();
     clear_notice(NoticeOperation::Command);
   }
 
@@ -216,6 +253,7 @@ namespace avb::app {
         return;
       }
       stop_requested_ = true;
+      invalidate_region_interaction();
       runtime_->request_stop();
       clear_notice(NoticeOperation::Command);
       return;
@@ -259,6 +297,9 @@ namespace avb::app {
     pending_start_.reset();
     request_stop(false, now, false);
     clear_notice(NoticeOperation::Command);
+    if (config_dirty_) {
+      persist_config();
+    }
   }
 
   void Application::handle(const SetMode &command, Clock::time_point now)
@@ -267,6 +308,12 @@ namespace avb::app {
         (command.mode == core::OverlayMode::PassThrough &&
          !capabilities_.pass_through)) {
       reject();
+      return;
+    }
+
+    if (command.mode != core::OverlayMode::Editable &&
+        command.mode != core::OverlayMode::PassThrough) {
+      reject(core::AppError{core::AppErrorCode::InvalidValue});
       return;
     }
 
@@ -280,7 +327,14 @@ namespace avb::app {
       reject(updated.error());
       return;
     }
+    if (config_.mode != command.mode) {
+      config_.mode = command.mode;
+      config_dirty_ = true;
+    }
     clear_notice(NoticeOperation::Command);
+    if (config_dirty_) {
+      persist_config();
+    }
   }
 
   void Application::handle(const SetBorder &command, Clock::time_point now)
@@ -331,6 +385,91 @@ namespace avb::app {
     config_dirty_ = true;
     clear_notice(NoticeOperation::Command);
     persist_config();
+  }
+
+  void Application::handle(const SetOpacity &command, Clock::time_point now)
+  {
+    if (!validate_session(command.session_id) || !settings_allowed()) {
+      reject();
+      return;
+    }
+    if (command.percent < 0 || command.percent > 100) {
+      reject(core::AppError{core::AppErrorCode::InvalidValue});
+      return;
+    }
+
+    if (command.commit) {
+      // Deactivation flushes accepted state, even when the last preview failed.
+      // Reapplying percent here would turn a rejected preview into another edit.
+      clear_notice(NoticeOperation::Command);
+      if (config_dirty_) {
+        persist_config();
+      }
+      return;
+    }
+
+    auto candidate = state_.current_session().settings();
+    if (candidate.opacity_percent == command.percent) {
+      clear_notice(NoticeOperation::Command);
+      return;
+    }
+    candidate.opacity_percent = command.percent;
+    if (!apply_settings(candidate, now)) {
+      return;
+    }
+    const auto updated = state_.set_opacity(command.session_id, command.percent);
+    if (!updated) {
+      reject(updated.error());
+      return;
+    }
+    config_.opacity_percent = command.percent;
+    config_dirty_ = true;
+    clear_notice(NoticeOperation::Command);
+  }
+
+  void Application::handle(const SetRegion &command, Clock::time_point now)
+  {
+    if (!validate_session(command.session_id) || !source_matches(command.source_id) ||
+        !region_allowed()) {
+      reject();
+      return;
+    }
+    if (command.region && !core::valid_region(*command.region, *runtime_feedback_.content_extent)) {
+      reject(core::AppError{core::AppErrorCode::InvalidValue});
+      return;
+    }
+    auto candidate = state_.current_session().settings();
+    candidate.region = command.region;
+    candidate.selecting_region = false;
+    if (!apply_settings(candidate, now)) {
+      return;
+    }
+    (void) state_.set_region(command.session_id, candidate.region);
+    (void) state_.set_region_selection(command.session_id, false);
+    clear_notice(NoticeOperation::Command);
+  }
+
+  void Application::handle(const SetRegionSelection &command, Clock::time_point now)
+  {
+    if (!validate_session(command.session_id) || !source_matches(command.source_id) ||
+        (command.active ? !region_allowed() : (!runtime_ || !settings_allowed()))) {
+      reject();
+      return;
+    }
+    auto candidate = state_.current_session().settings();
+    if (candidate.selecting_region == command.active) {
+      clear_notice(NoticeOperation::Command);
+      return;
+    }
+    candidate.selecting_region = command.active;
+    if (!apply_settings(candidate, now)) {
+      return;
+    }
+    (void) state_.set_region_selection(command.session_id, command.active);
+    clear_notice(NoticeOperation::Command);
+    if (command.active && config_dirty_) {
+      persist_config();
+    }
   }
 
   void Application::handle(const SetExtensions &command, Clock::time_point now)
@@ -408,8 +547,19 @@ namespace avb::app {
     if (!apply_settings(candidate, now)) {
       return;
     }
-    (void) state_.set_mode(state_.current_session_id(),
-                           core::OverlayMode::Editable);
+    const auto updated = state_.set_mode(state_.current_session_id(),
+                                         core::OverlayMode::Editable);
+    if (!updated) {
+      reject(updated.error());
+      return;
+    }
+    if (config_.mode != core::OverlayMode::Editable) {
+      config_.mode = core::OverlayMode::Editable;
+      config_dirty_ = true;
+    }
+    if (config_dirty_) {
+      persist_config();
+    }
   }
 
   void Application::handle(const Quit &, Clock::time_point now)
@@ -461,6 +611,26 @@ namespace avb::app {
     return lifecycle == core::SessionLifecycle::Interrupted;
   }
 
+  bool Application::region_allowed() const noexcept
+  {
+    return runtime_ && !stop_requested_ &&
+      state_.current_session().lifecycle() == core::SessionLifecycle::Capturing &&
+      state_.current_session().selected_source() && runtime_feedback_.content_extent &&
+      runtime_feedback_.content_extent->width > 0 && runtime_feedback_.content_extent->height > 0;
+  }
+
+  bool Application::source_matches(const core::SourceId &source_id) const noexcept
+  {
+    const auto &source = state_.current_session().selected_source();
+    return source && source->id == source_id;
+  }
+
+  void Application::invalidate_region_interaction() noexcept
+  {
+    runtime_feedback_.content_extent.reset();
+    (void) state_.set_region_selection(state_.current_session_id(), false);
+  }
+
   bool Application::apply_settings(const core::ReplicaSettings &candidate,
                                    Clock::time_point now) noexcept
   {
@@ -481,6 +651,8 @@ namespace avb::app {
       pending_start_.reset();
       (void) state_.mark_error(state_.current_session_id());
       request_stop(true, now, false);
+      // Region results may apply after this step's runtime tick has finished.
+      request_immediate(now);
     }
     else {
       set_notice(NoticeOperation::Settings, applied.error());
@@ -506,6 +678,7 @@ namespace avb::app {
     }
     clear_notice(NoticeOperation::Command);
 
+    invalidate_region_interaction();
     auto created =
       runtime_factory_.create(*session.selected_source(), session.settings());
     if (!created || !*created) {
@@ -551,9 +724,35 @@ namespace avb::app {
       }
     }
     stop_requested_ = true;
+    invalidate_region_interaction();
     runtime_->request_stop();
     if (after_runtime_tick) {
       request_immediate(now);
+    }
+  }
+
+  bool Application::automatic_refresh_allowed() const noexcept
+  {
+    const auto &session = state_.current_session();
+    return !runtime_ && !stop_requested_ && !quit_intent_ &&
+      exit_disposition_ == core::ExitDisposition::Continue &&
+      !session.selected_source() &&
+      (session.lifecycle() == core::SessionLifecycle::Idle ||
+       session.lifecycle() == core::SessionLifecycle::Error);
+  }
+
+  void Application::update_source_refresh(Clock::time_point now)
+  {
+    if (!config_.auto_refresh_enabled || !automatic_refresh_allowed()) {
+      source_refresh_deadline_.reset();
+      return;
+    }
+    if (source_refresh_deadline_ && now >= *source_refresh_deadline_) {
+      refresh_sources();
+      // Failure retains the prior snapshot and gets the same bounded retry pace.
+      source_refresh_deadline_ = now + source_refresh_interval;
+    } else if (!source_refresh_deadline_) {
+      source_refresh_deadline_ = now + source_refresh_interval;
     }
   }
 
@@ -575,6 +774,7 @@ namespace avb::app {
       else {
         (void) state_.select_source(state_.current_session_id(), *found);
       }
+      invalidate_region_interaction();
     }
     // Publish only a successful refresh; an enumeration error keeps the previous
     // portable snapshot, while missing IDs in a successful refresh clear selection.
@@ -605,6 +805,8 @@ namespace avb::app {
     bool recovery_started{};
     bool recovered{};
     bool stopped{};
+    std::optional<core::Extent> content_extent;
+    std::optional<RegionSelectionCompleted> selection_result;
 
     // First collect lifecycle candidates and apply every status edge. Runtime
     // slot order must not decide which portable lifecycle transition wins.
@@ -641,6 +843,12 @@ namespace avb::app {
       }
       else if (const auto *failed = std::get_if<Failed>(&*event)) {
         failure = failed->error;
+      }
+      else if (const auto *content = std::get_if<CaptureContentChanged>(&*event)) {
+        content_extent = content->extent;
+      }
+      else if (const auto *selection = std::get_if<RegionSelectionCompleted>(&*event)) {
+        selection_result = *selection;
       }
     }
 
@@ -682,16 +890,58 @@ namespace avb::app {
       return;
     }
     if (source_lost) {
+      invalidate_region_interaction();
       (void) state_.mark_interrupted(state_.current_session_id());
       return;
     }
     // Both facts can occur in one tick; preserve their causal order instead of
     // ranking completion below start and leaving the session stuck recovering.
     if (recovery_started) {
+      invalidate_region_interaction();
       (void) state_.begin_graphics_recovery(state_.current_session_id());
     }
     if (recovered) {
+      invalidate_region_interaction();
       (void) state_.complete_graphics_recovery(state_.current_session_id());
+    }
+    if (recovery_started || recovered ||
+        state_.current_session().lifecycle() != core::SessionLifecycle::Capturing) {
+      return;
+    }
+
+    if (content_extent) {
+      const bool changed = runtime_feedback_.content_extent != content_extent;
+      if (content_extent->width == 0 || content_extent->height == 0) {
+        invalidate_region_interaction();
+        return;
+      }
+      runtime_feedback_.content_extent = *content_extent;
+      if (changed) {
+        // A new presented size supersedes any drag computed using the old size.
+        selection_result.reset();
+        (void) state_.set_region_selection(state_.current_session_id(), false);
+        auto candidate = state_.current_session().settings();
+        if (candidate.region) {
+          candidate.region = core::intersect_region(*candidate.region, *content_extent);
+        }
+        if (candidate != state_.current_session().settings() && apply_settings(candidate, now)) {
+          (void) state_.set_region(state_.current_session_id(), candidate.region);
+          (void) state_.set_region_selection(state_.current_session_id(), false);
+          request_immediate(now);
+        }
+      }
+    }
+    const auto &session = state_.current_session();
+    if (selection_result && session.settings().selecting_region && session.selected_source()) {
+      if (selection_result->region) {
+        handle(SetRegion{state_.current_session_id(), session.selected_source()->id,
+                         selection_result->region}, now);
+      } else {
+        handle(SetRegionSelection{state_.current_session_id(), session.selected_source()->id,
+                                  false}, now);
+      }
+      // Applying the result can dirty a retained frame after next_wake was sampled.
+      request_immediate(now);
     }
   }
 
@@ -718,6 +968,7 @@ namespace avb::app {
       replacement.set_border(pending.settings.border);
       replacement.set_fps(pending.settings.fps_cap);
       replacement.set_extensions(pending.settings.extensions);
+      replacement.set_opacity(pending.settings.opacity_percent);
       // Generation replacement invalidates commands queued from the old view.
       const auto replaced = state_.replace_session(std::move(replacement));
       if (!replaced) {
@@ -755,6 +1006,7 @@ namespace avb::app {
   void Application::reset_runtime_feedback() noexcept
   {
     runtime_feedback_ = RuntimeFeedback{};
+    (void) state_.set_region_selection(state_.current_session_id(), false);
   }
 
   void Application::begin_shutdown(Clock::time_point now) noexcept
@@ -765,7 +1017,14 @@ namespace avb::app {
     }
 
     quit_intent_ = true;
+    invalidate_region_interaction();
+    view_state_.content_extent.reset();
+    view_state_.settings.selecting_region = false;
+    view_state_.controls.region.enabled = false;
+    view_state_.controls.cancel_region_selection.enabled = false;
     pending_start_.reset();
+    source_refresh_deadline_.reset();
+    view_state_.controls.auto_refresh.enabled = false;
     commands_.close();
     global_hotkey_.clear();
     hotkey_binding_confirmed_ = false;
@@ -777,8 +1036,13 @@ namespace avb::app {
       const auto error =
         core::AppError{core::AppErrorCode::ConfigWriteFailure};
       set_notice(NoticeOperation::Shutdown, error);
-      view_state_.application_notice_text = error.user_message();
+      view_state_.application_notice_text =
+        error_text(error.code, view_state_.effective_language);
     }
+    view_state_.controls.language = {
+      false,
+      i18n::text(i18n::TextId::LanguageChangesClosed,
+                 view_state_.effective_language)};
 
     request_immediate(now);
 
@@ -813,6 +1077,13 @@ namespace avb::app {
     global_hotkey_.clear();
     hotkey_binding_confirmed_ = false;
     quit_intent_ = true;
+    invalidate_region_interaction();
+    view_state_.content_extent.reset();
+    view_state_.settings.selecting_region = false;
+    view_state_.controls.region.enabled = false;
+    view_state_.controls.cancel_region_selection.enabled = false;
+    source_refresh_deadline_.reset();
+    view_state_.controls.auto_refresh.enabled = false;
     pending_start_.reset();
     if (runtime_ && !stop_requested_) {
       stop_requested_ = true;
@@ -822,8 +1093,12 @@ namespace avb::app {
                core::AppError{core::AppErrorCode::PlatformOperationFailure});
     view_state_.hotkey_binding_confirmed = false;
     view_state_.application_notice_text =
-      core::AppError{core::AppErrorCode::PlatformOperationFailure}
-        .user_message();
+      error_text(core::AppErrorCode::PlatformOperationFailure,
+                 view_state_.effective_language);
+    view_state_.controls.language = {
+      false,
+      i18n::text(i18n::TextId::LanguageChangesClosed,
+                 view_state_.effective_language)};
     exit_disposition_ = core::ExitDisposition::AbandonProcess;
   }
 

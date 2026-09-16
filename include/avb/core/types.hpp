@@ -187,8 +187,6 @@ namespace avb::core {
       return app_error_retryable(code);
     }
 
-    /// Borrow a static user-facing explanation; no native/source text is included.
-    [[nodiscard]] std::string_view user_message() const noexcept;
     /// @brief Borrow a program-lifetime diagnostic label suitable for structured logging.
     /// Labels are untranslated and exclude native_detail; unknown codes use a
     /// stable fallback rather than allocating a message.

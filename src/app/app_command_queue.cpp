@@ -1,4 +1,5 @@
-/// @file Main-thread FIFO transfer; commands retain ordering and owning value payloads.
+/// @file
+/// @brief Main-thread FIFO transfer; commands retain ordering and owning value payloads.
 #include "avb/app/app_command_queue.hpp"
 
 #include <utility>

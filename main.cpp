@@ -13,6 +13,7 @@
 #include "platform/windows/windows_runtime_factory.hpp"
 #include "platform/windows/windows_source_catalog.hpp"
 #include "platform/windows/windows_source_registry.hpp"
+#include "platform/windows/windows_ui_language.hpp"
 
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
@@ -89,7 +90,7 @@ namespace {
 
       auto executable =
         std::filesystem::path{path.data(), path.data() + length};
-      return executable.parent_path() / L"airelinna.json";
+      return executable.parent_path() / L"avb0795.config";
     } catch (...) {
       return std::unexpected{avb::core::AppError{
         avb::core::AppErrorCode::RuntimeConstructionFailure}};
@@ -160,6 +161,8 @@ namespace {
       *config_path,
       windows_capabilities,
       host.controller_exclusion(),
+      platform::windows::windows_ui_language,
+      config_path->parent_path() / L"airelinna.json",
     };
 
     const auto result = host.run(application);
