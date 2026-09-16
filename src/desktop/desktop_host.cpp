@@ -336,13 +336,23 @@ namespace avb::desktop {
     /// Create context and both backends, attach the borrowed static font data,
     /// then disable backend texture uploads that would bypass host-owned fences.
     void initialize_imgui();
+    /// Initialize only the renderer backend for the current swapchain image count.
+    /// Context, GLFW input callbacks and the host-owned font image stay separate.
+    void initialize_imgui_vulkan();
+    /// Remove the font descriptor and renderer backend after their users retire.
+    /// Also handles a backend whose construction published only a partial prefix.
+    void shutdown_imgui_vulkan() noexcept;
     /// Bake fixed glyph coverage and create upload/image/descriptor resources.
     /// The first ordinary controller submission uploads the atlas under its fence.
     void create_font_texture();
+    /// Bind the retained atlas image to the current backend's descriptor layout.
+    void bind_font_texture();
 
     /// Build fixed-capacity owners before admitting native work; a partial prefix
     /// remains attached to the host for its existing startup cleanup.
-    void create_frame_resources();
+    void create_frame_resources(std::size_t capacity);
+    /// Destroy permanent records after all their active uses have retired.
+    void destroy_frame_resources() noexcept;
     /// Allocate one command buffer and unsignaled acquire/submission sync.
     [[nodiscard]] std::expected<FrameRecord, core::AppError>
     create_frame_record();
@@ -386,6 +396,9 @@ namespace avb::desktop {
     /// Use bounded 0/100/500 ms construction attempts after active image use
     /// allows replacement; construction alone does not reset the retry budget.
     void progress_recreation(std::chrono::steady_clock::time_point now);
+    /// Keep UI/proof progress live while a changed image count closes admission;
+    /// rebuild the backend and pools once every old frame/present/font user retires.
+    void progress_backend_capacity(std::chrono::steady_clock::time_point now);
     /// Destroy retired WSI only after image-use and presentation ownership clears.
     void progress_retired_swapchains();
     /// Release one proven-unused acquired image through the enabled maintenance1 API.
@@ -585,7 +598,7 @@ namespace avb::desktop {
         throw created.error();
       }
       initialize_imgui();
-      create_frame_resources();
+      create_frame_resources(backend_frame_capacity_);
       create_font_texture();
       glfwSetWindowUserPointer(window_, this);
       glfwSetWindowCloseCallback(window_, window_close_callback);
@@ -1540,7 +1553,15 @@ namespace avb::desktop {
     }
     imgui_glfw_initialized_ = true;
 
+    initialize_imgui_vulkan();
     backend_frame_capacity_ = active_swapchain_->images.size();
+  }
+
+  void DesktopHost::Impl::initialize_imgui_vulkan()
+  {
+    if (!active_swapchain_) {
+      throw graphics_error(core::AppErrorCode::RuntimeConstructionFailure);
+    }
     imgui_format_ = active_swapchain_->format;
     ImGui_ImplVulkan_InitInfo init_info{};
     init_info.ApiVersion = VK_API_VERSION_1_3;
@@ -1552,7 +1573,7 @@ namespace avb::desktop {
     init_info.DescriptorPool = descriptor_pool_;
     init_info.MinImageCount = active_swapchain_->minimum_image_count;
     init_info.ImageCount =
-      static_cast<std::uint32_t>(backend_frame_capacity_);
+      static_cast<std::uint32_t>(active_swapchain_->images.size());
     init_info.PipelineInfoMain.RenderPass = active_swapchain_->render_pass;
     init_info.PipelineInfoMain.Subpass = 0;
     init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -1578,6 +1599,22 @@ namespace avb::desktop {
     // avb0795 keeps texture work on its classified, fence-owned submission
     // path instead, so the backend must never process ImDrawData::Textures.
     ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_RendererHasTextures;
+  }
+
+  void DesktopHost::Impl::shutdown_imgui_vulkan() noexcept
+  {
+    if (!imgui_vulkan_initialized_) return;
+    if (font_texture_.descriptor != VK_NULL_HANDLE) {
+      if (auto *const texture_data = ImGui::GetIO().Fonts->TexData;
+          texture_data != nullptr) {
+        texture_data->SetTexID(ImTextureID_Invalid);
+        texture_data->BackendUserData = nullptr;
+      }
+      ImGui_ImplVulkan_RemoveTexture(font_texture_.descriptor);
+      font_texture_.descriptor = VK_NULL_HANDLE;
+    }
+    ImGui_ImplVulkan_Shutdown();
+    imgui_vulkan_initialized_ = false;
   }
 
   std::optional<std::uint32_t> DesktopHost::Impl::memory_type(
@@ -1788,6 +1825,12 @@ namespace avb::desktop {
                          result);
     }
 
+    bind_font_texture();
+    font_texture_.upload_pending = true;
+  }
+
+  void DesktopHost::Impl::bind_font_texture()
+  {
     font_texture_.descriptor = ImGui_ImplVulkan_AddTexture(
       font_texture_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (font_texture_.descriptor == VK_NULL_HANDLE) {
@@ -1803,15 +1846,14 @@ namespace avb::desktop {
       reinterpret_cast<ImTextureID>(font_texture_.descriptor));
     texture_data->SetStatus(ImTextureStatus_OK);
     texture_data->BackendUserData = nullptr;
-    font_texture_.upload_pending = true;
   }
 
-  void DesktopHost::Impl::create_frame_resources()
+  void DesktopHost::Impl::create_frame_resources(const std::size_t capacity)
   {
     // Resize before native creation: vector allocation cannot orphan a returned
     // plain handle record, and every successfully built prefix stays owned.
-    frames_.resize(backend_frame_capacity_);
-    presents_.resize(backend_frame_capacity_);
+    frames_.resize(capacity);
+    presents_.resize(capacity);
     for (auto &record : frames_) {
       auto created = create_frame_record();
       if (!created) throw created.error();
@@ -1822,6 +1864,19 @@ namespace avb::desktop {
       if (!created) throw created.error();
       record = *created;
     }
+  }
+
+  void DesktopHost::Impl::destroy_frame_resources() noexcept
+  {
+    for (auto &record : frames_) {
+      destroy_frame_record(record);
+    }
+    frames_.clear();
+    for (auto &record : presents_) {
+      destroy_present_record(record);
+    }
+    presents_.clear();
+    // The owner-wide present serial survives pool storage replacement.
   }
 
   std::expected<DesktopHost::Impl::FrameRecord, core::AppError>
@@ -2148,7 +2203,8 @@ namespace avb::desktop {
     ImDrawData &draw_data, const std::chrono::steady_clock::time_point now)
   {
     if (stopping_controller_ || swapchain_recreate_pending_ ||
-        !active_swapchain_ || zero_extent(active_swapchain_->extent)) {
+        !active_swapchain_ || zero_extent(active_swapchain_->extent) ||
+        active_swapchain_->images.size() != backend_frame_capacity_) {
       return;
     }
     // ImGui rotates by RenderDrawData call count, independently of record index.
@@ -2719,6 +2775,43 @@ namespace avb::desktop {
         render::strictly_future_retry_delay(*next_retry_after));
   }
 
+  void DesktopHost::Impl::progress_backend_capacity(
+    const std::chrono::steady_clock::time_point now)
+  {
+    if (stopping_controller_ || fatal_kind_ != FatalKind::None ||
+        swapchain_recreate_pending_ || !active_swapchain_) {
+      return;
+    }
+    const auto capacity = active_swapchain_->images.size();
+    if (capacity == backend_frame_capacity_) return;
+    if (unsafe_controller_work()) {
+      // Keep the old backend available to NewFrame while independent frame and
+      // presentation proof polling closes every old native use.
+      schedule_poll(now, false);
+      return;
+    }
+
+    shutdown_imgui_vulkan();
+    destroy_frame_resources();
+    // The pinned backend leaves its two sampler descriptor sets in an external
+    // pool at Shutdown. All descriptor users are now proven complete, so reclaim
+    // those sets together before creating the replacement renderer backend.
+    const auto reset = vkResetDescriptorPool(device_, descriptor_pool_, 0);
+    if (reset != VK_SUCCESS) {
+      enter_fatal(reset == VK_ERROR_DEVICE_LOST ? FatalKind::DeviceLost
+                                               : FatalKind::Terminal,
+                  vulkan_error(core::AppErrorCode::RuntimeStateLost, reset));
+      return;
+    }
+    initialize_imgui_vulkan();
+    create_frame_resources(capacity);
+    bind_font_texture();
+    // Publish admission only after the backend, bounded pools and font binding
+    // agree. Font image/upload state and the ImGui context remain host-owned.
+    backend_frame_capacity_ = capacity;
+    made_progress_ = true;
+  }
+
   void DesktopHost::Impl::progress(
     const std::chrono::steady_clock::time_point now, const bool draining)
   {
@@ -2754,6 +2847,7 @@ namespace avb::desktop {
     }
 
     progress_recreation(now);
+    progress_backend_capacity(now);
     if (made_progress_) {
       note_progress(now);
     }
@@ -3155,19 +3249,7 @@ namespace avb::desktop {
       glfwSetWindowIconifyCallback(window_, previous_iconify_callback_);
       display_callbacks_installed_ = false;
     }
-    if (imgui_vulkan_initialized_) {
-      if (font_texture_.descriptor != VK_NULL_HANDLE) {
-        if (auto *const texture_data = ImGui::GetIO().Fonts->TexData;
-            texture_data != nullptr) {
-          texture_data->SetTexID(ImTextureID_Invalid);
-          texture_data->BackendUserData = nullptr;
-        }
-        ImGui_ImplVulkan_RemoveTexture(font_texture_.descriptor);
-        font_texture_.descriptor = VK_NULL_HANDLE;
-      }
-      ImGui_ImplVulkan_Shutdown();
-      imgui_vulkan_initialized_ = false;
-    }
+    shutdown_imgui_vulkan();
     if (imgui_glfw_initialized_) {
       ImGui_ImplGlfw_Shutdown();
       imgui_glfw_initialized_ = false;
@@ -3178,14 +3260,7 @@ namespace avb::desktop {
     }
 
     destroy_font_texture();
-    for (auto &record : frames_) {
-      destroy_frame_record(record);
-    }
-    frames_.clear();
-    for (auto &record : presents_) {
-      destroy_present_record(record);
-    }
-    presents_.clear();
+    destroy_frame_resources();
     if (active_swapchain_) {
       destroy_swapchain_state(*active_swapchain_);
       active_swapchain_.reset();

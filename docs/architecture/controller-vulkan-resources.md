@@ -71,4 +71,25 @@ Frame retirement 先觀察對應 submission fence，再觀察 acquire fence；co
 
 例外路徑保留其應有的證據與容量。`ReleaseRetained` 保存 acquired image 的 swapchain 關係，直到合法 WSI destruction；完成且仍待消費的 semaphore signal 依 release policy 更換。已證明完成的 ownership 先結算，再呼叫可能失敗的 reset／replacement；錯誤進入既有 fatal containment，其他 pending work 持續沿 drain 處理。
 
-本階段保留啟動時選定的 backend capacity。相同容量的 swapchain resize 保留 frame／present handles；image-count 變更的 backend／pool migration 由下一階段接入。
+## Image count 改變時的容量遷移
+
+```mermaid
+flowchart TD
+  WSI[重建 swapchain / 取得實際 image count] --> Count{容量相同}
+  Count -->|是| Reuse[沿用 backend 與 frame / present pools]
+  Count -->|否| Gate[關閉 graphics admission / 保留 UI 與 proof progress]
+  Gate --> Proof[全部 frame / present / font users 退休]
+  Proof --> Shutdown[失效 font TexID / 移除 descriptor / 關閉 Vulkan backend]
+  Shutdown --> Reset[釋放舊 frame / present pools / reset descriptor pool]
+  Reset --> Build[依新 image count 建立 backend 與 bounded pools]
+  Build --> Font[以原 font image / view 建立 descriptor / 恢復 TexID 與 OK status]
+  Font --> Publish[發布 backend capacity / 恢復 graphics admission]
+```
+
+為了讓 controller 配合實際 swapchain image count，同時保持輸入與 Application 進度，host 在 WSI 重建後核對 `images.size()` 與 `backend_frame_capacity_`。相同容量沿用原有 frame／present handles；容量改變時，UI 繼續使用現有 ImGui context 建立畫面，graphics admission 等待容量遷移完成。
+
+遷移需要所有舊 frame 的 acquire／submission proof、獨立 present proof，以及 font-upload submission proof。`ReleaseRetained` 依原有規則保留容量，直到 acquired image 經 release 或合法 swapchain destruction 退休。這些條件共同保護 ImGui 的 GPU buffers、pipeline、font descriptor 與 host 專用 descriptor pool。
+
+`progress_backend_capacity` 在既有 progress 流程內執行上述步驟，並在所有新資源建妥後發布容量。Backend shutdown 前先移除 atlas descriptor；host 保留 font image、view、upload 狀態與字型資料，再透過 `bind_font_texture` 綁定新 backend。Renderer 的 texture-upload flag 維持由 host 管理的設定。ImGui context 與 GLFW callbacks 持續存在，owner-wide present serial 跨越縮減與擴增，讓新容器辨識先前的使用身分。
+
+Host 在舊使用全數退休後重設專用 descriptor pool，一併回收 pinned backend 留在外部 pool 的 sampler descriptor sets。建構途中已取得的 native prefix 仍由 host 持有；startup cleanup 與 runtime failure firewall 延續既有責任，容量發布維持在完整建構之後。
