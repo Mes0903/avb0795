@@ -1,3 +1,20 @@
+# Language policy and compiled catalogs form a portable, dependency-free owner.
+add_library(avb0795_i18n
+  i18n/catalog.cpp
+  i18n/language.cpp
+)
+
+target_include_directories(avb0795_i18n
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+)
+
+target_compile_features(avb0795_i18n PUBLIC cxx_std_23)
+
+if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+  target_compile_options(avb0795_i18n PRIVATE /utf-8)
+endif()
+
 add_library(avb0795_core
   core/application_state.cpp
   core/frame_scheduler.cpp

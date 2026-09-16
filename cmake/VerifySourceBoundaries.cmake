@@ -110,6 +110,7 @@ endfunction()
 
 function(_avb0795_assert_known_production_targets)
   set(known_targets
+      avb0795_i18n
       avb0795_core
       avb0795_app
       avb0795_ui
@@ -138,6 +139,11 @@ endfunction()
 
 function(avb0795_assert_target_boundaries)
   _avb0795_assert_known_production_targets()
+
+  if(TARGET avb0795_i18n)
+    _avb0795_assert_sources(avb0795_i18n "src/i18n")
+    _avb0795_assert_links(avb0795_i18n)
+  endif()
 
   if(TARGET avb0795_core)
     _avb0795_assert_sources(avb0795_core "src/core")
@@ -327,8 +333,8 @@ function(_avb0795_scan_files category)
     string(TOLOWER "${contents}" lower_contents)
     string(REPLACE "\\" "/" normalized_lower_contents "${lower_contents}")
 
-    if(category STREQUAL "core" OR category STREQUAL "app" OR
-       category STREQUAL "ui")
+    if(category STREQUAL "i18n" OR category STREQUAL "core" OR
+       category STREQUAL "app" OR category STREQUAL "ui")
       _avb0795_assert_no_match(
         "${file}" "${normalized_lower_contents}" "${portable_native_include}"
         "portable source includes a native graphics/platform header")
@@ -342,7 +348,8 @@ function(_avb0795_scan_files category)
         "portable source mentions a native graphics/platform type")
     endif()
 
-    if(category STREQUAL "core" OR category STREQUAL "app")
+    if(category STREQUAL "i18n" OR category STREQUAL "core" OR
+       category STREQUAL "app")
       _avb0795_assert_no_match(
         "${file}"
         "${normalized_lower_contents}"
@@ -350,7 +357,16 @@ function(_avb0795_scan_files category)
         "portable source includes a UI header")
     endif()
 
-    if(category STREQUAL "core")
+    if(category STREQUAL "i18n")
+      foreach(layer app core ui desktop render platform)
+        _avb0795_assert_layer_includes("${file}" "${contents}" "${layer}")
+      endforeach()
+      _avb0795_assert_no_match(
+        "${file}"
+        "${normalized_lower_contents}"
+        "#[ \t]*include[ \t]*[<\"](filesystem|fstream)[>\"]"
+        "language policy includes filesystem I/O")
+    elseif(category STREQUAL "core")
       _avb0795_assert_app_includes("${file}" "${contents}")
       _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
       _avb0795_assert_layer_includes("${file}" "${contents}" "desktop")
@@ -464,6 +480,10 @@ function(_avb0795_run_source_boundary_scan)
   endif()
 
   _avb0795_collect_sources(
+    i18n_files "include/avb/i18n" "src/i18n")
+  _avb0795_scan_files(i18n ${i18n_files})
+
+  _avb0795_collect_sources(
     core_files "include/avb/core" "src/core")
   _avb0795_scan_files(core ${core_files})
 
@@ -495,6 +515,7 @@ function(_avb0795_run_source_boundary_scan)
   endforeach()
 
   set(all_files
+      ${i18n_files}
       ${core_files}
       ${app_files}
       ${ui_files}
