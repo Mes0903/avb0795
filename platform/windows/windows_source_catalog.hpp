@@ -38,14 +38,22 @@ namespace avb::platform::windows {
   [[nodiscard]] core::ColorSupport classify_color_support(
     std::optional<DXGI_COLOR_SPACE_TYPE> color_space) noexcept;
 
-  /// Main-thread discovery adapter borrowing the process-owned source registry.
-  /// Each descriptor is published only after its item's Closed watcher exists.
+  /// @brief Publish selectable descriptions backed by observed native identities.
+  ///
+  /// This main-thread adapter borrows a registry that must outlive it. Each
+  /// descriptor receives an opaque registry ID only after the item's close
+  /// watcher exists. A title or class-name fallback is for display and filtering,
+  /// never a key for resolving the selected source later.
   class WindowsSourceCatalog final : public app::ISourceCatalog {
   public:
     explicit WindowsSourceCatalog(WindowsSourceRegistry &registry) noexcept;
 
-    /// Replace the snapshot transactionally with eligible window/display sources.
-    /// Color support is best effort and does not create continuous monitoring.
+    /// @brief Commit a newly enumerated set of eligible window and display sources.
+    ///
+    /// Active runtime leases prevent refresh. Unusable individual candidates are
+    /// omitted; enumeration failure leaves the refresh uncommitted. Extent and
+    /// color information describe this refresh only and do not establish ongoing
+    /// availability, HDR support, or capture progress for minimized sources.
     [[nodiscard]]
     std::expected<std::vector<core::SourceDescriptor>, core::AppError>
     enumerate() override;

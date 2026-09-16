@@ -167,7 +167,9 @@ function(avb0795_assert_target_boundaries)
       avb0795_windows
       avb0795_core
       avb0795_app
+      avb0795_i18n
       user32
+      comctl32
       d3d11
       dxgi
       windowsapp)
@@ -427,6 +429,27 @@ function(_avb0795_scan_files category)
     elseif(category STREQUAL "windows")
       get_filename_component(file_name "${file}" NAME)
       set(allowed_windows_app_headers avb/app/ports.hpp)
+      set(allowed_windows_desktop_headers)
+      set(allowed_windows_i18n_headers)
+      file(RELATIVE_PATH windows_relative "${AVB0795_SOURCE_ROOT}" "${file}")
+      string(REPLACE "\\" "/" windows_relative "${windows_relative}")
+      if(windows_relative MATCHES
+         "^platform/windows/windows_controller_window\\.(hpp|cpp)$")
+        list(APPEND allowed_windows_desktop_headers
+             desktop/controller_window_interaction.hpp)
+      endif()
+      _avb0795_assert_layer_includes(
+        "${file}" "${contents}" "desktop"
+        ${allowed_windows_desktop_headers})
+      if(windows_relative MATCHES
+         "^platform/windows/windows_ui_language\\.(hpp|cpp)$" OR
+         windows_relative STREQUAL
+         "platform/windows/detail/ui_language_query.hpp")
+        list(APPEND allowed_windows_i18n_headers i18n/language.hpp)
+      endif()
+      _avb0795_assert_layer_includes(
+        "${file}" "${contents}" "i18n"
+        ${allowed_windows_i18n_headers})
       set(is_hotkey_file FALSE)
       if(file_name MATCHES
          "^windows_global_hotkey\\.(c|cc|cpp|cxx|h|hpp)$")
@@ -448,8 +471,8 @@ function(_avb0795_scan_files category)
       _avb0795_assert_no_match(
         "${file}"
         "${contents}"
-        "(avb/)?core/(application_state|replica_session)|(avb/)?(ui|desktop)/"
-        "Windows adapter includes domain state or frontend/desktop code")
+        "(avb/)?core/(application_state|replica_session)|(avb/)?ui/"
+        "Windows adapter includes domain state or frontend code")
       _avb0795_assert_no_match(
         "${file}"
         "${contents}"

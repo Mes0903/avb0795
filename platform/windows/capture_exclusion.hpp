@@ -13,17 +13,23 @@
 
 namespace avb::platform::windows {
 
-  // Applies the strongest capture exclusion supported by the current Windows
-  // compositor. Excluded means Windows accepted the requested affinity; it is
-  // not a guarantee about every third-party capture mechanism.
-  /// Request exclusion only for an owned top-level window on the creating thread.
+  /// @brief Request compositor capture exclusion for an owned top-level window.
+  ///
+  /// The borrowed window must belong to the calling thread and process; identity
+  /// is checked before and after the native call. Excluded means Windows accepted
+  /// the requested affinity, not that every third-party capture path will honor
+  /// it. Unsupported and failed attempts remain reportable status values.
   [[nodiscard]] core::CaptureExclusionStatus
   attempt_capture_exclusion(HWND window) noexcept;
 
-  // Validates the patched GLFW controller class before applying best-effort
-  // capture exclusion. A capture-exclusion failure remains a portable status;
-  // an invalid class is a startup error because Pass-through would be unsafe.
-  /// Validate class compatibility before reporting nonfatal compositor exclusion status.
+  /// @brief Validate the controller window class while preserving capture visibility.
+  ///
+  /// Class styles incompatible with layered input policy are startup errors.
+  /// A valid, newly created controller retains its default capturable affinity
+  /// so screenshots and screen sharing can include its contents. Successful
+  /// validation returns NotAttempted through the existing status channel.
+  /// Window-source eligibility remains a separate catalog policy based on the
+  /// owning process, independent of this controller setup operation.
   [[nodiscard]] std::expected<core::CaptureExclusionStatus, core::AppError>
   prepare_controller_window(HWND window) noexcept;
 

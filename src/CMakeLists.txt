@@ -71,9 +71,11 @@ if(WIN32)
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_atomic_replace.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_captured_frame.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_capture_source.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/windows_controller_window.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_global_hotkey.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_source_catalog.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_source_registry.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/windows_ui_language.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/wgc_capture_job.cpp
   )
 
@@ -87,7 +89,9 @@ if(WIN32)
     PRIVATE
       avb0795_core
       avb0795_app
+      avb0795_i18n
       user32
+      comctl32
       d3d11
       dxgi
       windowsapp

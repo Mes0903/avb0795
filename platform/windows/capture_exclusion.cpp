@@ -122,7 +122,10 @@ namespace avb::platform::windows {
         static_cast<std::int64_t>(class_style)}};
     }
 
-    return attempt_capture_exclusion(window);
+    // Product windows participate in screenshots and screen sharing. Keep the
+    // native class validation above while preserving the new HWND's default
+    // capture policy; this status also keeps exclusion warnings inactive.
+    return core::CaptureExclusionStatus::NotAttempted;
   }
 
 }    // namespace avb::platform::windows

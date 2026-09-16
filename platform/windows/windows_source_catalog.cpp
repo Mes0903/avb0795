@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cstdint>
+#include <format>
 #include <cwctype>
 #include <exception>
 #include <limits>
@@ -282,6 +283,8 @@ namespace avb::platform::windows {
 
     [[nodiscard]] std::wstring window_label(HWND window)
     {
+      // Titles can disappear or change between queries. A class-name fallback
+      // keeps otherwise eligible candidates describable without becoming identity.
       const auto title_length = GetWindowTextLengthW(window);
       if (title_length > 0) {
         std::wstring title(static_cast<std::size_t>(title_length) + 1, L'\0');
@@ -507,6 +510,8 @@ namespace avb::platform::windows {
               .extent = *extent,
               .color_support =
                 classify_color_support(color_reader.for_window(bounds)),
+              .native_handle_text = std::format(
+                "0x{:X}", reinterpret_cast<std::uintptr_t>(window)),
             },
           .observation = std::move(observation),
         });
@@ -583,7 +588,9 @@ namespace avb::platform::windows {
         observations.push_back(std::move(source.observation));
       }
 
-      // Commit exact observations before joining their opaque IDs to the descriptors.
+      // Reserve descriptor storage before commit: after identities become visible,
+      // joining their IDs should not need a new vector allocation. Input order is
+      // the correspondence; labels need not be unique or stable.
       auto ids = refresh->commit(std::move(observations));
       if (!ids) {
         return std::unexpected(ids.error());
