@@ -25,6 +25,8 @@ flowchart LR
 
 目前 graphics dependency configuration 與原生驗證使用 Windows。`avb0795_vulkan_renderer` 擁有獨立的 source／link 邊界，連結 core、Vulkan、GLFW 與 diagnostics。Linux 的 Portal／PipeWire 接入屬於後續平台工作。
 
+Controller 的 frame／present 容量由 `DesktopHost` 的獨立 Vulkan owner 管理，詳見 [Controller Vulkan resources](controller-vulkan-resources.md)。兩個 owners 共用值政策，各自根據完成證據操作自己的 native handles。
+
 ## Device bootstrap 與借用
 
 ```mermaid

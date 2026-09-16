@@ -143,6 +143,7 @@ namespace avb::desktop {
     /// Proof owed by one controller command record, including failed enqueue and
     /// image-release paths. It is independent of presentation retirement.
     enum class FramePhase {
+      Free,
       Ready,
       AcquireProofPending,
       Submitted,
@@ -165,22 +166,22 @@ namespace avb::desktop {
   ///
   /// Frame records prove command/acquire completion; present records independently
   /// prove the presentation engine has released its wait semaphore and swapchain.
-  /// These containers are evidence of outstanding use, not merely reusable frame
-  /// storage. Cleanup may remove an owner only after its relevant proof is met.
+  /// Permanent records keep native storage; active phases identify outstanding
+  /// use. Recycling requires the corresponding independent completion proof.
   /// Domain mutation stays in the application; callbacks emit commands or wakes.
   class DesktopHost::Impl final {
   public:
-    /// Command/acquire/submission ownership for one UI frame. A successful present
-    /// moves its render-finished semaphore into a separate PresentRecord.
+    /// Permanent command/acquire resources and the current UI frame's ownership.
+    /// Present resources are borrowed by identity until presentation takes over.
     struct FrameRecord final {
       VkCommandBuffer command_buffer{VK_NULL_HANDLE};
       VkFence acquire_fence{VK_NULL_HANDLE};
       VkFence submission_fence{VK_NULL_HANDLE};
       VkSemaphore acquire_semaphore{VK_NULL_HANDLE};
-      VkSemaphore render_finished_semaphore{VK_NULL_HANDLE};
+      std::optional<render::PresentUseKey> present_use;
       VkSwapchainKHR swapchain{VK_NULL_HANDLE};
       std::uint32_t image_index{};
-      FramePhase phase{FramePhase::Ready};
+      FramePhase phase{FramePhase::Free};
       bool acquired{};
       bool uploads_font{};
     };
@@ -188,6 +189,7 @@ namespace avb::desktop {
     /// Retain present fence, consumed wait semaphore and WSI identity until the
     /// presentation engine's completion can be observed on the host.
     struct PresentRecord final {
+      render::PresentUseState use;
       VkFence fence{VK_NULL_HANDLE};
       VkSemaphore wait_semaphore{VK_NULL_HANDLE};
       VkSwapchainKHR swapchain{VK_NULL_HANDLE};
@@ -338,10 +340,24 @@ namespace avb::desktop {
     /// The first ordinary controller submission uploads the atlas under its fence.
     void create_font_texture();
 
-    /// Allocate one command buffer and unsignaled acquire/submission/present sync;
-    /// no native work is pending until a later acquire/submit succeeds.
+    /// Build fixed-capacity owners before admitting native work; a partial prefix
+    /// remains attached to the host for its existing startup cleanup.
+    void create_frame_resources();
+    /// Allocate one command buffer and unsignaled acquire/submission sync.
     [[nodiscard]] std::expected<FrameRecord, core::AppError>
     create_frame_record();
+    /// Allocate one independent render-finished semaphore and present fence.
+    [[nodiscard]] std::expected<PresentRecord, core::AppError>
+    create_present_record();
+    /// Recycle a proven frame or cancel an unchanged no-image reservation.
+    /// Clear use ownership before fallible resets; failure closes admission.
+    void recycle_frame(FrameRecord &record) noexcept;
+    /// Release one exact use after its proof, retaining the permanent handles.
+    [[nodiscard]] bool recycle_present(render::PresentUseKey key,
+                                        render::PresentUsePhase phase) noexcept;
+    /// Destroy completed signals that no queue wait consumed. Retained image
+    /// ownership remains active until release or legal swapchain destruction.
+    void discard_unconsumed_signals(FrameRecord &record) noexcept;
     /// Record optional atlas upload and ImGui draw data against the active WSI.
     /// The record tracks font upload so staging survives until submission proof.
     [[nodiscard]] VkResult record_frame(FrameRecord &record,
@@ -352,7 +368,7 @@ namespace avb::desktop {
     void render_controller(app::Application &application,
                            std::chrono::steady_clock::time_point now);
     /// Acquire at timeout zero and independently classify command submit/present.
-    /// Transfer a used render-finished semaphore into the retained present record.
+    /// Reserve bounded frame and present uses before acquiring an image.
     void attempt_present(ImDrawData &draw_data,
                          std::chrono::steady_clock::time_point now);
 
@@ -375,17 +391,13 @@ namespace avb::desktop {
     /// Release one proven-unused acquired image through the enabled maintenance1 API.
     [[nodiscard]] VkResult release_image(VkSwapchainKHR swapchain,
                                          std::uint32_t image_index) noexcept;
-    /// Destroy a record after release success; completed unconsumed signals are
-    /// not recycled into the next acquire/present operation.
-    void finish_released_frame(FrameRecord &record) noexcept;
-
     /// Derive acquired-image, failed-release and present-fence facts for one WSI owner.
     [[nodiscard]] render::SwapchainOwnershipFacts
     ownership(VkSwapchainKHR swapchain) const noexcept;
     /// Check obligations that forbid destructor cleanup; unknown/device-loss host
     /// paths deliberately return abandon rather than unwinding this owner.
     [[nodiscard]] bool unsafe_controller_work() const noexcept;
-    /// Require no active/retired WSI, frame, present or acquire record before exit.
+    /// Require no active/retired WSI or active frame/present use before exit.
     [[nodiscard]] bool controller_drained() const noexcept;
     /// Move active WSI into the retired set; the old handle is never reactivated.
     void retire_active_swapchain();
@@ -473,9 +485,9 @@ namespace avb::desktop {
     // These owners remain valid through recoverable WSI replacement and drain.
     std::optional<SwapchainState> active_swapchain_;
     std::vector<SwapchainState> retired_swapchains_;
-    std::optional<FrameRecord> acquire_record_;
     std::vector<FrameRecord> frames_;
     std::vector<PresentRecord> presents_;
+    std::uint64_t last_present_use_serial_{};
     FontTexture font_texture_;
     std::optional<RecoveryEpisode> recovery_episode_;
     std::optional<std::chrono::steady_clock::time_point> graphics_deadline_;
@@ -508,8 +520,12 @@ namespace avb::desktop {
     default: break;
     }
     const auto now = std::chrono::steady_clock::now();
-    performance_live_.slots = frames_.size() + (acquire_record_ ? 1U : 0U);
-    performance_live_.presents = presents_.size();
+    performance_live_.slots = std::ranges::count_if(frames_, [](const auto &record) {
+      return record.phase != FramePhase::Free;
+    });
+    performance_live_.presents = std::ranges::count_if(presents_, [](const auto &record) {
+      return record.use.phase != render::PresentUsePhase::Free;
+    });
     performance_->observe_counter(PerformanceOwner::Controller, counter, value, now);
     performance_->observe_high_water(PerformanceOwner::Controller, performance_live_, now);
   }
@@ -518,8 +534,12 @@ namespace avb::desktop {
     const std::chrono::steady_clock::time_point now) noexcept
   {
     const auto extent = framebuffer_extent();
-    performance_live_.slots = frames_.size() + (acquire_record_ ? 1U : 0U);
-    performance_live_.presents = presents_.size();
+    performance_live_.slots = std::ranges::count_if(frames_, [](const auto &record) {
+      return record.phase != FramePhase::Free;
+    });
+    performance_live_.presents = std::ranges::count_if(presents_, [](const auto &record) {
+      return record.use.phase != render::PresentUsePhase::Free;
+    });
     performance_->observe_metadata(PerformanceOwner::Controller, {
       .gpu = performance_device_.deviceName,
       .driver = performance_driver_.data(),
@@ -565,6 +585,7 @@ namespace avb::desktop {
         throw created.error();
       }
       initialize_imgui();
+      create_frame_resources();
       create_font_texture();
       glfwSetWindowUserPointer(window_, this);
       glfwSetWindowCloseCallback(window_, window_close_callback);
@@ -1785,6 +1806,24 @@ namespace avb::desktop {
     font_texture_.upload_pending = true;
   }
 
+  void DesktopHost::Impl::create_frame_resources()
+  {
+    // Resize before native creation: vector allocation cannot orphan a returned
+    // plain handle record, and every successfully built prefix stays owned.
+    frames_.resize(backend_frame_capacity_);
+    presents_.resize(backend_frame_capacity_);
+    for (auto &record : frames_) {
+      auto created = create_frame_record();
+      if (!created) throw created.error();
+      record = *created;
+    }
+    for (auto &record : presents_) {
+      auto created = create_present_record();
+      if (!created) throw created.error();
+      record = *created;
+    }
+  }
+
   std::expected<DesktopHost::Impl::FrameRecord, core::AppError>
   DesktopHost::Impl::create_frame_record()
   {
@@ -1837,21 +1876,151 @@ namespace avb::desktop {
         observe_performance(PerformanceCounter::SemaphoresCreated);
       }
     }
-    if (result == VK_SUCCESS) {
-      VkSemaphore render_finished_semaphore{VK_NULL_HANDLE};
-      result = vkCreateSemaphore(device_, &semaphore_info, nullptr,
-                                 &render_finished_semaphore);
-      if (result == VK_SUCCESS) {
-        record.render_finished_semaphore = render_finished_semaphore;
-        observe_performance(PerformanceCounter::SemaphoresCreated);
-      }
-    }
     if (result != VK_SUCCESS) {
       destroy_frame_record(record);
       return std::unexpected{vulkan_error(
         core::AppErrorCode::RuntimeStateLost, result)};
     }
     return record;
+  }
+
+  std::expected<DesktopHost::Impl::PresentRecord, core::AppError>
+  DesktopHost::Impl::create_present_record()
+  {
+    PresentRecord record;
+    const VkFenceCreateInfo fence_info{
+      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+    };
+    VkFence fence{VK_NULL_HANDLE};
+    auto result = vkCreateFence(device_, &fence_info, nullptr, &fence);
+    if (result == VK_SUCCESS) {
+      record.fence = fence;
+      observe_performance(PerformanceCounter::FencesCreated);
+      const VkSemaphoreCreateInfo semaphore_info{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      };
+      VkSemaphore semaphore{VK_NULL_HANDLE};
+      result = vkCreateSemaphore(device_, &semaphore_info, nullptr, &semaphore);
+      if (result == VK_SUCCESS) {
+        record.wait_semaphore = semaphore;
+        observe_performance(PerformanceCounter::SemaphoresCreated);
+      }
+    }
+    if (result != VK_SUCCESS) {
+      destroy_present_record(record);
+      return std::unexpected{vulkan_error(
+        core::AppErrorCode::RuntimeStateLost, result)};
+    }
+    return record;
+  }
+
+  bool DesktopHost::Impl::recycle_present(
+    const render::PresentUseKey key, const render::PresentUsePhase phase) noexcept
+  {
+    if (key.index >= presents_.size() ||
+        !render::release_present_use(presents_[key.index].use, key, key.index, phase)) {
+      enter_fatal(FatalKind::Unexpected,
+                  graphics_error(core::AppErrorCode::RuntimeStateLost));
+      return false;
+    }
+    auto &record = presents_[key.index];
+    record.swapchain = VK_NULL_HANDLE;
+    record.confirms_recovery = false;
+    record.counts_as_presented = false;
+    // Consume the use before any fallible reset. Its fence must never be polled
+    // or accounted a second time if reset fails and closes admission.
+    auto result = phase == render::PresentUsePhase::PresentPending
+                    ? vkResetFences(device_, 1, &record.fence) : VK_SUCCESS;
+    if (result == VK_SUCCESS && record.wait_semaphore == VK_NULL_HANDLE) {
+      const VkSemaphoreCreateInfo semaphore_info{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      };
+      VkSemaphore semaphore{VK_NULL_HANDLE};
+      result = vkCreateSemaphore(device_, &semaphore_info, nullptr, &semaphore);
+      if (result == VK_SUCCESS) {
+        record.wait_semaphore = semaphore;
+        observe_performance(PerformanceCounter::SemaphoresCreated);
+      }
+    }
+    if (result != VK_SUCCESS) {
+      enter_fatal(result == VK_ERROR_DEVICE_LOST ? FatalKind::DeviceLost
+                                                : FatalKind::Terminal,
+                  vulkan_error(core::AppErrorCode::RuntimeStateLost, result));
+      return false;
+    }
+    return true;
+  }
+
+  void DesktopHost::Impl::recycle_frame(FrameRecord &record) noexcept
+  {
+    const auto prior_phase = record.phase;
+    const auto present_use = record.present_use;
+    record.phase = FramePhase::Free;
+    record.present_use.reset();
+    record.swapchain = VK_NULL_HANDLE;
+    record.image_index = 0;
+    record.acquired = false;
+    record.uploads_font = false;
+    made_progress_ = true;
+    if (present_use &&
+        !recycle_present(*present_use, render::PresentUsePhase::Reserved)) {
+      return;
+    }
+    if (prior_phase == FramePhase::Ready) {
+      // An acquire without an image leaves all supplied synchronization objects
+      // unchanged, and no command recording took place for this reservation.
+      return;
+    }
+    auto result = vkResetCommandBuffer(record.command_buffer, 0);
+    if (result == VK_SUCCESS) {
+      const std::array fences{record.acquire_fence, record.submission_fence};
+      result = vkResetFences(device_, static_cast<std::uint32_t>(fences.size()),
+                             fences.data());
+    }
+    if (result == VK_SUCCESS && record.acquire_semaphore == VK_NULL_HANDLE) {
+      const VkSemaphoreCreateInfo semaphore_info{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      };
+      VkSemaphore semaphore{VK_NULL_HANDLE};
+      result = vkCreateSemaphore(device_, &semaphore_info, nullptr, &semaphore);
+      if (result == VK_SUCCESS) {
+        record.acquire_semaphore = semaphore;
+        observe_performance(PerformanceCounter::SemaphoresCreated);
+      }
+    }
+    if (result != VK_SUCCESS) {
+      enter_fatal(result == VK_ERROR_DEVICE_LOST ? FatalKind::DeviceLost
+                                                : FatalKind::Terminal,
+                  vulkan_error(core::AppErrorCode::RuntimeStateLost, result));
+    }
+  }
+
+  void DesktopHost::Impl::discard_unconsumed_signals(FrameRecord &record) noexcept
+  {
+    if (record.phase == FramePhase::AcquireProofPending &&
+        record.acquire_semaphore != VK_NULL_HANDLE) {
+      vkDestroySemaphore(device_, record.acquire_semaphore, nullptr);
+      record.acquire_semaphore = VK_NULL_HANDLE;
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
+    }
+    if (record.phase != FramePhase::PresentNotEnqueued &&
+        record.phase != FramePhase::SubmitUncertain) {
+      return;
+    }
+    if (!record.present_use || record.present_use->index >= presents_.size() ||
+        !render::matches_present_use(presents_[record.present_use->index].use,
+                                     *record.present_use, record.present_use->index,
+                                     render::PresentUsePhase::Reserved)) {
+      enter_fatal(FatalKind::Unexpected,
+                  graphics_error(core::AppErrorCode::RuntimeStateLost));
+      return;
+    }
+    auto &present = presents_[record.present_use->index];
+    if (present.wait_semaphore != VK_NULL_HANDLE) {
+      vkDestroySemaphore(device_, present.wait_semaphore, nullptr);
+      present.wait_semaphore = VK_NULL_HANDLE;
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
+    }
   }
 
   VkResult DesktopHost::Impl::record_frame(FrameRecord &record,
@@ -1982,30 +2151,45 @@ namespace avb::desktop {
         !active_swapchain_ || zero_extent(active_swapchain_->extent)) {
       return;
     }
-    // The backend rotates a bounded set of draw buffers. Do not overwrite them
-    // while an earlier controller submission may still read their contents.
-    if (frames_.size() >= backend_frame_capacity_) {
+    // ImGui rotates by RenderDrawData call count, independently of record index.
+    // Each successful recording is submitted to this one graphics queue. A later
+    // submission fence also proves earlier draw-buffer reads complete, so at most
+    // C active frames protects its C buffers even when records retire out of order.
+    // Acquire-only and release-retained uses make the admission bound stricter.
+    const auto frame = std::ranges::find_if(frames_, [](const auto &record) {
+      return record.phase == FramePhase::Free;
+    });
+    const auto available_present = std::ranges::find_if(presents_, [](const auto &record) {
+      return record.use.phase == render::PresentUsePhase::Free;
+    });
+    if (frame == frames_.end() || available_present == presents_.end()) {
       schedule_poll(now, false);
       return;
     }
-    if (!acquire_record_) {
-      auto created = create_frame_record();
-      if (!created) {
-        enter_fatal(FatalKind::Terminal, created.error());
-        return;
-      }
-      acquire_record_.emplace(std::move(*created));
+    const auto present_index = static_cast<std::size_t>(available_present - presents_.begin());
+    const auto present_use = render::reserve_present_use(
+      available_present->use, present_index, last_present_use_serial_);
+    if (!present_use) {
+      enter_fatal(FatalKind::Terminal,
+                  graphics_error(core::AppErrorCode::RuntimeStateLost));
+      return;
     }
 
-    auto &acquire_record = *acquire_record_;
+    auto &record = *frame;
+    record.phase = FramePhase::Ready;
+    record.present_use = *present_use;
+    auto &present = *available_present;
     std::uint32_t image_index{
       (std::numeric_limits<std::uint32_t>::max)()};
     const auto acquire_result = vkAcquireNextImageKHR(
       device_, active_swapchain_->handle, 0,
-      acquire_record.acquire_semaphore, acquire_record.acquire_fence,
+      record.acquire_semaphore, record.acquire_fence,
       &image_index);
     const auto acquire =
       render::classify_acquire_result(acquire_result, false);
+    if (acquire.ownership == render::AcquireOwnership::Unchanged) {
+      recycle_frame(record);
+    }
     switch (acquire.action) {
     case render::AcquireAction::Wait:
       schedule_poll(now, false);
@@ -2032,14 +2216,12 @@ namespace avb::desktop {
     case render::AcquireAction::UseImage: break;
     }
 
-    acquire_record.swapchain = active_swapchain_->handle;
-    acquire_record.image_index = image_index;
-    acquire_record.acquired = true;
-    const auto command_result = record_frame(acquire_record, draw_data);
+    record.swapchain = active_swapchain_->handle;
+    record.image_index = image_index;
+    record.acquired = true;
+    record.phase = FramePhase::AcquireProofPending;
+    const auto command_result = record_frame(record, draw_data);
     if (command_result != VK_SUCCESS) {
-      acquire_record.phase = FramePhase::AcquireProofPending;
-      frames_.push_back(std::move(acquire_record));
-      acquire_record_.reset();
       if (command_result == VK_ERROR_DEVICE_LOST) {
         enter_fatal(FatalKind::DeviceLost,
                     vulkan_error(core::AppErrorCode::RuntimeStateLost,
@@ -2054,9 +2236,6 @@ namespace avb::desktop {
       return;
     }
 
-    frames_.push_back(std::move(acquire_record));
-    acquire_record_.reset();
-    auto &record = frames_.back();
     // Publish the acquired image's ownership record before the native submit.
     // Once submission is attempted, an error may mean uncertain execution rather
     // than no work; keeping the record lets the drain path demand the right proof.
@@ -2071,7 +2250,7 @@ namespace avb::desktop {
       .commandBufferCount = 1,
       .pCommandBuffers = &record.command_buffer,
       .signalSemaphoreCount = 1,
-      .pSignalSemaphores = &record.render_finished_semaphore,
+      .pSignalSemaphores = &present.wait_semaphore,
     };
     const auto submit_result = vkQueueSubmit(
       graphics_queue_, 1, &submit_info, record.submission_fence);
@@ -2111,30 +2290,8 @@ namespace avb::desktop {
       break;
     }
 
-    const VkFenceCreateInfo fence_info{
-      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-      .pNext = nullptr,
-      .flags = 0,
-    };
-    VkFence present_fence{VK_NULL_HANDLE};
-    auto present_result =
-      vkCreateFence(device_, &fence_info, nullptr, &present_fence);
-    if (present_result != VK_SUCCESS) {
-      record.phase = FramePhase::PresentNotEnqueued;
-      enter_fatal(
-        present_result == VK_ERROR_DEVICE_LOST ? FatalKind::DeviceLost
-                                               : FatalKind::Terminal,
-        vulkan_error(core::AppErrorCode::RuntimeStateLost, present_result));
-      schedule_poll(now, false);
-      return;
-    }
-    observe_performance(PerformanceCounter::FencesCreated);
-    presents_.push_back({
-      .fence = present_fence,
-      .swapchain = record.swapchain,
-      .confirms_recovery = active_swapchain_->recovery_candidate,
-    });
-    auto &present = presents_.back();
+    present.swapchain = record.swapchain;
+    present.confirms_recovery = active_swapchain_->recovery_candidate;
 
 #if defined(AVB0795_DESKTOP_HAS_KHR_MAINTENANCE)
     const VkSwapchainPresentFenceInfoKHR present_fence_khr{
@@ -2167,9 +2324,6 @@ namespace avb::desktop {
     case MaintenanceVariant::None: break;
     }
     if (present_fence_info == nullptr) {
-      presents_.pop_back();
-      vkDestroyFence(device_, present_fence, nullptr);
-      observe_performance(PerformanceCounter::FencesDestroyed);
       record.phase = FramePhase::PresentNotEnqueued;
       enter_fatal(FatalKind::Terminal,
                   graphics_error(core::AppErrorCode::UnsupportedGraphics));
@@ -2180,19 +2334,16 @@ namespace avb::desktop {
       .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
       .pNext = present_fence_info,
       .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &record.render_finished_semaphore,
+      .pWaitSemaphores = &present.wait_semaphore,
       .swapchainCount = 1,
       .pSwapchains = &record.swapchain,
       .pImageIndices = &record.image_index,
       .pResults = nullptr,
     };
-    present_result = vkQueuePresentKHR(present_queue_, &present_info);
+    const auto present_result = vkQueuePresentKHR(present_queue_, &present_info);
     const auto classification =
       render::classify_present_result(present_result);
     if (classification.ownership == render::PresentOwnership::NotEnqueued) {
-      presents_.pop_back();
-      vkDestroyFence(device_, present_fence, nullptr);
-      observe_performance(PerformanceCounter::FencesDestroyed);
       record.phase = FramePhase::PresentNotEnqueued;
       enter_fatal(FatalKind::Terminal,
                   vulkan_error(core::AppErrorCode::RuntimeStateLost,
@@ -2203,9 +2354,13 @@ namespace avb::desktop {
 
     // A queue fence covers draw commands; this semaphore is now owned by the
     // independent present operation and cannot retire with that queue fence.
-    present.wait_semaphore = record.render_finished_semaphore;
+    if (!render::enqueue_present_use(present.use, *present_use, present_index)) {
+      enter_fatal(FatalKind::Unexpected,
+                  graphics_error(core::AppErrorCode::RuntimeStateLost));
+      return;
+    }
     present.counts_as_presented = present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR;
-    record.render_finished_semaphore = VK_NULL_HANDLE;
+    record.present_use.reset();
     record.acquired = false;
     record.phase = FramePhase::Submitted;
     schedule_poll(now, false);
@@ -2274,22 +2429,12 @@ namespace avb::desktop {
     return VK_ERROR_EXTENSION_NOT_PRESENT;
   }
 
-  void DesktopHost::Impl::finish_released_frame(
-    FrameRecord &record) noexcept
-  {
-    record.acquired = false;
-    destroy_frame_record(record);
-    made_progress_ = true;
-  }
-
   void DesktopHost::Impl::progress_frames(
     const std::chrono::steady_clock::time_point now, const bool draining)
   {
-    auto current = frames_.begin();
-    while (current != frames_.end()) {
-      auto &record = *current;
-      if (record.phase == FramePhase::ReleaseRetained) {
-        ++current;
+    for (auto &record : frames_) {
+      if (record.phase == FramePhase::Free ||
+          record.phase == FramePhase::ReleaseRetained) {
         continue;
       }
 
@@ -2303,25 +2448,24 @@ namespace avb::desktop {
       case FramePhase::SubmitUncertain:
         proof = record.submission_fence;
         break;
+      case FramePhase::Free:
       case FramePhase::Ready:
       case FramePhase::ReleaseRetained: break;
       }
       if (proof == VK_NULL_HANDLE) {
         enter_fatal(FatalKind::Terminal,
                     graphics_error(core::AppErrorCode::RuntimeStateLost));
-        ++current;
         continue;
       }
 
       auto status = vkGetFenceStatus(device_, proof);
       if (status == VK_SUCCESS && proof != record.acquire_fence) {
         // The acquire fence signal follows its semaphore signal independently of
-        // the rendering submission. Observe it before destroying frame owners.
+        // the rendering submission. Observe it before resetting frame owners.
         status = vkGetFenceStatus(device_, record.acquire_fence);
       }
       if (status == VK_NOT_READY) {
         schedule_poll(now, draining);
-        ++current;
         continue;
       }
       if (status == VK_ERROR_DEVICE_LOST) {
@@ -2335,7 +2479,6 @@ namespace avb::desktop {
                     vulkan_error(core::AppErrorCode::RuntimeStateLost,
                                  status));
         schedule_poll(now, draining);
-        ++current;
         continue;
       }
 
@@ -2347,9 +2490,8 @@ namespace avb::desktop {
         destroy_font_staging();
       }
       if (!record.acquired) {
-        destroy_frame_record(record);
-        current = frames_.erase(current);
-        made_progress_ = true;
+        recycle_frame(record);
+        if (fatal_kind_ == FatalKind::DeviceLost || fatal_kind_ == FatalKind::Unexpected) return;
         continue;
       }
 
@@ -2357,19 +2499,22 @@ namespace avb::desktop {
         release_image(record.swapchain, record.image_index);
       const auto release =
         render::classify_release_result(release_result);
-      if (release.ownership == render::ReleaseOwnership::Released) {
-        finish_released_frame(record);
-        current = frames_.erase(current);
-        continue;
-      }
-
-      record.phase = FramePhase::ReleaseRetained;
       if (release_result == VK_ERROR_DEVICE_LOST) {
+        record.phase = FramePhase::ReleaseRetained;
         enter_fatal(FatalKind::DeviceLost,
                     vulkan_error(core::AppErrorCode::RuntimeStateLost,
                                  release_result));
         return;
       }
+      discard_unconsumed_signals(record);
+      if (fatal_kind_ == FatalKind::Unexpected) return;
+      if (release.ownership == render::ReleaseOwnership::Released) {
+        recycle_frame(record);
+        if (fatal_kind_ == FatalKind::DeviceLost || fatal_kind_ == FatalKind::Unexpected) return;
+        continue;
+      }
+
+      record.phase = FramePhase::ReleaseRetained;
       if (release.recovery == render::ReleaseRecovery::SurfaceLost) {
         enter_fatal(FatalKind::SurfaceLost,
                     vulkan_error(core::AppErrorCode::RuntimeStateLost,
@@ -2381,19 +2526,18 @@ namespace avb::desktop {
                                  release_result));
       }
       schedule_poll(now, draining);
-      ++current;
     }
   }
 
   void DesktopHost::Impl::progress_presents(
     const std::chrono::steady_clock::time_point now, const bool draining)
   {
-    auto current = presents_.begin();
-    while (current != presents_.end()) {
-      const auto status = vkGetFenceStatus(device_, current->fence);
+    for (std::size_t index{}; index < presents_.size(); ++index) {
+      auto &record = presents_[index];
+      if (record.use.phase != render::PresentUsePhase::PresentPending) continue;
+      const auto status = vkGetFenceStatus(device_, record.fence);
       if (status == VK_NOT_READY) {
         schedule_poll(now, draining);
-        ++current;
         continue;
       }
       if (status == VK_ERROR_DEVICE_LOST) {
@@ -2407,14 +2551,11 @@ namespace avb::desktop {
                     vulkan_error(core::AppErrorCode::RuntimeStateLost,
                                  status));
         schedule_poll(now, draining);
-        ++current;
         continue;
       }
 
-      const bool confirms_recovery = current->confirms_recovery;
-      if (current->counts_as_presented) observe_performance(PerformanceCounter::PresentRetired);
-      destroy_present_record(*current);
-      current = presents_.erase(current);
+      const bool confirms_recovery = record.confirms_recovery;
+      if (record.counts_as_presented) observe_performance(PerformanceCounter::PresentRetired);
       made_progress_ = true;
       if (confirms_recovery && recovery_episode_) {
         recovery_episode_->state =
@@ -2429,6 +2570,10 @@ namespace avb::desktop {
           active_swapchain_->recovery_candidate = false;
         }
       }
+      if (!recycle_present({index, record.use.serial}, render::PresentUsePhase::PresentPending) &&
+          (fatal_kind_ == FatalKind::DeviceLost || fatal_kind_ == FatalKind::Unexpected)) {
+        return;
+      }
     }
   }
 
@@ -2437,19 +2582,20 @@ namespace avb::desktop {
   {
     render::SwapchainOwnershipFacts facts;
     for (const auto &record : frames_) {
-      if (record.swapchain != swapchain) {
+      if (record.phase == FramePhase::Free || record.swapchain != swapchain) {
         continue;
       }
       if (record.phase == FramePhase::ReleaseRetained) {
         facts.release_retained = true;
       }
-      else if (record.acquired) {
+      else {
         facts.native_image_use_pending = true;
       }
     }
     facts.present_fence_pending = std::ranges::any_of(
       presents_, [swapchain](const PresentRecord &record) noexcept {
-        return record.swapchain == swapchain;
+        return record.use.phase == render::PresentUsePhase::PresentPending &&
+               record.swapchain == swapchain;
       });
     return facts;
   }
@@ -2457,17 +2603,13 @@ namespace avb::desktop {
   void DesktopHost::Impl::clear_release_retained(
     const VkSwapchainKHR swapchain) noexcept
   {
-    auto current = frames_.begin();
-    while (current != frames_.end()) {
-      if (current->swapchain != swapchain ||
-          current->phase != FramePhase::ReleaseRetained) {
-        ++current;
+    for (auto &record : frames_) {
+      if (record.swapchain != swapchain ||
+          record.phase != FramePhase::ReleaseRetained) {
         continue;
       }
-      current->acquired = false;
-      destroy_frame_record(*current);
-      current = frames_.erase(current);
-      made_progress_ = true;
+      recycle_frame(record);
+      if (fatal_kind_ == FatalKind::DeviceLost || fatal_kind_ == FatalKind::Unexpected) return;
     }
   }
 
@@ -2483,6 +2625,7 @@ namespace avb::desktop {
       destroy_swapchain_state(*current);
       current = retired_swapchains_.erase(current);
       clear_release_retained(handle);
+      if (fatal_kind_ == FatalKind::DeviceLost || fatal_kind_ == FatalKind::Unexpected) return;
       made_progress_ = true;
     }
   }
@@ -2581,17 +2724,13 @@ namespace avb::desktop {
   {
     graphics_deadline_.reset();
     made_progress_ = false;
-    if (fatal_kind_ == FatalKind::DeviceLost) {
+    if (fatal_kind_ == FatalKind::DeviceLost || fatal_kind_ == FatalKind::Unexpected) {
       return;
     }
-    if (draining && acquire_record_) {
-      destroy_frame_record(*acquire_record_);
-      acquire_record_.reset();
-      made_progress_ = true;
-    }
     progress_frames(now, draining);
+    if (fatal_kind_ == FatalKind::DeviceLost || fatal_kind_ == FatalKind::Unexpected) return;
     progress_presents(now, draining);
-    if (fatal_kind_ == FatalKind::DeviceLost) {
+    if (fatal_kind_ == FatalKind::DeviceLost || fatal_kind_ == FatalKind::Unexpected) {
       return;
     }
 
@@ -2717,16 +2856,19 @@ namespace avb::desktop {
   bool DesktopHost::Impl::unsafe_controller_work() const noexcept
   {
     return fatal_kind_ == FatalKind::DeviceLost ||
-           fatal_kind_ == FatalKind::Unexpected || !frames_.empty() ||
-           !presents_.empty() || font_texture_.upload_in_flight ||
-           (acquire_record_ && acquire_record_->acquired);
+           fatal_kind_ == FatalKind::Unexpected || font_texture_.upload_in_flight ||
+           std::ranges::any_of(frames_, [](const auto &record) {
+             return record.phase != FramePhase::Free;
+           }) ||
+           std::ranges::any_of(presents_, [](const auto &record) {
+             return record.use.phase != render::PresentUsePhase::Free;
+           });
   }
 
   bool DesktopHost::Impl::controller_drained() const noexcept
   {
-    return fatal_kind_ != FatalKind::DeviceLost && frames_.empty() &&
-           presents_.empty() && !active_swapchain_ &&
-           retired_swapchains_.empty() && !acquire_record_;
+    return !unsafe_controller_work() && !active_swapchain_ &&
+           retired_swapchains_.empty();
   }
 
   void DesktopHost::Impl::retire_active_swapchain()
@@ -2915,10 +3057,6 @@ namespace avb::desktop {
         vkDestroySemaphore(device_, record.acquire_semaphore, nullptr);
         observe_performance(PerformanceCounter::SemaphoresDestroyed);
       }
-      if (record.render_finished_semaphore != VK_NULL_HANDLE) {
-        vkDestroySemaphore(device_, record.render_finished_semaphore, nullptr);
-        observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      }
       if (record.acquire_fence != VK_NULL_HANDLE) {
         vkDestroyFence(device_, record.acquire_fence, nullptr);
         observe_performance(PerformanceCounter::FencesDestroyed);
@@ -3040,10 +3178,6 @@ namespace avb::desktop {
     }
 
     destroy_font_texture();
-    if (acquire_record_) {
-      destroy_frame_record(*acquire_record_);
-      acquire_record_.reset();
-    }
     for (auto &record : frames_) {
       destroy_frame_record(record);
     }
