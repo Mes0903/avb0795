@@ -28,8 +28,27 @@ namespace avb::platform::windows {
                            const OverlayClientGeometry &) = default;
   };
 
-  /// Main-thread borrower of the overlay HWND and owner of its subclass binding.
-  /// Manages input style, DPI, and geometry; never toggles GLFW decoration itself.
+  /// Drag endpoints in physical client pixels, bounded by the displayed content.
+  struct OverlayRegionGesture final {
+    detail::NativePoint start;
+    detail::NativePoint end;
+
+    friend bool operator==(const OverlayRegionGesture &,
+                           const OverlayRegionGesture &) = default;
+  };
+
+  /// One terminal fact; an empty gesture means cancellation, not a crop reset.
+  struct OverlayRegionSelectionResult final {
+    std::optional<OverlayRegionGesture> gesture;
+  };
+
+  /// @brief Own the native callback binding while borrowing the overlay window.
+  ///
+  /// Main-thread operations manage input style, DPI, and client geometry. The
+  /// window property points to this immovable object, so it must stay alive until
+  /// verified detach or final window destruction removes callback reachability.
+  /// Destruction with a live or uncertain binding terminates rather than leaving
+  /// a dangling native callback. Decoration remains the window owner's concern.
   class Win32OverlayAdapter final {
   private:
     struct ConstructionToken final {
@@ -56,9 +75,17 @@ namespace avb::platform::windows {
     Win32OverlayAdapter(Win32OverlayAdapter &&) = delete;
     Win32OverlayAdapter &operator=(Win32OverlayAdapter &&) = delete;
 
-    /// Install the custom procedure only after callback-visible state is complete.
+    /// @brief Install the subclass after its property and saved procedure are ready.
+    ///
+    /// A failed native setter does not prove installation had no effect. Failure
+    /// handling observes the procedure and property; callers must honor
+    /// window_destruction_required() even when attach itself returned an error.
     [[nodiscard]] std::expected<void, core::AppError> attach() noexcept;
-    /// Restore the saved GLFW procedure and verify removal of the native binding.
+    /// @brief Restore the previous procedure before removing callback context.
+    ///
+    /// A failed result requires cleanup while this adapter remains alive. The
+    /// owner can destroy the window after graphics retirement, allowing its final
+    /// message to clear the binding, then complete fallback cleanup explicitly.
     [[nodiscard]] std::expected<void, core::AppError> detach() noexcept;
     /// Whether the custom procedure is still attached to the live window.
     [[nodiscard]] bool attached() const noexcept;
@@ -67,19 +94,51 @@ namespace avb::platform::windows {
     /// Finish fail-safe cleanup only after window destruction removed callback reachability.
     void complete_after_overlay_destroyed() noexcept;
 
-    /// Enter/leave opaque layered Pass-through with exact native-state rollback.
+    /// @brief Apply whole-window alpha and input mode together, preserving decoration bits.
+    /// Percent must be 0..100. Observed native readback commits the cached pair;
+    /// a failed operation restores its exact current snapshot or reports RuntimeStateLost.
+    [[nodiscard]] std::expected<void, core::AppError>
+    set_presentation(core::OverlayMode effective_mode, int opacity_percent) noexcept;
+    /// Change input mode while preserving the confirmed whole-window opacity.
     [[nodiscard]] std::expected<void, core::AppError>
     set_mode(core::OverlayMode mode) noexcept;
     /// Return the confirmed mode used by hit-test/message policy.
     [[nodiscard]] core::OverlayMode mode() const noexcept;
+    /// Return the confirmed opacity percentage, independent of mode and border.
+    [[nodiscard]] int opacity_percent() const noexcept;
+    /// Read back native input/alpha state after independent border transactions.
+    [[nodiscard]] bool presentation_matches(core::OverlayMode mode,
+                                             int opacity_percent) const noexcept;
+
+    /// @brief Begin, arm, or end a bounded client-coordinate selection cycle.
+    /// Active with no content rectangle waits for a matching full-view present.
+    /// A rectangle arms input; repeated active calls cannot rearm a terminal cycle.
+    /// Ending clears pending facts before releasing capture. No preferences change.
+    void set_region_selection(
+      bool active, std::optional<detail::NativeRect> content_rect = std::nullopt) noexcept;
+    /// Activate only in response to the user's begin command; observe actual focus.
+    [[nodiscard]] bool focus_region_selection() noexcept;
+    /// Latest bounded endpoints; source-pixel conversion belongs to the runtime.
+    [[nodiscard]] std::optional<OverlayRegionGesture>
+    region_selection_preview() const noexcept;
+    /// Consume the single completion/cancellation fact; input remains frozen.
+    [[nodiscard]] std::optional<OverlayRegionSelectionResult>
+    take_region_selection_result() noexcept;
 
     /// Snapshot content placement before changing GLFW's border attributes.
     [[nodiscard]] std::expected<OverlayClientGeometry, core::AppError>
     snapshot_client_geometry() const noexcept;
-    /// Restore content placement using current frame insets and monitor work area.
+    /// @brief Restore client placement with current border insets and work-area bounds.
+    ///
+    /// The outer rectangle is clamped to the nearest monitor's work area, so the
+    /// resulting client rectangle can differ from the original snapshot. Success
+    /// verifies that computed result; it does not promise the old rectangle fits.
     [[nodiscard]] std::expected<void, core::AppError>
     restore_client_geometry(const OverlayClientGeometry &snapshot) noexcept;
-    /// Verify the same clamped geometry used by restoration.
+    /// @brief Compare native client geometry with the supplied rectangle exactly.
+    ///
+    /// No clamping is performed here. A caller checking an original snapshot
+    /// after a clamped restoration must account for the changed rectangle.
     [[nodiscard]] bool
     client_geometry_matches(const OverlayClientGeometry &snapshot) const noexcept;
 
@@ -87,7 +146,7 @@ namespace avb::platform::windows {
     void set_border_preference(core::BorderPreference border) noexcept;
     /// Cached border policy; native decoration ownership remains in OverlayWindow.
     [[nodiscard]] core::BorderPreference border_preference() const noexcept;
-    /// Update the aspect constraint when runtime accepts a new capture allocation.
+    /// Update the aspect constraint from the runtime's effective presentation extent.
     void update_source_extent(core::Extent source_extent) noexcept;
 
   private:
@@ -98,6 +157,8 @@ namespace avb::platform::windows {
     [[nodiscard]] std::optional<LRESULT>
     commit_message(const PreparedWindowMessage &message) noexcept;
     [[nodiscard]] LRESULT forward_message(UINT message, WPARAM word_parameter, LPARAM long_parameter) noexcept;
+    void cancel_region_selection() noexcept;
+    void release_region_capture() noexcept;
     void clear_native_binding() noexcept;
 
     // The window property points at this stable object while the subclass is live.
@@ -105,12 +166,18 @@ namespace avb::platform::windows {
     HWND window_{};
     WNDPROC saved_window_proc_{};
     core::OverlayMode mode_{core::OverlayMode::Editable};
+    int opacity_percent_{100};
     core::BorderPreference border_{core::BorderPreference::Bordered};
     core::Extent source_extent_{};
     std::uint32_t dpi_{96};
-    std::optional<detail::NativeWindowState> pass_through_snapshot_;
     bool attached_{};
     bool window_destruction_required_{};
+    bool region_selection_active_{};
+    bool region_selection_terminal_{};
+    bool region_selection_focus_observed_{};
+    std::optional<detail::NativeRect> region_content_rect_;
+    std::optional<OverlayRegionGesture> region_gesture_;
+    std::optional<OverlayRegionSelectionResult> region_result_;
   };
 
 }    // namespace avb::platform::windows

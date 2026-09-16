@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <exception>
 #include <limits>
 #include <new>
@@ -47,6 +48,24 @@ namespace avb::platform::windows {
       return extent.width == 0 || extent.height == 0;
     }
 
+    [[nodiscard]] core::OverlayMode effective_mode(const core::ReplicaSettings &settings) noexcept
+    {
+      return settings.selecting_region ? core::OverlayMode::Editable : settings.mode;
+    }
+
+    [[nodiscard]] int effective_opacity(const core::ReplicaSettings &settings) noexcept
+    {
+      return settings.selecting_region ? 100 : settings.opacity_percent;
+    }
+
+    [[nodiscard]] bool same_selection_geometry(const render::PresentationSnapshot &a,
+                                               const render::PresentationSnapshot &b) noexcept
+    {
+      return a.content == b.content && a.framebuffer == b.framebuffer &&
+             a.viewport == b.viewport && a.region == b.region &&
+             a.selection_full_view == b.selection_full_view;
+    }
+
   }    // namespace
 
   // Collect native facts independently; the use-case orchestrator ranks lifecycle outcomes.
@@ -60,6 +79,8 @@ namespace avb::platform::windows {
     bool graphics_recovered{};
     std::optional<core::AppError> failed;
     bool stopped{};
+    std::optional<core::Extent> content_changed;
+    std::optional<app::RegionSelectionCompleted> region_completed;
   };
 
   // Bind concrete owners to the small transaction algorithm without exposing another port.
@@ -74,6 +95,7 @@ namespace avb::platform::windows {
     Clock::time_point now;
     std::optional<OverlayClientGeometry> geometry;
     bool border_changed{};
+    bool began_selection{};
 
     [[nodiscard]] std::optional<Snapshot> snapshot() const
     {
@@ -90,7 +112,8 @@ namespace avb::platform::windows {
 
     [[nodiscard]] bool apply_mode()
     {
-      const auto changed = owner.adapter_->set_mode(requested.mode);
+      const auto changed = owner.adapter_->set_presentation(effective_mode(requested),
+                                                             effective_opacity(requested));
       if (!changed &&
           changed.error().code == core::AppErrorCode::RuntimeStateLost) {
         throw changed.error();
@@ -138,18 +161,25 @@ namespace avb::platform::windows {
 
     [[nodiscard]] bool apply_extensions()
     {
-      if (!owner.browser_keep_alive_) {
-        return true;
-      }
-      const auto changed = owner.helper_activation_allowed()
+      if (owner.browser_keep_alive_) {
+        const auto changed = owner.helper_activation_allowed()
                              ? owner.browser_keep_alive_->set_active(
                                  requested.extensions.browser_capture_keep_alive)
                              : owner.browser_keep_alive_->deactivate();
-      if (!changed &&
-          changed.error().code == core::AppErrorCode::RuntimeStateLost) {
-        throw changed.error();
+        if (!changed &&
+            changed.error().code == core::AppErrorCode::RuntimeStateLost) {
+          throw changed.error();
+        }
+        if (!changed) {
+          return false;
+        }
       }
-      return changed.has_value();
+      if (requested.selecting_region && !owner.settings_.selecting_region) {
+        began_selection = true;
+        owner.adapter_->set_region_selection(true);
+        return owner.adapter_->focus_region_selection();
+      }
+      return true;
     }
 
     [[nodiscard]] bool verify_applied() const noexcept
@@ -158,13 +188,18 @@ namespace avb::platform::windows {
         !owner.browser_keep_alive_ ||
         owner.browser_keep_alive_->matches_active(
           owner.helper_should_activate(requested));
-      return owner.adapter_->mode() == requested.mode &&
+      return owner.adapter_->mode() == effective_mode(requested) &&
+             owner.adapter_->opacity_percent() == effective_opacity(requested) &&
+             owner.adapter_->presentation_matches(effective_mode(requested), effective_opacity(requested)) &&
              owner.adapter_->border_preference() == requested.border &&
              owner.overlay_->border_matches(requested.border) && helper_matches;
     }
 
     [[nodiscard]] bool rollback(const Snapshot &snapshot) noexcept
     {
+      if (began_selection) {
+        owner.adapter_->set_region_selection(false);
+      }
       bool restored{true};
       if (owner.browser_keep_alive_) {
         const bool allowed = owner.helper_activation_allowed();
@@ -174,7 +209,8 @@ namespace avb::platform::windows {
                               : owner.browser_keep_alive_->deactivate();
         restored = restored && helper.has_value();
       }
-      const auto mode = owner.adapter_->set_mode(snapshot.settings.mode);
+      const auto mode = owner.adapter_->set_presentation(effective_mode(snapshot.settings),
+                                                           effective_opacity(snapshot.settings));
       restored = restored && mode.has_value();
       const auto border = owner.overlay_->set_border(snapshot.settings.border);
       restored = restored && border.has_value();
@@ -189,12 +225,17 @@ namespace avb::platform::windows {
     [[nodiscard]] bool verify_rollback(const Snapshot &snapshot) const noexcept
     {
       const bool native_settings_match =
-        owner.adapter_->mode() == snapshot.settings.mode &&
+        owner.adapter_->mode() == effective_mode(snapshot.settings) &&
+        owner.adapter_->opacity_percent() == effective_opacity(snapshot.settings) &&
+        owner.adapter_->presentation_matches(effective_mode(snapshot.settings), effective_opacity(snapshot.settings)) &&
         owner.adapter_->border_preference() == snapshot.settings.border &&
         owner.overlay_->border_matches(snapshot.settings.border);
       const bool original_helper_is_eligible =
         !snapshot.helper_active ||
         owner.helper_should_activate(snapshot.settings);
+      // Source loss can make the original active helper state ineligible while
+      // rollback runs. Hiding it is necessary, but cannot verify restoration of
+      // that original snapshot; preserve the stronger state-lost classification.
       const bool helper_matches =
         owner.browser_keep_alive_
           ? owner.browser_keep_alive_->matches_active(snapshot.helper_active)
@@ -207,8 +248,24 @@ namespace avb::platform::windows {
     // FPS scheduling/in-memory settings change only after native settings have verified.
     void commit_scheduler() noexcept
     {
-      owner.scheduler_ = core::FrameScheduler{requested.fps_cap, now};
+      if (requested.fps_cap != owner.settings_.fps_cap) {
+        owner.scheduler_ = core::FrameScheduler{requested.fps_cap, now};
+      }
+      if (requested.selecting_region != owner.settings_.selecting_region) {
+        owner.selection_mapping_.reset();
+        owner.selection_client_extent_.reset();
+        owner.selection_preview_.reset();
+        owner.selection_result_pending_ = false;
+        if (!requested.selecting_region) {
+          owner.adapter_->set_region_selection(false);
+        }
+      }
       owner.settings_ = requested;
+      if (owner.render_stack_) {
+        owner.render_stack_->set_presentation({requested.region, requested.selecting_region,
+                                               owner.selection_preview_});
+      }
+      owner.update_presentation_extent();
     }
   };
 
@@ -239,6 +296,7 @@ namespace avb::platform::windows {
       .slots_in_flight = last_render_result_.slots_in_flight,
       .presentations_in_flight = last_render_result_.presentations_in_flight,
       .presentation_suspended = last_render_result_.presentation_suspended,
+      .presentation = last_render_result_.presentation,
     };
   }
 
@@ -280,9 +338,27 @@ namespace avb::platform::windows {
   std::expected<void, core::AppError>
   WindowsReplicaRuntime::apply(const core::ReplicaSettings &settings) noexcept
   {
+    if (settings.opacity_percent < 0 || settings.opacity_percent > 100) {
+      return std::unexpected{core::AppError{.code = core::AppErrorCode::InvalidValue}};
+    }
     if (stop_requested_ || stopped_ || !overlay_ || !adapter_) {
       return std::unexpected{
         core::AppError{.code = core::AppErrorCode::InvalidCommand}};
+    }
+    const bool region_edit = settings.region != settings_.region;
+    const bool begin_selection = settings.selecting_region && !settings_.selecting_region;
+    // A new source selection clears its session-local crop while an interrupted
+    // old owner can remain visible. Accept that clear with general preferences;
+    // setting a positive crop or beginning selection requires current geometry.
+    if (((region_edit && settings.region) || begin_selection) &&
+        (!presented_content_ || source_disconnected_ || source_job_stopping_ ||
+         pending_failed_event_ || device_recovery_phase_ != DeviceRecoveryPhase::Inactive ||
+         reconfiguration_phase_ != detail::SourceReconfigurationPhase::Inactive)) {
+      return std::unexpected{core::AppError{.code = core::AppErrorCode::InvalidCommand}};
+    }
+    if (region_edit && settings.region &&
+        !core::valid_region(*settings.region, *presented_content_)) {
+      return std::unexpected{core::AppError{.code = core::AppErrorCode::InvalidValue}};
     }
     SettingsOperations operations{
       .owner = *this, .requested = settings, .now = Clock::now()};
@@ -331,6 +407,11 @@ namespace avb::platform::windows {
       return;
     }
     stop_requested_ = true;
+    if (adapter_) {
+      adapter_->set_region_selection(false);
+    }
+    selection_mapping_.reset();
+    presented_content_.reset();
     if (browser_keep_alive_) {
       browser_keep_alive_->request_stop();
     }
@@ -443,7 +524,7 @@ namespace avb::platform::windows {
       case detail::SourceReconfigurationAction::Commit:
         capture_job_->commit_reconfigure();
         allocation_ = *pending_allocation_;
-        adapter_->update_source_extent(allocation_);
+        update_presentation_extent();
         pending_allocation_.reset();
         reconfiguration_phase_ = detail::SourceReconfigurationPhase::Inactive;
         progress = render::DrainProgress::ProvenSafeRelease;
@@ -500,6 +581,7 @@ namespace avb::platform::windows {
       // Rebuild locally; failed partial owners never replace the stable runtime aggregate.
       auto replacement_render = std::make_unique<render::WindowsRenderStack>(
         *overlay_, *decision.candidate_generation, bridge_preference_);
+      replacement_render->set_presentation({settings_.region, false, {}});
       auto replacement_job = WgcCaptureJob::create_inactive(
         *source_, replacement_render->capture_device(),
         *decision.candidate_generation, pool_buffer_count_, wake_main_loop_);
@@ -523,7 +605,7 @@ namespace avb::platform::windows {
             render_stack_ = std::move(replacement_render);
             capture_job_ = std::move(*replacement_job);
             allocation_ = allocation;
-            adapter_->update_source_extent(allocation_);
+            update_presentation_extent();
             last_render_result_ = {};
             resource_generation_ = *decision.candidate_generation;
             device_recovery_phase_ = DeviceRecoveryPhase::Inactive;
@@ -678,6 +760,8 @@ namespace avb::platform::windows {
     }
     if (!source_ && !overlay_ && !adapter_ && !render_stack_ && !capture_job_ &&
         !browser_keep_alive_) {
+      // Only absence of every owner authorizes the terminal event. Drain status
+      // thresholds describe stalled progress and never bypass these barriers.
       stopped_ = true;
       candidates.stopped = true;
     }
@@ -700,6 +784,159 @@ namespace avb::platform::windows {
     return (capture_job_ && detail::capture_cleanup_is_uncertain(
                               capture_job_->cleanup_failure())) ||
            (browser_keep_alive_ && browser_keep_alive_->cleanup_uncertain());
+  }
+
+  void WindowsReplicaRuntime::update_presentation_extent() noexcept
+  {
+    if (!adapter_) {
+      return;
+    }
+    core::Extent extent{};
+    if (presented_content_) {
+      extent = *presented_content_;
+      if (!settings_.selecting_region && settings_.region) {
+        if (const auto region = core::intersect_region(*settings_.region, extent)) {
+          extent = {region->width, region->height};
+        }
+      }
+    }
+    adapter_->update_source_extent(extent);
+  }
+
+  void WindowsReplicaRuntime::cancel_region_selection(TickCandidates &candidates) noexcept
+  {
+    if (!settings_.selecting_region) {
+      return;
+    }
+    auto restored = settings_;
+    restored.selecting_region = false;
+    const auto accepted = apply(restored);
+    if (!accepted) {
+      // Input geometry is already obsolete. An unsuccessful restoration ends
+      // this runtime through the existing failure/drain protocol.
+      candidates.failed = runtime_state_error(accepted.error().native_detail);
+      pending_failed_event_ = candidates.failed;
+      if (adapter_) {
+        adapter_->set_region_selection(false);
+      }
+    }
+    candidates.region_completed = app::RegionSelectionCompleted{std::nullopt};
+  }
+
+  void WindowsReplicaRuntime::invalidate_region_content(TickCandidates &candidates) noexcept
+  {
+    cancel_region_selection(candidates);
+    if (presented_content_) {
+      presented_content_.reset();
+      candidates.content_changed = core::Extent{};
+    }
+    selection_mapping_.reset();
+    selection_client_extent_.reset();
+    update_presentation_extent();
+  }
+
+  void WindowsReplicaRuntime::progress_region_selection(
+    const render::RenderTickResult &render_result, TickCandidates &candidates) noexcept
+  {
+    if (source_disconnected_ || source_job_stopping_ || candidates.source_lost ||
+        candidates.failed || candidates.overlay_close || candidates.graphics_recovery_started ||
+        device_recovery_phase_ != DeviceRecoveryPhase::Inactive ||
+        reconfiguration_phase_ != detail::SourceReconfigurationPhase::Inactive ||
+        render_result.device_loss || render_result.terminal_error || render_result.presentation_suspended) {
+      invalidate_region_content(candidates);
+      return;
+    }
+
+    // Entering selection intentionally waits for a full-view draw. Preserve the
+    // already validated source extent during this presentation-only transition.
+    if (!render_result.presentation) {
+      if (!(settings_.selecting_region && !selection_mapping_)) {
+        invalidate_region_content(candidates);
+      }
+    }
+    else if (!awaited_content_ || render_result.presentation->content == *awaited_content_) {
+      const auto &shown = *render_result.presentation;
+      awaited_content_.reset();
+      if (presented_content_ != shown.content) {
+        if (presented_content_) {
+          cancel_region_selection(candidates);
+        }
+        presented_content_ = shown.content;
+        candidates.content_changed = shown.content;
+        update_presentation_extent();
+      }
+      if (settings_.selecting_region && selection_mapping_ &&
+          !same_selection_geometry(*selection_mapping_, shown)) {
+        cancel_region_selection(candidates);
+      }
+    }
+
+    if (!settings_.selecting_region || !adapter_ || selection_result_pending_) {
+      return;
+    }
+    const auto geometry = adapter_->snapshot_client_geometry();
+    if (!geometry) {
+      cancel_region_selection(candidates);
+      return;
+    }
+    const auto &rect = geometry->client_screen_rect;
+    const auto width = static_cast<std::int64_t>(rect.right) - rect.left;
+    const auto height = static_cast<std::int64_t>(rect.bottom) - rect.top;
+    if (width <= 0 || height <= 0 || width > INT32_MAX || height > INT32_MAX) {
+      cancel_region_selection(candidates);
+      return;
+    }
+    const core::Extent client{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
+    if (selection_client_extent_ && *selection_client_extent_ != client) {
+      cancel_region_selection(candidates);
+      return;
+    }
+    if (!selection_mapping_ && render_result.presentation &&
+        render_result.presentation->selection_full_view && presented_content_ &&
+        render_result.presentation->content == *presented_content_ && !awaited_content_) {
+      const auto &shown = *render_result.presentation;
+      // Native hit testing uses integral client pixels. Keep the start rectangle
+      // inside the displayed viewport and retain fractional precision when the
+      // runtime later maps endpoints back into framebuffer space.
+      const auto client_x = [&shown, client](const double x) noexcept {
+        return x * client.width / shown.framebuffer.width;
+      };
+      const auto client_y = [&shown, client](const double y) noexcept {
+        return y * client.height / shown.framebuffer.height;
+      };
+      const detail::NativeRect content_rect{
+        static_cast<std::int32_t>(std::ceil(client_x(shown.viewport.x))),
+        static_cast<std::int32_t>(std::ceil(client_y(shown.viewport.y))),
+        static_cast<std::int32_t>(std::floor(client_x(static_cast<double>(shown.viewport.x) + shown.viewport.width))),
+        static_cast<std::int32_t>(std::floor(client_y(static_cast<double>(shown.viewport.y) + shown.viewport.height)))};
+      if (content_rect.left >= content_rect.right || content_rect.top >= content_rect.bottom) {
+        cancel_region_selection(candidates);
+        return;
+      }
+      selection_mapping_ = shown;
+      selection_client_extent_ = client;
+      adapter_->set_region_selection(true, content_rect);
+    }
+    if (const auto terminal = adapter_->take_region_selection_result()) {
+      if (!terminal->gesture || !selection_mapping_ || !selection_client_extent_) {
+        cancel_region_selection(candidates);
+        return;
+      }
+      const auto to_framebuffer = [this](const detail::NativePoint point) noexcept {
+        return render::PixelPoint{
+          static_cast<double>(point.x) * selection_mapping_->framebuffer.width / selection_client_extent_->width,
+          static_cast<double>(point.y) * selection_mapping_->framebuffer.height / selection_client_extent_->height};
+      };
+      const auto region = render::selection_region(selection_mapping_->content,
+        selection_mapping_->viewport, to_framebuffer(terminal->gesture->start),
+        to_framebuffer(terminal->gesture->end));
+      if (!region) {
+        cancel_region_selection(candidates);
+        return;
+      }
+      selection_result_pending_ = true;
+      candidates.region_completed = app::RegionSelectionCompleted{region};
+    }
   }
 
   void WindowsReplicaRuntime::add_runtime_events(
@@ -746,6 +983,12 @@ namespace avb::platform::windows {
     if (candidates.failed) {
       append(app::Failed{.error = *candidates.failed});
     }
+    if (candidates.content_changed) {
+      append(app::CaptureContentChanged{.extent = *candidates.content_changed});
+    }
+    if (candidates.region_completed) {
+      append(*candidates.region_completed);
+    }
   }
 
   app::RuntimeTickResult
@@ -763,6 +1006,8 @@ namespace avb::platform::windows {
         recovery_event_state_.pending_started;
       candidates.graphics_recovered = recovery_event_state_.pending_completed;
       std::optional<Clock::time_point> deadline;
+      bool redraw_available_before_progress{};
+      bool redraw_scheduler_active{};
       render::DrainProgress progress{render::DrainProgress::None};
 
       // Service callback-local state synchronously before scheduling new render intake.
@@ -774,6 +1019,15 @@ namespace avb::platform::windows {
       }
       const auto capture_facts = detail::merge_runtime_capture_signals(
         source_closed_edge, capture_signals);
+
+      if (!stop_requested_ && (capture_facts.source_closed || capture_facts.capture_failed ||
+          (capture_facts.resize && (!presented_content_ ||
+                                   *capture_facts.resize != *presented_content_)))) {
+        invalidate_region_content(candidates);
+        if (capture_facts.resize) {
+          awaited_content_ = *capture_facts.resize;
+        }
+      }
 
       if (!stop_requested_ && capture_facts.source_closed) {
         source_disconnected_ = true;
@@ -814,22 +1068,49 @@ namespace avb::platform::windows {
         }
       }
 
-      if (!stop_requested_ && !source_job_stopping_ &&
+      if (!stop_requested_ && !pending_failed_event_ &&
           device_recovery_phase_ == DeviceRecoveryPhase::Inactive &&
           reconfiguration_phase_ ==
             detail::SourceReconfigurationPhase::Inactive &&
-          capture_job_ && render_stack_) {
-        const bool has_frame = capture_job_->has_latest();
-        const auto schedule = scheduler_.poll(now, has_frame, false);
+          render_stack_) {
+        // Capture intake and retained presentation have separate lifetimes.
+        // A disconnected source can still leave a safe image whose crop/selection
+        // restoration needs the same FPS budget after its capture job has retired.
+        redraw_scheduler_active = true;
+        const bool capture_admitted = capture_job_ && !source_job_stopping_ && !source_disconnected_;
+        const bool has_frame = capture_admitted && capture_job_->has_latest();
+        if (settings_.selecting_region && selection_mapping_ && selection_client_extent_ && adapter_) {
+          if (const auto drag = adapter_->region_selection_preview()) {
+            const auto to_framebuffer = [this](const detail::NativePoint point) noexcept {
+              return render::PixelPoint{
+                static_cast<double>(point.x) * selection_mapping_->framebuffer.width / selection_client_extent_->width,
+                static_cast<double>(point.y) * selection_mapping_->framebuffer.height / selection_client_extent_->height};
+            };
+            selection_preview_ = render::selection_region(selection_mapping_->content, selection_mapping_->viewport,
+                                                         to_framebuffer(drag->start), to_framebuffer(drag->end));
+          }
+          else {
+            selection_preview_.reset();
+          }
+          render_stack_->set_presentation({settings_.region, true, selection_preview_});
+        }
+        redraw_available_before_progress = render_stack_->has_redraw_work();
+        const auto schedule = scheduler_.poll(now, has_frame, redraw_available_before_progress);
         earlier_deadline(deadline, schedule.next_wake);
+        bool submitted_capture{};
         if (schedule.render && has_frame && render_stack_->ready_for_frame()) {
           if (auto frame = capture_job_->take_latest()) {
             if (frame->resource_generation() == resource_generation_ &&
                 frame->allocation_extent() == allocation_ &&
                 !is_zero_extent(frame->content_size())) {
               render_stack_->submit(std::move(*frame));
+              submitted_capture = true;
             }
           }
+        }
+        if (schedule.render && detail::admit_retained_redraw(redraw_available_before_progress,
+                                                            submitted_capture)) {
+          render_stack_->request_redraw();
         }
       }
 
@@ -842,6 +1123,12 @@ namespace avb::platform::windows {
         render_result = render_stack_->tick(framebuffer, now);
         last_render_result_ = render_result;
         earlier_deadline(deadline, render_result.next_deadline);
+        if (redraw_scheduler_active && !redraw_available_before_progress && render_stack_->has_redraw_work()) {
+          // Retirement can make the retained image reusable after the admission
+          // poll. Request one later observation so a static source's edit reaches
+          // the scheduler even when every GPU/present fence retired this tick.
+          earlier_deadline(deadline, now + std::chrono::milliseconds{1});
+        }
         if (render_result.made_progress) {
           progress = render::DrainProgress::TrackedRetirement;
         }
@@ -916,6 +1203,10 @@ namespace avb::platform::windows {
         candidates.overlay_close = true;
         pending_overlay_close_event_ = true;
         deactivate_browser_helper(candidates);
+      }
+
+      if (!stop_requested_) {
+        progress_region_selection(render_result, candidates);
       }
 
       if (!stop_requested_ &&

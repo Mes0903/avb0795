@@ -66,7 +66,7 @@ namespace avb::platform::windows::detail {
     .flags = layered_alpha_flag,
   };
 
-  /// Full extended style plus layered attributes, not only the bits avb0795 modifies.
+  /// Complete instantaneous native state for verified rollback of one operation.
   struct NativeWindowState final {
     std::uintptr_t extended_style{};
     std::optional<LayeredAttributes> layered_attributes;
@@ -177,45 +177,57 @@ namespace avb::platform::windows::detail {
                 : core::AppErrorCode::RuntimeStateLost);
   }
 
-  /// Save exact original state, apply opaque layered transparency, and verify it.
-  template <class Operations>
-  [[nodiscard]] std::expected<NativeWindowState, core::AppError>
-  enter_pass_through(Operations &operations) noexcept
+  /// Derive owned input/alpha state from current decoration bits. Percent is validated by callers.
+  [[nodiscard]] constexpr NativeWindowState presentation_window_state(
+    const std::uintptr_t current_style, const core::OverlayMode mode,
+    const int opacity_percent) noexcept
   {
-    const auto snapshot = capture_native_window_state(operations);
-    if (!snapshot) {
-      return std::unexpected{snapshot.error()};
-    }
     NativeWindowState target{
-      .extended_style = input_transparency_style(
-        snapshot->extended_style, core::OverlayMode::PassThrough),
-      .layered_attributes = opaque_layered_attributes,
-    };
-    if (!apply_native_window_state(operations, target) ||
-        !native_window_state_matches(operations, target)) {
-      return std::unexpected{rollback_native_window_state(operations, *snapshot)};
+      .extended_style = input_transparency_style(current_style, mode)};
+    if (mode == core::OverlayMode::PassThrough || opacity_percent < 100) {
+      target.extended_style |= layered_style_bit;
+      target.layered_attributes = opaque_layered_attributes;
+      target.layered_attributes->alpha =
+        static_cast<std::uint8_t>((opacity_percent * 255 + 50) / 100);
     }
-    return *snapshot;
+    return target;
   }
 
-  /// Restore the entry snapshot; if that fails, verify restoration of the current mode.
+  /// @brief Apply input mode and whole-window alpha as one verified native transaction.
+  /// Independent border EXSTYLE bits come from the current snapshot. Failure restores
+  /// that exact snapshot, including color key/alpha flags; unverifiable rollback is
+  /// RuntimeStateLost. Callers publish their cached mode and opacity only on success.
   template <class Operations>
   [[nodiscard]] std::expected<void, core::AppError>
-  leave_pass_through(Operations &operations,
-                     const NativeWindowState &snapshot) noexcept
+  set_native_presentation(Operations &operations, const core::OverlayMode mode,
+                          const int opacity_percent) noexcept
   {
+    if (opacity_percent < 0 || opacity_percent > 100) {
+      return std::unexpected{overlay_transaction_error(core::AppErrorCode::InvalidValue)};
+    }
     const auto current = capture_native_window_state(operations);
     if (!current) {
       return std::unexpected{current.error()};
     }
-    if (!apply_native_window_state(operations, snapshot) ||
-        !native_window_state_matches(operations, snapshot)) {
+    const auto target = presentation_window_state(current->extended_style, mode,
+                                                  opacity_percent);
+    if (*current == target) {
+      return {};
+    }
+    if (!apply_native_window_state(operations, target) ||
+        !native_window_state_matches(operations, target)) {
       return std::unexpected{rollback_native_window_state(operations, *current)};
     }
     return {};
   }
 
-  /// Apply mode/border/geometry/extensions as one transaction and commit settings last.
+  /// @brief Commit stored settings only after the complete native change verifies.
+  ///
+  /// Operations supplies borrowed, synchronous access to the concrete owners.
+  /// Normal failure attempts rollback and distinguishes verified restoration
+  /// from RuntimeStateLost. Exceptions preserve the stronger state-lost result
+  /// even if a best-effort rollback appears to succeed, because the failed
+  /// operation may have left effects outside the captured proof.
   template <class Operations>
   [[nodiscard]] std::expected<void, core::AppError>
   apply_settings_transaction(Operations &operations) noexcept
@@ -254,7 +266,12 @@ namespace avb::platform::windows::detail {
     }
   }
 
-  /// Restore WndProc before clearing its property and publishing detached state.
+  /// @brief Remove callback reachability before discarding its context property.
+  ///
+  /// Restoring the procedure happens first so native dispatch cannot observe the
+  /// custom procedure without context. An unexpected removed property or replaced
+  /// procedure requires window destruction with the adapter alive; a setter's
+  /// successful return alone is insufficient evidence to free callback state.
   template <class Operations>
   [[nodiscard]] std::expected<void, core::AppError>
   detach_overlay_subclass(Operations &operations) noexcept
@@ -290,8 +307,12 @@ namespace avb::platform::windows::detail {
     }
   }
 
-  /// Stack-local guard for partial factory owners; no published drain loop is required.
-  /// Failed restoration destroys the overlay while the callback adapter still exists.
+  /// @brief Keep partial construction cleanup ordered around native callback reachability.
+  ///
+  /// The guard borrows an operations object and its overlay/adapter pair, all of
+  /// which must outlive its scope. Failed restoration destroys the window while
+  /// callback context is still valid. The guard follows ownership transferred
+  /// into a still-local aggregate and is disarmed only after publication succeeds.
   template <class Operations>
   class FactoryOverlayAttachmentGuard final {
   public:

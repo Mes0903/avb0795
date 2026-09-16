@@ -41,10 +41,18 @@ namespace avb::platform::windows {
     std::size_t slots_in_flight{};
     std::size_t presentations_in_flight{};
     bool presentation_suspended{};
+    std::optional<render::PresentationSnapshot> presentation;
   };
 
-  /// Main-thread owner of one replica and its native cleanup order.
-  /// Converts capture/render facts to portable events without choosing lifecycle precedence.
+  /// @brief Own one replica's native resources and their ordered retirement.
+  ///
+  /// All port operations run on the owning main thread. Capture delegates reach
+  /// separate callback state and request ticks; this aggregate consumes their
+  /// facts and reports portable events without deciding use-case precedence.
+  /// Source identity survives graphics rebuilds, while resource generations
+  /// distinguish replacement allocations. Published ownership ends only after
+  /// every independent callback, checkout, graphics, window, and helper barrier
+  /// permits release; a timeout or contained exception is not that permission.
   class WindowsReplicaRuntime final : public app::IReplicaRuntime {
   public:
     using WakeMainLoop = std::function<void()>;
@@ -57,14 +65,28 @@ namespace avb::platform::windows {
     WindowsReplicaRuntime(WindowsReplicaRuntime &&) = delete;
     WindowsReplicaRuntime &operator=(WindowsReplicaRuntime &&) = delete;
 
-    /// Apply native mode/border/geometry/extensions transactionally; settings commit last.
+    /// @brief Apply native settings and commit stored settings only after verification.
+    ///
+    /// Mode, border, client placement, and optional helper activation participate
+    /// in the transaction. Failure with verified restoration reports a platform
+    /// operation error. Unverifiable state or an exception reports RuntimeStateLost
+    /// even though rollback is attempted; the caller must handle that uncertainty.
     [[nodiscard]] std::expected<void, core::AppError>
     apply(const core::ReplicaSettings &settings) noexcept override;
-    /// Advance bounded capture, rendering, recovery, and drain on the main thread.
-    /// Return value-only facts and the earliest required future observation.
+    /// @brief Advance capture, presentation, recovery, and retained-owner cleanup.
+    ///
+    /// Tick consumes coalesced native facts, schedules bounded work, and returns
+    /// the earliest required observation time. Continue ticking after stop so
+    /// callback and GPU retirement can be proved. Wakes are hints; a deadline
+    /// keeps cleanup observable even when the final callback wake precedes its
+    /// count reaching zero. Unexpected exceptions retain owners and schedule drain.
     [[nodiscard]] app::RuntimeTickResult
     tick(std::chrono::steady_clock::time_point now) noexcept override;
-    /// Initiate retained-owner teardown; never synchronously wait for a callback/GPU.
+    /// @brief Initiate terminal cleanup without joining callback or GPU work.
+    ///
+    /// Repeated requests are harmless. Native stop calls can still fail or take
+    /// time; ownership remains here until later ticks report Stopped. The caller
+    /// must retain both the runtime and any host borrowed by its wake callable.
     void request_stop() noexcept override;
     /// Read counters while the render stack exists; unavailable after its release.
     [[nodiscard]] std::optional<WindowsRuntimeDiagnostics>
@@ -84,9 +106,11 @@ namespace avb::platform::windows {
                                      WaitingToRebuild };
 
   public:
-    // Passkey-gated so std::make_unique can construct the aggregate while only
-    // WindowsRuntimeFactory can create a ConstructionToken.
-    /// Adopt the complete inactive aggregate; only the factory can issue the passkey.
+    /// @brief Adopt a complete inactive aggregate through the factory's passkey.
+    ///
+    /// Public visibility permits make_unique construction; the private token
+    /// restricts who may establish the dependency and publication invariants.
+    /// Unique owners transfer here together before native capture is started.
     WindowsReplicaRuntime(
       ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive, core::ReplicaSettings settings, core::Extent allocation, core::CaptureExclusionStatus capture_exclusion, render::WindowsBridgePreference bridge_preference, std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop) noexcept;
 
@@ -122,6 +146,15 @@ namespace avb::platform::windows {
     [[nodiscard]] bool helper_activation_allowed() const noexcept;
     [[nodiscard]] bool
     helper_should_activate(const core::ReplicaSettings &settings) const noexcept;
+
+    /// @brief Publish usable source geometry and advance one bounded selection gesture.
+    /// The presented snapshot fixes the client-to-source mapping. Lifecycle or
+    /// geometry changes end that gesture and restore the accepted preferences.
+    void progress_region_selection(const render::RenderTickResult &render_result,
+                                   TickCandidates &candidates) noexcept;
+    void invalidate_region_content(TickCandidates &candidates) noexcept;
+    void cancel_region_selection(TickCandidates &candidates) noexcept;
+    void update_presentation_extent() noexcept;
 
     // Declaration order is the stable dependency order. Normal teardown resets
     // these owners in reverse: job, render, adapter, overlay, then source.
@@ -168,6 +201,12 @@ namespace avb::platform::windows {
     bool published_{};
     bool helper_activation_ready_{};
     render::RenderTickResult last_render_result_;
+    std::optional<core::Extent> presented_content_;
+    std::optional<core::Extent> awaited_content_;
+    std::optional<render::PresentationSnapshot> selection_mapping_;
+    std::optional<core::Extent> selection_client_extent_;
+    std::optional<core::PixelRegion> selection_preview_;
+    bool selection_result_pending_{};
     // One timer covers capture, adapter, source wake, and graphics uncertainty.
     detail::RuntimeDrainState drain_state_;
   };

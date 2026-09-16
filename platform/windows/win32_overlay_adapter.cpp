@@ -256,13 +256,22 @@ namespace avb::platform::windows {
   struct Win32OverlayAdapter::PreparedWindowMessage final {
     enum class Kind { Result,
                       Sizing,
-                      Dpi };
+                      Dpi,
+                      RegionBegin,
+                      RegionMove,
+                      RegionEnd,
+                      RegionCancel,
+                      RegionCancelAndForward,
+                      RegionFocus,
+                      RegionCursor };
 
     Kind kind{Kind::Result};
     LRESULT result{};
     RECT *target_rect{};
     detail::NativeRect rect;
     std::uint32_t dpi{};
+    detail::NativePoint point;
+    HCURSOR cursor{};
   };
 
   struct Win32OverlayAdapter::CallbackOperations final {
@@ -283,7 +292,9 @@ namespace avb::platform::windows {
     [[nodiscard]] bool
     forward_after_commit(const PreparedWindowMessage &message) const noexcept
     {
-      return message.kind == PreparedWindowMessage::Kind::Dpi;
+      return message.kind == PreparedWindowMessage::Kind::Dpi ||
+             message.kind == PreparedWindowMessage::Kind::RegionFocus ||
+             message.kind == PreparedWindowMessage::Kind::RegionCancelAndForward;
     }
 
     [[nodiscard]] LRESULT forward(const UINT message, const WPARAM word_parameter, const LPARAM long_parameter) noexcept
@@ -393,19 +404,16 @@ namespace avb::platform::windows {
     }
 
     Win32StyleOperations style_operations{window_};
-    std::optional<detail::NativeWindowState> initial_style;
-    if (mode_ == core::OverlayMode::PassThrough) {
-      const auto entered = detail::enter_pass_through(style_operations);
-      if (!entered) {
-        return std::unexpected{entered.error()};
-      }
-      initial_style = *entered;
+    const auto initial_style = detail::capture_native_window_state(style_operations);
+    if (!initial_style) {
+      return std::unexpected{initial_style.error()};
+    }
+    const auto presented = set_presentation(mode_, opacity_percent_);
+    if (!presented) {
+      return std::unexpected{presented.error()};
     }
 
     const auto rollback_style = [&]() noexcept {
-      if (!initial_style) {
-        return true;
-      }
       static_cast<void>(
         detail::apply_native_window_state(style_operations, *initial_style));
       return detail::native_window_state_matches(style_operations,
@@ -470,13 +478,13 @@ namespace avb::platform::windows {
     }
 
     saved_window_proc_ = reinterpret_cast<WNDPROC>(*installed);
-    pass_through_snapshot_ = initial_style;
     attached_ = true;
     return {};
   }
 
   std::expected<void, core::AppError> Win32OverlayAdapter::detach() noexcept
   {
+    set_region_selection(false);
     if (!attached_) {
       return window_destruction_required_
                ? std::unexpected{adapter_error(
@@ -506,46 +514,50 @@ namespace avb::platform::windows {
     attached_ = false;
     window_destruction_required_ = false;
     saved_window_proc_ = nullptr;
-    pass_through_snapshot_.reset();
     window_ = nullptr;
+    set_region_selection(false);
   }
 
   std::expected<void, core::AppError>
   Win32OverlayAdapter::set_mode(const core::OverlayMode mode) noexcept
   {
-    if (mode == mode_) {
-      return {};
-    }
+    return set_presentation(mode, opacity_percent_);
+  }
+
+  std::expected<void, core::AppError>
+  Win32OverlayAdapter::set_presentation(const core::OverlayMode mode,
+                                        const int opacity_percent) noexcept
+  {
     if (window_ == nullptr) {
       return std::unexpected{
         adapter_error(core::AppErrorCode::PlatformOperationFailure)};
     }
 
     Win32StyleOperations operations{window_};
-    if (mode == core::OverlayMode::PassThrough) {
-      const auto entered = detail::enter_pass_through(operations);
-      if (!entered) {
-        return std::unexpected{entered.error()};
-      }
-      pass_through_snapshot_ = *entered;
-      mode_ = mode;
-      return {};
+    const auto changed = detail::set_native_presentation(operations, mode, opacity_percent);
+    if (!changed) {
+      return std::unexpected{changed.error()};
     }
-    // Leaving transparency requires the exact entry snapshot, not clearing guessed bits.
-    if (!pass_through_snapshot_) {
-      return std::unexpected{adapter_error(core::AppErrorCode::RuntimeStateLost)};
-    }
-    const auto left =
-      detail::leave_pass_through(operations, *pass_through_snapshot_);
-    if (!left) {
-      return std::unexpected{left.error()};
-    }
-    pass_through_snapshot_.reset();
     mode_ = mode;
+    opacity_percent_ = opacity_percent;
     return {};
   }
 
   core::OverlayMode Win32OverlayAdapter::mode() const noexcept { return mode_; }
+
+  int Win32OverlayAdapter::opacity_percent() const noexcept { return opacity_percent_; }
+
+  bool Win32OverlayAdapter::presentation_matches(const core::OverlayMode mode,
+                                                  const int opacity_percent) const noexcept
+  {
+    if (window_ == nullptr || opacity_percent < 0 || opacity_percent > 100) {
+      return false;
+    }
+    Win32StyleOperations operations{window_};
+    const auto observed = detail::capture_native_window_state(operations);
+    return observed && *observed == detail::presentation_window_state(
+      observed->extended_style, mode, opacity_percent);
+  }
 
   std::expected<OverlayClientGeometry, core::AppError>
   Win32OverlayAdapter::snapshot_client_geometry() const noexcept
@@ -649,11 +661,126 @@ namespace avb::platform::windows {
     }
   }
 
+  void Win32OverlayAdapter::set_region_selection(
+    const bool active, std::optional<detail::NativeRect> content_rect) noexcept
+  {
+    if (!active) {
+      region_selection_active_ = false;
+      region_selection_terminal_ = false;
+      region_selection_focus_observed_ = false;
+      region_content_rect_.reset();
+      region_gesture_.reset();
+      region_result_.reset();
+      release_region_capture();
+      return;
+    }
+    if (window_ == nullptr || !attached_ || region_selection_terminal_) {
+      return;
+    }
+    if (content_rect && (content_rect->left >= content_rect->right ||
+                         content_rect->top >= content_rect->bottom)) {
+      content_rect.reset();
+    }
+    if (region_selection_active_ && region_content_rect_ &&
+        region_content_rect_ != content_rect) {
+      cancel_region_selection();
+      return;
+    }
+    region_selection_active_ = true;
+    region_content_rect_ = content_rect;
+  }
+
+  bool Win32OverlayAdapter::focus_region_selection() noexcept
+  {
+    if (!region_selection_active_ || region_selection_terminal_ || window_ == nullptr) {
+      return false;
+    }
+    static_cast<void>(SetForegroundWindow(window_));
+    static_cast<void>(SetFocus(window_));
+    region_selection_focus_observed_ = GetFocus() == window_;
+    if (!region_selection_focus_observed_) {
+      cancel_region_selection();
+    }
+    return region_selection_focus_observed_;
+  }
+
+  std::optional<OverlayRegionGesture>
+  Win32OverlayAdapter::region_selection_preview() const noexcept
+  {
+    return region_gesture_;
+  }
+
+  std::optional<OverlayRegionSelectionResult>
+  Win32OverlayAdapter::take_region_selection_result() noexcept
+  {
+    return std::exchange(region_result_, std::nullopt);
+  }
+
+  void Win32OverlayAdapter::release_region_capture() noexcept
+  {
+    if (window_ != nullptr && GetCapture() == window_) {
+      static_cast<void>(ReleaseCapture());
+    }
+  }
+
+  void Win32OverlayAdapter::cancel_region_selection() noexcept
+  {
+    if (!region_selection_active_ || region_selection_terminal_) {
+      return;
+    }
+    region_selection_terminal_ = true;
+    region_gesture_.reset();
+    region_result_ = OverlayRegionSelectionResult{};
+    // ReleaseCapture synchronously reenters WM_CAPTURECHANGED on this subclass.
+    release_region_capture();
+  }
+
   std::optional<Win32OverlayAdapter::PreparedWindowMessage>
   Win32OverlayAdapter::prepare_message(const UINT message,
                                        const WPARAM word_parameter,
                                        const LPARAM long_parameter)
   {
+    using Kind = PreparedWindowMessage::Kind;
+    if (region_selection_active_) {
+      if (message == WM_SETFOCUS) {
+        return PreparedWindowMessage{.kind = Kind::RegionFocus};
+      }
+      if ((message == WM_KILLFOCUS && region_selection_focus_observed_) ||
+          message == WM_CANCELMODE ||
+          (message == WM_CAPTURECHANGED && region_gesture_)) {
+        return PreparedWindowMessage{.kind = Kind::RegionCancelAndForward};
+      }
+      if (message == WM_KEYDOWN && word_parameter == VK_ESCAPE) {
+        return PreparedWindowMessage{.kind = Kind::RegionCancel};
+      }
+      if (message == WM_SETCURSOR && LOWORD(long_parameter) == HTCLIENT) {
+        const auto cursor = LoadCursor(nullptr, IDC_CROSS);
+        if (cursor != nullptr) {
+          return PreparedWindowMessage{.kind = Kind::RegionCursor, .cursor = cursor};
+        }
+      }
+      if (message == WM_LBUTTONDOWN || message == WM_MOUSEMOVE ||
+          message == WM_LBUTTONUP) {
+        const detail::NativePoint point{GET_X_LPARAM(long_parameter),
+                                         GET_Y_LPARAM(long_parameter)};
+        if (!region_selection_terminal_ && region_content_rect_) {
+          const auto &rect = *region_content_rect_;
+          if (message == WM_LBUTTONDOWN && !region_gesture_ &&
+              point.x >= rect.left && point.x < rect.right &&
+              point.y >= rect.top && point.y < rect.bottom) {
+            return PreparedWindowMessage{.kind = Kind::RegionBegin, .point = point};
+          }
+          if (region_gesture_ && message != WM_LBUTTONDOWN) {
+            return PreparedWindowMessage{
+              .kind = message == WM_LBUTTONUP ? Kind::RegionEnd : Kind::RegionMove,
+              .point = {std::clamp(point.x, rect.left, rect.right),
+                        std::clamp(point.y, rect.top, rect.bottom)}};
+          }
+        }
+        // GLFW's normal left-button handling captures even while no crop is armed.
+        return PreparedWindowMessage{.kind = Kind::Result};
+      }
+    }
     if (message == WM_NCHITTEST) {
       RECT rect{};
       if (GetWindowRect(window_, &rect) == FALSE) {
@@ -667,7 +794,9 @@ namespace avb::platform::windows {
         return std::nullopt;
       }
       return PreparedWindowMessage{.kind = PreparedWindowMessage::Kind::Result,
-                                   .result = hit_zone_result(zone)};
+                                   .result = region_selection_active_ &&
+                                                     zone == detail::HitZone::Caption
+                                               ? HTCLIENT : hit_zone_result(zone)};
     }
     // Constrain content aspect after subtracting the current native frame insets.
     if (message == WM_SIZING) {
@@ -701,6 +830,40 @@ namespace avb::platform::windows {
     const PreparedWindowMessage &message) noexcept
   {
     switch (message.kind) {
+    case PreparedWindowMessage::Kind::RegionBegin:
+      region_gesture_ = OverlayRegionGesture{message.point, message.point};
+      static_cast<void>(SetCapture(window_));
+      if (GetCapture() != window_) {
+        cancel_region_selection();
+      }
+      return 0;
+    case PreparedWindowMessage::Kind::RegionMove:
+      if (region_gesture_) {
+        region_gesture_->end = message.point;
+      }
+      return 0;
+    case PreparedWindowMessage::Kind::RegionEnd:
+      if (region_gesture_) {
+        region_gesture_->end = message.point;
+        const auto gesture = *region_gesture_;
+        region_gesture_.reset();
+        if (gesture.start.x != gesture.end.x && gesture.start.y != gesture.end.y) {
+          region_selection_terminal_ = true;
+          region_result_ = OverlayRegionSelectionResult{gesture};
+        }
+        release_region_capture();
+      }
+      return 0;
+    case PreparedWindowMessage::Kind::RegionCancel:
+    case PreparedWindowMessage::Kind::RegionCancelAndForward:
+      cancel_region_selection();
+      return 0;
+    case PreparedWindowMessage::Kind::RegionFocus:
+      region_selection_focus_observed_ = true;
+      return 0;
+    case PreparedWindowMessage::Kind::RegionCursor:
+      static_cast<void>(SetCursor(message.cursor));
+      return TRUE;
     case PreparedWindowMessage::Kind::Result:
       return message.result;
     case PreparedWindowMessage::Kind::Sizing:
@@ -750,8 +913,8 @@ namespace avb::platform::windows {
     attached_ = false;
     window_destruction_required_ = false;
     saved_window_proc_ = nullptr;
-    pass_through_snapshot_.reset();
     window_ = nullptr;
+    set_region_selection(false);
   }
 
   LRESULT CALLBACK Win32OverlayAdapter::window_proc(

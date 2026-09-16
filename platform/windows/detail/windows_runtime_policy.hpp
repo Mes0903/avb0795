@@ -14,6 +14,15 @@
 
 namespace avb::platform::windows::detail {
 
+  /// @brief Spend one frame admission on either a fresh copy or retained redraw.
+  /// A newly adopted capture will render the latest presentation when its copy
+  /// completes. Grant retained replay when dirty work has no such adopted frame.
+  [[nodiscard]] constexpr bool admit_retained_redraw(const bool dirty,
+                                                    const bool submitted_capture) noexcept
+  {
+    return dirty && !submitted_capture;
+  }
+
   /// Published/pending bridge selection, so unchanged status does not emit duplicate events.
   struct RuntimeBridgeEventState final {
     std::optional<render::BridgeSelection> published;
@@ -143,7 +152,12 @@ namespace avb::platform::windows::detail {
     bool capture_failed{};
   };
 
-  /// Require callback quiescence, then old render idleness, before prepare/commit.
+  /// @brief Order resize retirement before replacing the capture allocation.
+  ///
+  /// Callback quiescence allows discarding the final mailbox frame; graphics
+  /// idleness then accounts for checkouts already transferred out of that mailbox.
+  /// Source closure or fatal capture cancels every active phase, including a
+  /// prepared replacement that has not yet reopened admission.
   [[nodiscard]] constexpr SourceReconfigurationAction
   next_source_reconfiguration_action(
     const SourceReconfigurationFacts facts) noexcept
@@ -185,8 +199,13 @@ namespace avb::platform::windows::detail {
     std::optional<std::chrono::steady_clock::time_point> next_deadline;
   };
 
-  /// Polling/retrying is not forward progress; only retirement/proven release resets time.
-  /// Uncertainty remains sticky until a safe empty-owner observation proves completion.
+  /// @brief Track stalled cleanup without converting elapsed time into release permission.
+  ///
+  /// Polling or retrying does not reset the no-progress clock; tracked retirement
+  /// and proven safe release do. Uncertainty remains sticky until an empty-owner
+  /// observation explicitly proves release, so a later successful poll cannot
+  /// erase an earlier loss of ownership evidence. Returned deadlines request
+  /// another observation and do not imply that cleanup will complete by then.
   [[nodiscard]] inline RuntimeDrainUpdate advance_runtime_drain(
     RuntimeDrainState state, const bool pending_ownership, const bool ownership_uncertain, const render::DrainProgress progress, const std::chrono::steady_clock::time_point now) noexcept
   {

@@ -13,8 +13,12 @@
 
 namespace avb::platform::windows {
 
-  /// Composition adapter that borrows discovery identity and constructs one runtime.
-  /// Partial native owners remain local until StartCapture guarantees publication.
+  /// @brief Assemble a complete native runtime around one resolved catalog identity.
+  ///
+  /// The factory borrows its registry and copies a wake callable into produced
+  /// owners. The registry must outlive factory use; anything the callable borrows
+  /// must survive each published runtime's full drain. Partial owners stay local
+  /// until native capture start commits the aggregate to published lifetime rules.
   class WindowsRuntimeFactory final : public app::IReplicaRuntimeFactory {
   public:
     using WakeMainLoop = std::function<void()>;
@@ -25,8 +29,15 @@ namespace avb::platform::windows {
                           render::WindowsBridgePreference bridge_preference =
                             render::WindowsBridgePreference::Automatic);
 
-    /// Resolve once, assemble in dependency order, then publish the complete owner.
-    /// The factory-local guard preserves subclass state during failure unwind.
+    /// @brief Resolve once, construct in dependency order, and publish after start.
+    ///
+    /// The descriptor's extent is only an initial window-sizing hint: capture
+    /// allocation is read again from the retained item before graphics slots are
+    /// built. Recoverable construction failures return typed errors and unwind
+    /// local owners under their destruction invariants; the attachment guard
+    /// keeps callback state alive if window destruction is needed. Success
+    /// transfers the complete runtime, not a promise of first-frame
+    /// delivery or continued source availability.
     [[nodiscard]] std::expected<std::unique_ptr<app::IReplicaRuntime>,
                                 core::AppError>
     create(const core::SourceDescriptor &source,

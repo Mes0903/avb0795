@@ -4,7 +4,6 @@
 
 #include "platform/windows/windows_runtime_factory.hpp"
 
-#include "platform/windows/capture_exclusion.hpp"
 #include "platform/windows/detail/overlay_transactions.hpp"
 #include "platform/windows/features/browser_capture_keep_alive.hpp"
 #include "platform/windows/overlay_window.hpp"
@@ -13,10 +12,6 @@
 #include "platform/windows/windows_capture_source.hpp"
 #include "platform/windows/windows_replica_runtime.hpp"
 #include "render/windows_render_stack.hpp"
-
-#define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3.h>
-#include <GLFW/glfw3native.h>
 
 #include <dxgiformat.h>
 #include <winerror.h>
@@ -98,6 +93,9 @@ namespace avb::platform::windows {
                                 const core::ReplicaSettings &settings)
   {
     try {
+      if (settings.selecting_region) {
+        return std::unexpected{core::AppError{.code = core::AppErrorCode::InvalidValue}};
+      }
       const auto overlay_extent = initial_overlay_extent(source.extent);
       if (overlay_extent.width == 0 || overlay_extent.height == 0) {
         return std::unexpected{core::AppError{
@@ -120,9 +118,10 @@ namespace avb::platform::windows {
       if (!overlay) {
         return std::unexpected{factory_error(overlay.error())};
       }
-      auto *const glfw_window = (*overlay)->native_window();
-      const auto exclusion = attempt_capture_exclusion(
-        glfw_window == nullptr ? nullptr : glfwGetWin32Window(glfw_window));
+      // Replicas retain the default capturable window policy. A display source
+      // can include this overlay; choosing a source window or placing the
+      // overlay on another display keeps that feedback out of the source image.
+      constexpr auto exclusion = core::CaptureExclusionStatus::NotAttempted;
 
       auto adapter = Win32OverlayAdapter::create_detached(
         **overlay, settings.mode, settings.border, source.extent);
@@ -142,8 +141,16 @@ namespace avb::platform::windows {
       // Guard ownership follows subclass installation before any later fallible step.
       guard.arm();
 
+      // Establish persisted whole-window alpha before capture can start or be published.
+      const auto presented = (*adapter)->set_presentation(settings.mode,
+                                                           settings.opacity_percent);
+      if (!presented) {
+        return std::unexpected{factory_error(presented.error())};
+      }
+
       auto render_stack = std::make_unique<render::WindowsRenderStack>(
         **overlay, initial_resource_generation, bridge_preference_);
+      render_stack->set_presentation({settings.region, false, {}});
       auto capture_job = WgcCaptureJob::create_inactive(
         **source_owner, render_stack->capture_device(),
         initial_resource_generation, capture_pool_buffer_count,
@@ -158,7 +165,8 @@ namespace avb::platform::windows {
       if (!slots) {
         return std::unexpected{factory_error(slots.error())};
       }
-      (*adapter)->update_source_extent(allocation);
+      // Actual presented content establishes the eventual crop/resize constraint.
+      (*adapter)->update_source_extent({});
 
       std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive;
       if (source.kind == core::SourceKind::Window) {
