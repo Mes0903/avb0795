@@ -2313,7 +2313,12 @@ namespace avb::desktop {
         continue;
       }
 
-      const auto status = vkGetFenceStatus(device_, proof);
+      auto status = vkGetFenceStatus(device_, proof);
+      if (status == VK_SUCCESS && proof != record.acquire_fence) {
+        // The acquire fence signal follows its semaphore signal independently of
+        // the rendering submission. Observe it before destroying frame owners.
+        status = vkGetFenceStatus(device_, record.acquire_fence);
+      }
       if (status == VK_NOT_READY) {
         schedule_poll(now, draining);
         ++current;

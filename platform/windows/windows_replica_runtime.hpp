@@ -10,7 +10,7 @@
 #include "platform/windows/detail/windows_graphics_policy.hpp"
 #include "platform/windows/detail/windows_runtime_policy.hpp"
 #include "render/graphics_retry_policy.hpp"
-#include "render/windows_render_stack.hpp"
+#include "platform/windows/windows_render_stack.hpp"
 
 #include <chrono>
 #include <cstddef>

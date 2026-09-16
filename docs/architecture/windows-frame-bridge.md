@@ -3,7 +3,7 @@
 ```mermaid
 flowchart LR
   WGC[WGC checkout<br/>WindowsCapturedFrame] -->|submit：移交影格| B[WindowsFrameBridge]
-  F[WindowsRenderStack<br/>ring 與 canonical slot phase] -->|SlotKey / FrameStamp| B
+  F[WindowsRenderStack<br/>接納 / transport / aggregate facts] -->|SlotKey / FrameStamp| B
   B --> P[D3 CopySubresourceRegion]
   P --> Q[query / shared fence<br/>producer completion proof]
   Q -->|完成證據| R[歸還 WGC checkout]
@@ -13,21 +13,23 @@ flowchart LR
   Q --> G[ExternalReady<br/>CompletedProducerWait]
   M --> E[BridgeProgress<br/>最多三筆 keyed completion]
   G --> E
-  E -->|驗證 key 與 phase| F
-  F --> V[Vulkan submission]
+  E --> F
+  F -->|typed handoff| VR[VulkanRenderer<br/>canonical slot phase / image users]
+  VR --> V[Vulkan submission]
   V --> S[submission retirement]
   S --> T[presentation retirement]
 ```
 
-為了讓來源擷取與 Vulkan 顯示各自維持明確的資源生命週期，系統需要分別保存 D3 copy、Vulkan submission 與 presentation 的完成證據。`WindowsFrameBridge` 管理 D3 device、immediate context、三個 producer slots、已接收的 WGC checkout，以及 D3 shared texture／fence 與對應的 Vulkan imported image／memory／view／timeline；`WindowsRenderStack` 管理影格接納、canonical slot phase、Vulkan device、CPU upload 與顯示資源。
+為了讓來源擷取與 Vulkan 顯示各自維持明確的資源生命週期，系統需要分別保存 D3 copy、Vulkan submission 與 presentation 的完成證據。`WindowsFrameBridge` 管理 D3 device、immediate context、三個 producer slots、已接收的 WGC checkout，以及 D3 shared texture／fence 與對應的 Vulkan imported image／memory／view／timeline。`VulkanRenderer` 管理 canonical slot phase、Vulkan device、CPU upload 與顯示資源；`WindowsRenderStack` 協調影格接納、bridge selection、ring transaction 與兩個 owners 的進度。
 
-本文件描述目前 producer／import ownership 遷移階段。Renderer-role caller 以 `ExternalSampledImageView` 保存 image registration，以 `CompletedProducerWait` 保存已完成的 producer wait。Bridge 保存對應的原生 owner；caller 負責退休 Vulkan 使用者並撤銷 registration。後續 shared renderer 拆分會將 device／WSI／draw 集中成獨立的共用 Vulkan 元件。
+Renderer 以 `ExternalSampledImageView` 保存 image registration，以 `CompletedProducerWait` 保存已完成的 producer wait。Bridge 保存對應的原生 owner；renderer 負責退休 Vulkan 使用者並撤銷 registration。共用 device／WSI／draw 與三段 progress 的責任見 [共用 Vulkan renderer](shared-vulkan-renderer.md)。
 
 主要檔案：
 
 - [`windows_frame_bridge.hpp`](../../platform/windows/windows_frame_bridge.hpp)：主執行緒 API、借用期間、submit 結果與 completion batch。
 - [`windows_frame_bridge.cpp`](../../platform/windows/windows_frame_bridge.cpp)：D3 資源、Windows adapter／extension 偏好、逐 handle 相容性探測、Vulkan import、copy proof、Map/Unmap 與 checkout 歸還。
-- [`windows_render_stack.cpp`](../../render/windows_render_stack.cpp)：呼叫 bridge、驗證 canonical slot、搬移 CPU rows，以及 Vulkan submission／presentation。
+- [`windows_render_stack.cpp`](../../platform/windows/windows_render_stack.cpp)：配對兩個 owners 的 ring、轉交 typed completion、選擇 bridge，以及合併 deadline／loss facts。
+- [`vulkan_renderer.cpp`](../../render/vulkan_renderer.cpp)：驗證 canonical slot、搬移 CPU rows，以及 Vulkan submission／presentation。
 - [`vulkan_input.hpp`](../../render/vulkan_input.hpp)：`SlotKey`、`FrameStamp`、`CpuRowsView` 等跨 owner 資料契約。
 - [`graphics_construction_guard.hpp`](../../platform/windows/detail/graphics_construction_guard.hpp)：建構與 ring 安裝的有序 rollback，依序撤銷引用、釋放 bridge 資源、釋放 renderer 資源。
 
@@ -182,4 +184,4 @@ flowchart LR
 
 為了讓 partial construction 也遵守跨 owner 的引用順序，系統需要在第一個 fallible step 前建立 cleanup 責任。`GraphicsConstructionGuard<Operations>` 保存借用的 operations，scope 結束時依序執行三個 `noexcept` cleanup 動作。`disarm()` 在交易成功時轉移 cleanup 責任；detach proof 失敗時沿用 terminate invariant，保存資源相依性的安全邊界。
 
-Bootstrap operations 負責整個 graphics aggregate：撤銷 renderer references、釋放 bridge，再釋放 renderer native resources。Ring-install operations 綁定單次安裝的 serial，回收該 ring 的 registrations、imports、staging 與 upload allocations；兩個 devices 與獨立 present records 維持既有生命週期。Private slot identities 在配置前建立，`ring_ready_` 在所有必要資源就緒後發布，接納條件因此能直接反映安裝交易的完成狀態。
+Bootstrap operations 負責整個 graphics aggregate：撤銷 renderer references、釋放 bridge，再釋放 renderer native resources。Ring-install operations 綁定單次安裝的 serial，回收該 ring 的 registrations、imports、staging 與 upload allocations；兩個 devices 與獨立 present records 維持既有生命週期。Renderer 在配置前建立 private slot identities，`publish_ring` 在所有必要資源就緒後發布 ready state，接納條件因此能直接反映安裝交易的完成狀態。

@@ -125,6 +125,7 @@ function(_avb0795_assert_known_production_targets)
       avb0795_core
       avb0795_app
       avb0795_ui
+      avb0795_vulkan_renderer
       avb0795_windows
       avb0795_windows_graphics
       avb0795_desktop
@@ -194,17 +195,25 @@ function(avb0795_assert_target_boundaries)
       windowsapp)
   endif()
 
+  if(TARGET avb0795_vulkan_renderer)
+    _avb0795_assert_sources(
+      avb0795_vulkan_renderer
+      "render"
+      "${PROJECT_BINARY_DIR}/generated/avb/render")
+    _avb0795_assert_links(
+      avb0795_vulkan_renderer avb0795_core avb0795_diagnostics glfw Vulkan::Vulkan)
+  endif()
+
   if(TARGET avb0795_windows_graphics)
     _avb0795_assert_sources(
       avb0795_windows_graphics
-      "platform/windows"
-      "render"
-      "${PROJECT_BINARY_DIR}/generated/avb/render")
+      "platform/windows")
     _avb0795_assert_links(
       avb0795_windows_graphics
       avb0795_core
       avb0795_app
       avb0795_windows
+      avb0795_vulkan_renderer
       avb0795_diagnostics
       glfw
       Vulkan::Vulkan
@@ -228,6 +237,7 @@ function(avb0795_assert_target_boundaries)
       avb0795_app
       avb0795_ui
       avb0795_diagnostics
+      avb0795_vulkan_renderer
       glfw
       Vulkan::Vulkan
       imgui
@@ -443,7 +453,7 @@ function(_avb0795_scan_files category)
       _avb0795_assert_no_match(
         "${file}"
         "${contents}"
-        "(^|[^A-Za-z0-9_])(Application|ApplicationState|ReplicaSession|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack)([^A-Za-z0-9_]|$)"
+        "(^|[^A-Za-z0-9_])(Application|ApplicationState|ReplicaSession|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack|WindowsFrameBridge|VulkanRenderer)([^A-Za-z0-9_]|$)"
         "UI crosses the frontend command/view-state boundary")
     elseif(category STREQUAL "desktop")
       _avb0795_assert_layer_includes("${file}" "${contents}" "i18n")
@@ -471,7 +481,7 @@ function(_avb0795_scan_files category)
       _avb0795_assert_no_match(
         "${file}"
         "${contents}"
-        "(^|[^A-Za-z0-9_])(ISourceCatalog|IReplicaRuntimeFactory|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack|WgcCaptureJob|WindowsCaptureSource|WindowsCapturedFrame)([^A-Za-z0-9_]|$)"
+        "(^|[^A-Za-z0-9_])(ISourceCatalog|IReplicaRuntimeFactory|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack|WindowsFrameBridge|VulkanRenderer|WgcCaptureJob|WindowsCaptureSource|WindowsCapturedFrame)([^A-Za-z0-9_]|$)"
         "desktop shell reaches a port, replica runtime, config store, or native replica owner")
     elseif(category STREQUAL "windows")
       get_filename_component(file_name "${file}" NAME)
@@ -530,26 +540,19 @@ function(_avb0795_scan_files category)
     elseif(category STREQUAL "render")
       _avb0795_assert_app_includes("${file}" "${contents}")
       _avb0795_assert_layer_includes("${file}" "${contents}" "i18n")
-      set(allowed_render_windows_headers
-          platform/windows/overlay_window.hpp
-          platform/windows/windows_captured_frame.hpp)
-      file(RELATIVE_PATH render_relative "${AVB0795_SOURCE_ROOT}" "${file}")
-      string(REPLACE "\\" "/" render_relative "${render_relative}")
-      if(render_relative MATCHES "^render/windows_render_stack\\.(hpp|cpp)$")
-        list(APPEND allowed_render_windows_headers
-             platform/windows/detail/bridge_policy.hpp
-             platform/windows/detail/windows_graphics_policy.hpp)
-      endif()
-      if(render_relative STREQUAL "render/windows_render_stack.cpp")
-        list(APPEND allowed_render_windows_headers
-             platform/windows/windows_frame_bridge.hpp
-             platform/windows/detail/graphics_construction_guard.hpp)
-      endif()
       _avb0795_assert_layer_includes(
-        "${file}"
-        "${contents}"
-        "platform/windows"
-        ${allowed_render_windows_headers})
+        "${file}" "${contents}" "platform")
+      _avb0795_assert_no_match(
+        "${file}" "${normalized_lower_contents}" "${desktop_forbidden_include}"
+        "shared renderer includes a native capture/platform header")
+      _avb0795_assert_no_match(
+        "${file}" "${contents}"
+        "(^|[^A-Za-z0-9_])(HANDLE|HDC|HINSTANCE|HMONITOR|HWND|HRESULT|IUnknown|IInspectable|ID3D[A-Za-z0-9_]*|IDXGI[A-Za-z0-9_]*|D3D[A-Za-z0-9_]*|DXGI_[A-Za-z0-9_]*|Windows[A-Za-z0-9_]*|Wgc[A-Za-z0-9_]*|DeviceLossKind|BridgeCapabilityFacts|BridgeSelection)([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])winrt::|VK_[A-Z0-9_]*WIN32|[A-Za-z0-9_]*Win32[A-Za-z0-9_]*"
+        "shared renderer mentions a platform capture/interop contract")
+      _avb0795_assert_no_match(
+        "${file}" "${normalized_lower_contents}"
+        "#[ \t]*include[ \t]+[^<\" \t\r\n]"
+        "shared renderer uses a non-literal include")
       _avb0795_assert_no_match(
         "${file}"
         "${contents}"
@@ -605,7 +608,7 @@ function(_avb0795_run_source_boundary_scan)
     _avb0795_assert_no_match(
       "${file}"
       "${contents}"
-      "(^|[^A-Za-z0-9_])(ApplicationState|ReplicaSession|RuntimeEvent|AppCommand|ControllerView|WgcCaptureJob|WindowsRenderStack)([^A-Za-z0-9_]|$)|[.>](tick|start|request_stop|apply|take_latest|drain_signals|enumerate|step|shutdown|create|view_state|next_deadline|exit_disposition|render)[ \t\r\n]*\\(|ImGui::|vk[A-Z][A-Za-z0-9_]*[ \t\r\n]*\\(|GraphicsCapture"
+      "(^|[^A-Za-z0-9_])(ApplicationState|ReplicaSession|RuntimeEvent|AppCommand|ControllerView|WgcCaptureJob|WindowsRenderStack|WindowsFrameBridge|VulkanRenderer)([^A-Za-z0-9_]|$)|[.>](tick|start|request_stop|apply|take_latest|drain_signals|enumerate|step|shutdown|create|view_state|next_deadline|exit_disposition|render)[ \t\r\n]*\\(|ImGui::|vk[A-Z][A-Za-z0-9_]*[ \t\r\n]*\\(|GraphicsCapture"
       "composition root contains session/runtime behavior")
   endforeach()
 

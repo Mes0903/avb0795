@@ -11,7 +11,7 @@
 #include "platform/windows/win32_overlay_adapter.hpp"
 #include "platform/windows/windows_capture_source.hpp"
 #include "platform/windows/windows_replica_runtime.hpp"
-#include "render/windows_render_stack.hpp"
+#include "platform/windows/windows_render_stack.hpp"
 
 #include <dxgiformat.h>
 #include <winerror.h>

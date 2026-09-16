@@ -1,15 +1,10 @@
 /// @file
 /// @brief Replica-only native graphics owner. Main-thread ticks advance a bounded
-/// D3-to-Vulkan ring and independent WSI retirement without synchronous waits.
-#include "render/windows_render_stack.hpp"
+/// Producer-to-Vulkan ring and independent WSI retirement without synchronous waits.
+#include "render/vulkan_renderer.hpp"
 #include "avb/diagnostics/performance_report.hpp"
 
 #include "avb/render/replica_shaders.hpp"
-#include "platform/windows/detail/graphics_construction_guard.hpp"
-#include "platform/windows/detail/windows_graphics_policy.hpp"
-#include "platform/windows/overlay_window.hpp"
-#include "platform/windows/windows_captured_frame.hpp"
-#include "platform/windows/windows_frame_bridge.hpp"
 #include "render/graphics_retry_policy.hpp"
 #include "render/render_math.hpp"
 #include "render/vulkan_input.hpp"
@@ -166,14 +161,12 @@ namespace avb::render {
 
   }    // namespace
 
-  /// @brief Canonical owner for one replica graphics generation. The runtime owns this
-  /// aggregate and its borrowed overlay; callbacks never enter this data plane.
-  class WindowsRenderStack::Impl final {
+  class VulkanRenderer::Impl final {
   public:
     using SlotPhase = RenderSlotPhase;
 
     /// @brief One of three stable ring slots, with CPU or imported-GPU destination.
-    /// The key names bridge-owned source work; sampled images survive its WGC
+    /// The key names bridge-owned source work; sampled images survive its source
     /// checkout and can remain as safe redraw content after submission retires.
     struct CaptureSlot final {
       SlotKey key;
@@ -252,311 +245,150 @@ namespace avb::render {
       std::chrono::steady_clock::time_point started_at{};
     };
 
-    /// Construct device and WSI owners around a borrowed overlay on the main
-    /// thread; partial setup enqueues no work and can unwind immediately.
-    Impl(GLFWwindow *native_window, std::uint64_t resource_generation, core::Extent initial_framebuffer, WindowsBridgePreference bridge_preference,
-         diagnostics::PerformanceReport *performance, std::uint64_t observation_instance);
-    /// Require established native-use or matching device-loss proof; never wait.
-    ~Impl() noexcept;
 
+    Impl(GLFWwindow *window, std::uint64_t generation, core::Extent framebuffer, const VulkanStartupRequest &startup, diagnostics::PerformanceReport *performance, std::uint64_t observation_instance);
+    ~Impl() noexcept;
     Impl(const Impl &) = delete;
     Impl &operator=(const Impl &) = delete;
+    void detach_for_shutdown() noexcept;
+    std::expected<std::uint64_t, core::AppError> begin_ring(core::Extent allocation) noexcept;
+    std::expected<void, core::AppError> publish_ring(std::uint64_t serial, std::uint64_t generation) noexcept;
+    void discard_ready_inputs() noexcept;
+    void begin_recovery_drain(bool device_lost) noexcept;
+    void contain_failure(VulkanTickResult &result, core::AppError error) noexcept;
+    VulkanTickResult begin_tick(core::Extent framebuffer, std::chrono::steady_clock::time_point now) noexcept;
+    void retire_submissions(VulkanTickResult &result, std::chrono::steady_clock::time_point now) noexcept;
+    void finish_tick(VulkanTickResult &result, std::chrono::steady_clock::time_point now, bool allow_present, bool allow_recovery) noexcept;
+    void observe_metadata(VulkanObservationContext context, std::chrono::steady_clock::time_point now) noexcept;
 
-    /// Borrow the D3 device while this graphics generation remains owned.
-    [[nodiscard]] ID3D11Device &capture_device() const noexcept
-    {
-      return frame_bridge_->capture_device();
-    }
-
-    /// Check admission and bounded ring capacity without pulling a WGC frame.
-    [[nodiscard]] bool ready_for_frame() const noexcept;
-    /// Adopt a matching checkout and enqueue its D3 copy on the main thread.
-    /// Retain the checkout until query/fence completion or confirmed D3 removal.
-    void submit(platform::windows::WindowsCapturedFrame &&frame);
-    void set_presentation(ReplicaPresentation presentation) noexcept;
-    void set_performance_fps(core::FpsCap fps) noexcept { performance_fps_ = fps; }
-    [[nodiscard]] bool has_redraw_work() const noexcept;
-    void request_redraw() noexcept { redraw_requested_ = true; }
-    void invalidate_presentation() noexcept;
-    /// Poll native proof and WSI recovery without waiting; contain failures into
-    /// fixed result values while preserving possibly referenced owners.
-    [[nodiscard]] RenderTickResult
-    tick(core::Extent framebuffer,
-         std::chrono::steady_clock::time_point now) noexcept;
-    /// Prove old slot allocations have no D3/submission users. Ready content
-    /// has no native work and can be discarded during the rebuild barrier.
-    [[nodiscard]] bool render_allocation_idle() const noexcept;
-    /// Rebuild three slots after the runtime's old-allocation barrier; probe real
-    /// NT-handle memory compatibility, otherwise construct the CPU ring.
-    [[nodiscard]] std::expected<void, core::AppError>
-    rebuild_capture_slots(std::uint64_t generation, core::Extent allocation, DXGI_FORMAT format);
-    /// Record physical extent; a nonzero change requests swapchain recreation.
-    void resize(core::Extent framebuffer) noexcept;
-    /// Close new-copy admission and discard ready content; later ticks retire users.
-    void begin_drain() noexcept;
-    /// Apply a confirmed loss to only its matching API's cleanup obligations.
-    void begin_device_recovery_drain(DeviceLossKind kind) noexcept;
-    /// Return the runtime-supplied generation, never an independently chosen epoch.
-    [[nodiscard]] std::uint64_t generation() const noexcept
-    {
-      return generation_;
-    }
-    /// Return concrete capability facts without querying the driver again.
-    [[nodiscard]] BridgeCapabilityFacts bridge_capability_facts() const noexcept
-    {
-      return bridge_facts_;
-    }
-    /// Return the canonical bridge choice after slot construction selects it.
-    [[nodiscard]] std::optional<BridgeSelection>
-    bridge_selection() const noexcept
-    {
-      return bridge_selection_;
-    }
-    /// Report the transport implemented by the currently owned slot ring.
-    [[nodiscard]] core::BridgeMode active_bridge_mode() const noexcept
-    {
-      return active_bridge_mode_;
-    }
-    /// Count enqueued interop submissions for concrete-path diagnostics.
-    [[nodiscard]] std::uint64_t gpu_interop_frames_submitted() const noexcept
-    {
-      return gpu_interop_frames_submitted_;
-    }
-    /// Consume one pending bridge selection for edge-driven runtime events.
-    [[nodiscard]] std::optional<BridgeSelection>
-    take_bridge_mode_change() noexcept
-    {
-      return std::exchange(bridge_change_pending_, std::nullopt);
-    }
-
-  private:
-    void observe_performance(PerformanceCounter counter, std::uint64_t value = 1) noexcept;
-    void observe_performance_metadata(std::chrono::steady_clock::time_point now) noexcept;
-    /// Enable GLFW surface and mandatory maintenance1 requirements before use.
-    void create_vulkan_instance();
-    /// Create WSI against the borrowed overlay, whose window must outlive the stack.
-    void create_surface();
-    /// Prefer caller-ranked candidates, preserving the full WSI safety floor.
-    /// The request is consumed synchronously and never saved by the renderer.
-    void select_physical_device(const VulkanStartupRequest &request);
-    /// Enable the complete optional extension group and requested supported features.
-    void create_vulkan_device(const VulkanStartupRequest &request);
-    /// Create device-scoped pools, layouts and sampler before any submission.
-    void create_vulkan_common_resources();
-    /// Build a compatible SDR replacement; retire active before using oldSwapchain.
-    /// A failed create leaves that old owner retired instead of reactivating it.
-    [[nodiscard]] std::expected<void, core::AppError>
-    create_swapchain(core::Extent requested);
-    /// Build candidate views, render pass, shader pipeline and framebuffers;
-    /// the caller releases the candidate if any allocation fails.
-    [[nodiscard]] std::expected<void, core::AppError>
-    create_swapchain_render_resources(SwapchainState &state);
-    /// Construct CPU staging/query, mapped upload and sampled-image resources.
-    [[nodiscard]] std::expected<void, core::AppError>
-    create_capture_slot(CaptureSlot &slot);
-    /// Issue fresh identities for each attempted allocation, including fallback.
-    /// The bridge and canonical slots share keys but never mirror phase ownership.
-    [[nodiscard]] std::expected<void, core::AppError>
-    start_source_ring(std::uint64_t generation, core::Extent allocation,
-                      DXGI_FORMAT format) noexcept;
-    /// @brief Reserve safe storage, preserving old content only for cancellation.
-    /// Capacity/admission failure changes no slot; successful keys name the sole
-    /// ProducerPending phase until producer completion or pre-adoption rollback.
-    [[nodiscard]] std::optional<SlotKey> reserve_source_slot() noexcept;
-    /// @brief Cancel only before producer adoption; restore eligible old redraw.
-    [[nodiscard]] std::expected<void, core::AppError>
-    cancel_source_reservation(SlotKey key) noexcept;
-    /// @brief Borrow an image for an Empty slot in an unpublished installation.
-    /// The bridge retains every native owner until detach_ring succeeds; partial
-    /// descriptor/sync setup remains owned by the installation's rollback scope.
-    [[nodiscard]] std::expected<void, core::AppError>
-    register_external_image(SlotKey key, ExternalSampledImageView image) noexcept;
-    /// @brief Consume mapped rows synchronously and publish only after copy/flush.
-    /// Rows and stamp come from this completion; failure retains ProducerPending
-    /// so the facade can discard the key after the bridge releases its producer.
-    [[nodiscard]] std::expected<void, core::AppError>
-    complete_cpu_input(SlotKey key, CpuRowsView rows, FrameStamp stamp) noexcept;
-    /// @brief Publish a registered image after host-observed producer completion.
-    /// The borrowed wait preserves the external memory dependency, not proof of
-    /// an unobserved copy; the bridge keeps it alive through submission retirement.
-    [[nodiscard]] std::expected<void, core::AppError>
-    complete_external_input(SlotKey key, core::Extent content, FrameStamp stamp,
-                            CompletedProducerWait wait) noexcept;
-    /// @brief Consume a pending reservation whose producer is proven safe.
-    /// The caller supplies the producer proof; image registration stays installed.
-    [[nodiscard]] std::expected<void, core::AppError>
-    discard_completed_source(SlotKey key) noexcept;
-    /// @brief Detach a matching installation after all allocation users retire.
-    /// Ready/retained images may be discarded; independent present records remain.
-    /// Reset failure preserves references and ownership for ordinary retry paths.
-    [[nodiscard]] std::expected<void, core::AppError>
-    detach_ring(std::uint64_t expected_ring_serial) noexcept;
-    /// Create descriptor, command buffer and unsignaled synchronization for a
-    /// slot's sampled view; this setup enqueues no GPU work.
-    [[nodiscard]] std::expected<void, core::AppError>
-    create_slot_presentation_resources(CaptureSlot &slot, VkImageView view, VkImageLayout layout);
-    /// Close copy admission and latch fallback without destroying active users.
-    void request_interop_fallback() noexcept;
-    /// Observe complete interop copy/submission/present retirement, then replace
-    /// the ring with CPU resources and emit one bridge result.
-    void progress_interop_fallback(RenderTickResult &result);
-
-    /// Release a proven-safe slot while preserving its reusable command buffer.
-    void destroy_capture_slot(CaptureSlot &slot) noexcept;
-    /// Retire descriptor registrations before releasing safe borrowed images.
-    /// A descriptor-reset failure preserves all ring owners for later cleanup.
-    [[nodiscard]] std::expected<void, core::AppError>
-    destroy_capture_slots() noexcept;
-    /// Release allocation-local native owners after descriptor/image detachment
-    /// and bridge release; preserve devices, command buffers and present records.
-    void release_renderer_ring_resources() noexcept;
-    /// Release final Vulkan owners after the bridge and ring have been released.
+    void observe_performance(const PerformanceCounter counter,
+                             const std::uint64_t value = 1) noexcept;
     void release_renderer_resources() noexcept;
-    /// @brief Actual partial bootstrap cleanup, borrowed only by its stack guard.
-    struct BootstrapOperations final {
-      Impl &owner;
-      [[nodiscard]] bool detach_renderer_references() noexcept;
-      void release_bridge_resources() noexcept;
-      void release_renderer_resources() noexcept;
-    };
-    /// @brief Roll back one unpublished serial without touching device lifetimes.
-    struct RingInstallOperations final {
-      Impl &owner;
-      std::uint64_t serial;
-      [[nodiscard]] bool detach_renderer_references() noexcept;
-      void release_bridge_resources() noexcept;
-      void release_renderer_resources() noexcept;
-    };
-    /// Destroy all registrations at final teardown, after native-use proof.
-    void destroy_descriptor_pool() noexcept;
-    /// Release present fences/semaphores only with retirement or Vulkan-loss
-    /// proof; submission completion alone does not establish presentation safety.
-    void destroy_present_records() noexcept;
-    /// Destroy one WSI record after its image users and presents are safe.
-    void destroy_swapchain_state(SwapchainState &state) noexcept;
-    /// Release active WSI during safe teardown or never-submitted partial startup.
-    void destroy_swapchain() noexcept;
-    /// Release all retired WSI records after teardown safety has been established.
-    void destroy_retired_swapchains() noexcept;
-    /// Release device-wide pools/layouts after their dependent children.
+    void create_vulkan_instance();
+    void create_surface();
+    void select_physical_device(
+      const VulkanStartupRequest &request);
+    void create_vulkan_device(
+      const VulkanStartupRequest &request);
+    void create_vulkan_common_resources();
     void destroy_vulkan_common_resources() noexcept;
-
-    /// Check outstanding D3 and healthy Vulkan obligations before destruction.
-    /// Confirmed Vulkan loss never masks a still-pending healthy D3 copy.
-    [[nodiscard]] bool has_unsafe_native_work() const noexcept;
-    /// Derive image-use, present-fence and release-retention facts for one handle.
-    [[nodiscard]] SwapchainOwnershipFacts
-    swapchain_ownership(VkSwapchainKHR handle) const noexcept;
-    /// Count nonempty proof phases, excluding a safe retained redraw image.
-    [[nodiscard]] std::size_t slots_in_flight() const noexcept;
-    /// Count independent present records, not ordinary queue submissions.
-    [[nodiscard]] std::size_t presentations_in_flight() const noexcept;
-    /// Prefer non-retained empty storage while keeping all three slots reusable.
-    [[nodiscard]] CaptureSlot *empty_slot() noexcept;
-    /// Reject detached/stale identities and the wrong phase before slot mutation.
-    [[nodiscard]] CaptureSlot *find_slot(SlotKey key, SlotPhase phase) noexcept;
-    /// Choose the newest eligible sequence or one requested retained redraw;
-    /// older ready content can be dropped because its D3 checkout has retired.
-    [[nodiscard]] CaptureSlot *ready_slot() noexcept;
-    /// Reserve one of three bounded present records before starting an acquire.
-    [[nodiscard]] PresentRecord *empty_present_record() noexcept;
-
-    /// Latch Vulkan loss and stop new work without claiming D3 removal.
-    void mark_vulkan_device_lost(RenderTickResult &result) noexcept;
-    /// Latch D3 removal without claiming healthy Vulkan work is retired.
-    void mark_d3_device_removed(RenderTickResult &result) noexcept;
-    /// Stop admission and retain uncertainty for the runtime's safe stop path.
-    void set_terminal(VkResult result, RenderTickResult &tick_result) noexcept;
-    /// Provide a strictly future observation deadline for pending native work.
-    void schedule_poll(RenderTickResult &result,
-                       std::chrono::steady_clock::time_point now) const noexcept;
-    /// Poll present fences separately from submission fences; release their
-    /// wait semaphores and count only successful retired presentations.
-    void progress_present_records(RenderTickResult &result,
-                                  std::chrono::steady_clock::time_point now);
-    /// Destroy records only after image-use and present proof; clear retained
-    /// failed-release slots after their swapchain has been legally destroyed.
-    void progress_retired_swapchains(RenderTickResult &result);
-    /// Advance each slot through the nonblocking proof required by its phase.
-    void progress_slots(RenderTickResult &result,
-                        std::chrono::steady_clock::time_point now);
-    /// Poll D3 completion before checking in WGC. CPU then maps rows into upload
-    /// storage; GPU becomes ready only with an already-satisfiable timeline wait.
-    void progress_d3_copy(RenderTickResult &result, std::chrono::steady_clock::time_point now);
-    /// Poll acquire or submission proof by phase, then recycle or release the
-    /// acquired image that was never handed to presentation.
-    void progress_submission(CaptureSlot &slot, RenderTickResult &result, std::chrono::steady_clock::time_point now);
-    /// Invoke the enabled maintenance1 variant for one proven-unused image.
-    [[nodiscard]] VkResult
-    release_swapchain_image(VkSwapchainKHR swapchain,
-                            std::uint32_t image_index) noexcept;
-    /// Classify release without clearing image ownership on failure; completed
-    /// unconsumed binary signals have their own safe-destruction proof.
-    void release_acquired_image(CaptureSlot &slot, RenderTickResult &result);
-    /// Recycle synchronization after proven completion and retain the newest
-    /// completed sampled image when a future redraw may reuse it.
-    void reset_slot_after_vulkan(CaptureSlot &slot);
-    /// Record upload or external ownership transfer and the aspect-fit draw.
-    /// Retained CPU redraw skips upload; GPU redraw reacquires EXTERNAL ownership.
-    [[nodiscard]] VkResult record_commands(CaptureSlot &slot,
-                                           std::uint32_t image_index) noexcept;
-    /// Acquire at timeout zero, classify submit/present independently, and move
-    /// the render-finished semaphore into an enqueued present's record.
-    void try_present(CaptureSlot &slot, PresentRecord &record, RenderTickResult &result, std::chrono::steady_clock::time_point now);
-    /// Advance bounded active/retired WSI recovery. Surface recovery preserves
-    /// capture, D3, slot resources and the runtime-owned generation.
-    void progress_recreation(RenderTickResult &result,
-                             std::chrono::steady_clock::time_point now);
-    /// Recycle failed-release slots only after their owning swapchain was legally
-    /// destroyed; a release error itself never proves image ownership ended.
-    void clear_release_retained_after_swapchain_destroy(VkSwapchainKHR handle);
-    /// Move active WSI into the retired set before attempting replacement.
+    std::expected<void, core::AppError>
+    create_swapchain(const core::Extent requested);
+    std::expected<void, core::AppError>
+    create_swapchain_render_resources(
+      SwapchainState &state);
+    void destroy_swapchain_state(
+      SwapchainState &state) noexcept;
+    void destroy_swapchain() noexcept;
+    void destroy_retired_swapchains() noexcept;
     void retire_active_swapchain();
-    /// Start/promote a WSI episode and invalidate obsolete success markers.
-    void begin_recovery_episode(GraphicsFailureCategory category,
-                                std::chrono::steady_clock::time_point now);
-    /// Account for failed construction and schedule bounded retry; confirmed
-    /// device loss instead enters runtime-owned device recovery.
-    void note_recovery_failure(const core::AppError &error,
-                               RenderTickResult &result,
-                               std::chrono::steady_clock::time_point now);
-    /// Reset retries only after a replacement's successful present retires.
-    void reset_recovery_after_present(VkSwapchainKHR handle) noexcept;
-
-    /// Choose compatible required flags and prefer optional flags when available.
-    [[nodiscard]] std::optional<std::uint32_t>
-    find_memory_type(std::uint32_t bits, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred = 0) const noexcept;
-    /// Create mapped host-visible upload storage and retain its allocation/coherency
-    /// facts for later flushes and teardown.
-    [[nodiscard]] std::expected<void, core::AppError>
-    create_buffer_memory(CaptureSlot &slot, VkDeviceSize size);
-    /// Create the CPU path's device-local UNORM sampled image and view.
-    [[nodiscard]] std::expected<void, core::AppError>
+    std::optional<std::uint32_t> find_memory_type(
+      const std::uint32_t bits, const VkMemoryPropertyFlags required, const VkMemoryPropertyFlags preferred = 0) const noexcept;
+    std::expected<void, core::AppError>
+    create_buffer_memory(CaptureSlot &slot,
+                         const VkDeviceSize size);
+    std::expected<void, core::AppError>
     create_image_memory(CaptureSlot &slot);
-    /// Allocate a fresh unsignaled semaphore after the old one moved to a present.
-    [[nodiscard]] std::expected<void, core::AppError>
+    std::expected<void, core::AppError>
     recreate_render_finished(CaptureSlot &slot);
-    /// Replace a completed unconsumed acquire signal instead of reusing it signaled.
-    [[nodiscard]] std::expected<void, core::AppError>
+    std::expected<void, core::AppError>
     recreate_acquire_semaphore(CaptureSlot &slot);
+    std::expected<void, core::AppError>
+    create_slot_presentation_resources(
+      CaptureSlot &slot, const VkImageView view, const VkImageLayout layout);
+    std::expected<void, core::AppError>
+    create_capture_slot(CaptureSlot &slot);
+    void destroy_capture_slot(
+      CaptureSlot &slot) noexcept;
+    void destroy_descriptor_pool() noexcept;
+    std::expected<void, core::AppError>
+    detach_ring(
+      const std::uint64_t expected_ring_serial) noexcept;
+    void release_renderer_ring_resources() noexcept;
+    bool ready_for_frame() const noexcept;
+    CaptureSlot *
+    empty_slot() noexcept;
+    std::optional<SlotKey> reserve_source_slot() noexcept;
+    std::expected<void, core::AppError>
+    cancel_source_reservation(const SlotKey key) noexcept;
+    std::expected<void, core::AppError>
+    register_external_image(
+      const SlotKey key, const ExternalSampledImageView image) noexcept;
+    std::expected<void, core::AppError>
+    complete_external_input(
+      const SlotKey key, const core::Extent content, const FrameStamp stamp, const CompletedProducerWait wait) noexcept;
+    std::expected<void, core::AppError>
+    discard_completed_source(const SlotKey key) noexcept;
+    CaptureSlot *
+    find_slot(const SlotKey key,
+              const SlotPhase phase) noexcept;
+    bool has_unsafe_native_work() const noexcept;
+    SwapchainOwnershipFacts swapchain_ownership(
+      const VkSwapchainKHR handle) const noexcept;
+    std::size_t slots_in_flight() const noexcept;
+    std::size_t presentations_in_flight() const noexcept;
+    bool render_allocation_idle() const noexcept;
+    CaptureSlot *
+    ready_slot() noexcept;
+    PresentRecord *
+    empty_present_record() noexcept;
+    void destroy_present_records() noexcept;
+    void set_presentation(
+      const ReplicaPresentation presentation) noexcept;
+    bool has_redraw_work() const noexcept;
+    void invalidate_presentation() noexcept;
+    void resize(const core::Extent framebuffer) noexcept;
+    void begin_drain() noexcept;
+    void mark_vulkan_device_lost(
+      VulkanTickResult &result) noexcept;
+    void set_terminal(
+      const VkResult result, VulkanTickResult &tick_result) noexcept;
+    void schedule_poll(
+      VulkanTickResult &result,
+      const std::chrono::steady_clock::time_point now) const noexcept;
+    void progress_present_records(
+      VulkanTickResult &result, const std::chrono::steady_clock::time_point now);
+    std::expected<void, core::AppError>
+    complete_cpu_input(
+      const SlotKey key, const CpuRowsView rows, const FrameStamp stamp) noexcept;
+    VkResult record_commands(
+      CaptureSlot &slot, const std::uint32_t image_index) noexcept;
+    void reset_slot_after_vulkan(CaptureSlot &slot);
+    VkResult release_swapchain_image(
+      const VkSwapchainKHR swapchain, const std::uint32_t image_index) noexcept;
+    void release_acquired_image(
+      CaptureSlot &slot, VulkanTickResult &result);
+    void progress_submission(
+      CaptureSlot &slot, VulkanTickResult &result, const std::chrono::steady_clock::time_point now);
+    void progress_slots(
+      VulkanTickResult &result, const std::chrono::steady_clock::time_point now);
+    void try_present(
+      CaptureSlot &slot, PresentRecord &record, VulkanTickResult &result, const std::chrono::steady_clock::time_point now);
+    void clear_release_retained_after_swapchain_destroy(
+      const VkSwapchainKHR handle);
+    void progress_retired_swapchains(
+      VulkanTickResult &result);
+    void begin_recovery_episode(
+      const GraphicsFailureCategory category,
+      const std::chrono::steady_clock::time_point now);
+    void note_recovery_failure(
+      const core::AppError &error, VulkanTickResult &result, const std::chrono::steady_clock::time_point now);
+    void reset_recovery_after_present(
+      const VkSwapchainKHR handle) noexcept;
+    void progress_recreation(
+      VulkanTickResult &result, const std::chrono::steady_clock::time_point now);
 
     // Borrowed window outlives all surfaces; generation is supplied by runtime.
     GLFWwindow *window_{};
     diagnostics::PerformanceReport *performance_{};
     std::uint64_t observation_instance_{};
     diagnostics::PerformanceHighWater performance_live_{};
-    core::Extent performance_content_{};
-    core::FpsCap performance_fps_{core::FpsCap::Fps60};
     std::array<char, 32> performance_driver_{};
     std::optional<std::chrono::steady_clock::time_point> last_present_observed_at_;
     std::uint64_t generation_{};
-    WindowsBridgePreference bridge_preference_{};
     core::Extent framebuffer_{};
     core::Extent capture_allocation_{};
-    DXGI_FORMAT capture_format_{DXGI_FORMAT_UNKNOWN};
 
-    // D3 source-copy owners are independent of Vulkan device-loss evidence.
-    std::unique_ptr<platform::windows::WindowsFrameBridge> frame_bridge_;
 
     // WSI and graphics ownership belongs only to this replica, not the controller.
     VkInstance instance_{VK_NULL_HANDLE};
@@ -612,14 +444,6 @@ namespace avb::render {
     std::optional<SwapchainState> swapchain_;
     std::vector<SwapchainState> retired_swapchains_;
 
-    // Capability facts are diagnostic values; active_bridge_mode_ describes the
-    // actually constructed ring. A pending selection edge owns no native state.
-    BridgeCapabilityFacts bridge_facts_{};
-    std::optional<BridgeSelection> bridge_selection_;
-    std::optional<BridgeSelection> bridge_change_pending_;
-    core::BridgeMode active_bridge_mode_{core::BridgeMode::CpuCopy};
-    bool bridge_capabilities_collected_{};
-    bool interop_fallback_pending_{};
 
     // Admission, recovery, and completion are separate state. Closing admission
     // or recording a terminal error leaves native owners available to later ticks.
@@ -630,19 +454,308 @@ namespace avb::render {
     bool surface_recovery_pending_{};
     bool surface_recovery_active_{};
     bool vulkan_device_lost_{};
-    bool d3_device_removed_{};
     bool fully_constructed_{};
+    bool shutdown_detached_{};
     std::optional<core::AppError> terminal_error_;
     std::optional<RecoveryEpisode> recovery_episode_;
     std::optional<core::AppError> recovery_last_error_;
-    std::uint64_t captured_frames_{};
     std::uint64_t presented_frames_{};
     std::uint64_t dropped_frames_{};
     std::uint64_t gpu_interop_frames_submitted_{};
   };
 
-  void WindowsRenderStack::Impl::observe_performance(const PerformanceCounter counter,
-                                                   const std::uint64_t value) noexcept
+  VulkanRenderer::Impl::Impl(GLFWwindow *const window,
+                             const std::uint64_t generation,
+                             const core::Extent framebuffer,
+                             const VulkanStartupRequest &startup,
+                             diagnostics::PerformanceReport *performance,
+                             const std::uint64_t observation_instance)
+      : window_{window}, performance_{performance}, observation_instance_{observation_instance}, generation_{generation}, framebuffer_{framebuffer}
+  {
+    if (window_ == nullptr || generation_ == 0) {
+      throw graphics_error(core::AppErrorCode::InvalidValue);
+    }
+    // Every constructor operation precedes submission. Local native owners can
+    // unwind immediately; the facade attaches external owners after return.
+    try {
+      create_vulkan_instance();
+      create_surface();
+      select_physical_device(startup);
+      if (performance_) {
+        std::snprintf(performance_driver_.data(), performance_driver_.size(),
+                      "raw:%u", physical_properties_.driverVersion);
+      }
+      create_vulkan_device(startup);
+      create_vulkan_common_resources();
+      if (!has_zero_dimension(framebuffer_)) {
+        if (const auto created = create_swapchain(framebuffer_); !created) {
+          throw created.error();
+        }
+      }
+      fully_constructed_ = true;
+    } catch (...) {
+      release_renderer_resources();
+      throw;
+    }
+  }
+
+  VulkanRenderer::Impl::~Impl() noexcept
+  {
+    detach_for_shutdown();
+    release_renderer_resources();
+  }
+
+  void VulkanRenderer::Impl::detach_for_shutdown() noexcept
+  {
+    if (shutdown_detached_) return;
+    if (fully_constructed_ && has_unsafe_native_work()) std::terminate();
+    // Final teardown frees descriptors directly. Ordinary ring replacement uses
+    // the fallible reset operation and preserves references when it fails.
+    destroy_descriptor_pool();
+    if (ring_serial_ != 0 && !detach_ring(ring_serial_)) std::terminate();
+    shutdown_detached_ = true;
+  }
+
+  std::expected<std::uint64_t, core::AppError>
+  VulkanRenderer::Impl::begin_ring(const core::Extent allocation) noexcept
+  {
+    if (ring_serial_ != 0 || !checked_pixel_bytes(allocation) ||
+        vulkan_device_lost_ || shutdown_detached_) {
+      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
+    }
+    const auto serial = next_ring_serial(last_ring_serial_);
+    if (!serial) {
+      terminal_error_ = graphics_error(core::AppErrorCode::RuntimeStateLost);
+      accepting_frames_ = false;
+      return std::unexpected{*terminal_error_};
+    }
+    last_ring_serial_ = *serial;
+    ring_serial_ = *serial;
+    capture_allocation_ = allocation;
+    ring_ready_ = false;
+    for (std::size_t index{}; index < slots_.size(); ++index) {
+      slots_[index].key = {*serial, static_cast<std::uint32_t>(index)};
+    }
+    return *serial;
+  }
+
+  std::expected<void, core::AppError>
+  VulkanRenderer::Impl::publish_ring(const std::uint64_t serial,
+                                     const std::uint64_t generation) noexcept
+  {
+    if (serial == 0 || serial != ring_serial_ || generation == 0 || ring_ready_ ||
+        vulkan_device_lost_ ||
+        !std::ranges::all_of(slots_, [](const CaptureSlot &slot) noexcept {
+          return slot.phase == SlotPhase::Empty &&
+                 slot.descriptor != VK_NULL_HANDLE &&
+                 slot.command_buffer != VK_NULL_HANDLE &&
+                 slot.acquire_fence != VK_NULL_HANDLE &&
+                 slot.submission_fence != VK_NULL_HANDLE &&
+                 slot.acquire_semaphore != VK_NULL_HANDLE &&
+                 slot.render_finished_semaphore != VK_NULL_HANDLE &&
+                 (slot.sampled_view != VK_NULL_HANDLE ||
+                  slot.external_image.view != VK_NULL_HANDLE);
+        })) {
+      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
+    }
+    generation_ = generation;
+    ring_ready_ = true;
+    return {};
+  }
+
+  void VulkanRenderer::Impl::discard_ready_inputs() noexcept
+  {
+    invalidate_presentation();
+    retained_slot_ = nullptr;
+    for (auto &slot : slots_) {
+      if (slot.phase == SlotPhase::CpuReady || slot.phase == SlotPhase::GpuReady) {
+        slot.phase = SlotPhase::Empty;
+        slot.gpu_copy = false;
+        slot.producer_wait = {};
+        ++dropped_frames_;
+        observe_performance(PerformanceCounter::Dropped);
+        progress_pending_ = true;
+      }
+    }
+  }
+
+  void VulkanRenderer::Impl::begin_recovery_drain(const bool device_lost) noexcept
+  {
+    invalidate_presentation();
+    accepting_frames_ = false;
+    draining_ = true;
+    retained_slot_ = nullptr;
+    redraw_requested_ = false;
+    if (device_lost) {
+      vulkan_device_lost_ = true;
+      progress_pending_ = progress_pending_ || presentations_in_flight() != 0;
+      destroy_present_records();
+    }
+    for (auto &slot : slots_) {
+      // Producer reservations survive even device loss until their owner reports
+      // completion. Healthy native submissions retain their own proof.
+      if (slot.phase == SlotPhase::ProducerPending ||
+          (!device_lost && slot_has_vulkan_work(slot.phase))) continue;
+      progress_pending_ = progress_pending_ || slot.phase != SlotPhase::Empty ||
+                          slot.acquired_image;
+      slot.phase = SlotPhase::Empty;
+      slot.acquired_image = false;
+    }
+  }
+
+  void VulkanRenderer::Impl::contain_failure(VulkanTickResult &result,
+                                             const core::AppError error) noexcept
+  {
+    if (error.native_detail == static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
+      mark_vulkan_device_lost(result);
+    }
+    else {
+      terminal_error_ = error;
+      accepting_frames_ = false;
+      result.terminal_error = error;
+    }
+  }
+
+  VulkanTickResult VulkanRenderer::Impl::begin_tick(
+    const core::Extent framebuffer,
+    const std::chrono::steady_clock::time_point now) noexcept
+  {
+    VulkanTickResult result;
+    result.made_progress = std::exchange(progress_pending_, false);
+    if (framebuffer != framebuffer_) resize(framebuffer);
+    result.presentation_suspended = has_zero_dimension(framebuffer_);
+    result.vulkan_device_lost = vulkan_device_lost_;
+    result.terminal_error = terminal_error_;
+    try {
+      progress_present_records(result, now);
+    } catch (const core::AppError &error) {
+      contain_failure(result, error);
+    } catch (const std::bad_alloc &) {
+      contain_failure(result, vulkan_error(core::AppErrorCode::RuntimeStateLost,
+                                           VK_ERROR_OUT_OF_HOST_MEMORY));
+    } catch (...) {
+      contain_failure(result, graphics_error(core::AppErrorCode::RuntimeStateLost));
+    }
+    result.vulkan_device_lost = vulkan_device_lost_;
+    result.slots_in_flight = slots_in_flight();
+    result.presentations_in_flight = presentations_in_flight();
+    return result;
+  }
+
+  void VulkanRenderer::Impl::retire_submissions(
+    VulkanTickResult &result, const std::chrono::steady_clock::time_point now) noexcept
+  {
+    try {
+      progress_slots(result, now);
+      for (auto &record : present_records_) {
+        if (record && record->fence == VK_NULL_HANDLE) record.reset();
+      }
+    } catch (const core::AppError &error) {
+      contain_failure(result, error);
+    } catch (const std::bad_alloc &) {
+      contain_failure(result, vulkan_error(core::AppErrorCode::RuntimeStateLost,
+                                           VK_ERROR_OUT_OF_HOST_MEMORY));
+    } catch (...) {
+      contain_failure(result, graphics_error(core::AppErrorCode::RuntimeStateLost));
+    }
+    result.vulkan_device_lost = vulkan_device_lost_;
+    result.slots_in_flight = slots_in_flight();
+    result.presentations_in_flight = presentations_in_flight();
+  }
+
+  void VulkanRenderer::Impl::finish_tick(
+    VulkanTickResult &result, const std::chrono::steady_clock::time_point now, const bool allow_present, const bool allow_recovery) noexcept
+  {
+    try {
+      if (allow_recovery && !vulkan_device_lost_) progress_recreation(result, now);
+      if (allow_present && !draining_ && !terminal_error_ && !vulkan_device_lost_ &&
+          !surface_recovery_pending_ && !swapchain_recreate_pending_ &&
+          !has_zero_dimension(framebuffer_) && swapchain_) {
+        if (auto *const slot = ready_slot()) {
+          if (auto *const record = empty_present_record()) {
+            try_present(*slot, *record, result, now);
+            if (record->fence == VK_NULL_HANDLE) {
+              const auto found = std::ranges::find_if(
+                present_records_, [record](const auto &candidate) noexcept {
+                  return candidate && &*candidate == record;
+                });
+              if (found != present_records_.end()) found->reset();
+            }
+          }
+        }
+      }
+    } catch (const core::AppError &error) {
+      contain_failure(result, error);
+    } catch (const std::bad_alloc &) {
+      contain_failure(result, vulkan_error(core::AppErrorCode::RuntimeStateLost,
+                                           VK_ERROR_OUT_OF_HOST_MEMORY));
+    } catch (...) {
+      contain_failure(result, graphics_error(core::AppErrorCode::RuntimeStateLost));
+    }
+    if (has_unsafe_native_work()) schedule_poll(result, now);
+    result.made_progress = result.made_progress || std::exchange(progress_pending_, false);
+    result.drain_complete = draining_ && slots_in_flight() == 0 &&
+                            presentations_in_flight() == 0;
+    result.cleanup_pending = surface_recovery_pending_ ||
+                             swapchain_recreate_pending_ || !retired_swapchains_.empty();
+    result.presented_frames = presented_frames_;
+    result.dropped_frames = dropped_frames_;
+    result.slots_in_flight = slots_in_flight();
+    result.presentations_in_flight = presentations_in_flight();
+    result.vulkan_device_lost = vulkan_device_lost_;
+    result.terminal_error = terminal_error_;
+    if (performance_) {
+      performance_live_.slots = result.slots_in_flight;
+      performance_live_.presents = result.presentations_in_flight;
+      performance_->observe_high_water(PerformanceOwner::Replica, performance_live_,
+                                       std::chrono::steady_clock::now());
+    }
+    if (!allow_present || draining_ || terminal_error_ || vulkan_device_lost_ ||
+        surface_recovery_pending_ || swapchain_recreate_pending_ ||
+        has_zero_dimension(framebuffer_)) invalidate_presentation();
+    result.presentation = published_presentation_;
+  }
+
+  void VulkanRenderer::Impl::observe_metadata(
+    const VulkanObservationContext context,
+    const std::chrono::steady_clock::time_point now) noexcept
+  {
+    if (!performance_) return;
+    std::uint32_t fps{};
+    switch (context.fps) {
+    case core::FpsCap::Fps30: fps = 30; break;
+    case core::FpsCap::Fps60: fps = 60; break;
+    case core::FpsCap::Fps144: fps = 144; break;
+    case core::FpsCap::Unlimited: break;
+    }
+    const auto mode = swapchain_ ? swapchain_->present_mode : VK_PRESENT_MODE_FIFO_KHR;
+    performance_->observe_runtime({observation_instance_, generation_}, now);
+    performance_->observe_metadata(PerformanceOwner::Replica, {
+                                                                .gpu = physical_properties_.deviceName,
+                                                                .driver = performance_driver_.data(),
+                                                                .os = context.os,
+                                                                .bridge = context.bridge,
+                                                                .bridge_reason = context.bridge_reason,
+                                                                .present_mode = mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE"
+                                                                                                                                                                        : "FIFO",
+                                                                .ui_policy = "see controller owner metadata",
+                                                                .requested_bridge = context.requested_bridge,
+                                                                .content_width = context.content.width,
+                                                                .content_height = context.content.height,
+                                                                .allocation_width = capture_allocation_.width,
+                                                                .allocation_height = capture_allocation_.height,
+                                                                .framebuffer_width = framebuffer_.width,
+                                                                .framebuffer_height = framebuffer_.height,
+                                                                .fps_cap = fps,
+                                                              },
+                                   now);
+    performance_live_.slots = slots_in_flight();
+    performance_live_.presents = presentations_in_flight();
+    performance_->observe_high_water(PerformanceOwner::Replica, performance_live_, now);
+  }
+
+  void VulkanRenderer::Impl::observe_performance(const PerformanceCounter counter,
+                                                 const std::uint64_t value) noexcept
   {
     if (!performance_) return;
     switch (counter) {
@@ -662,147 +775,7 @@ namespace avb::render {
     performance_->observe_high_water(PerformanceOwner::Replica, performance_live_, now);
   }
 
-  void WindowsRenderStack::Impl::observe_performance_metadata(
-    const std::chrono::steady_clock::time_point now) noexcept
-  {
-    constexpr std::array reasons{
-      "none", "adapter_luid_unavailable_or_mismatch", "external_image_unsupported",
-      "required_d3d11_interfaces_unavailable", "shared_fence_or_timeline_unavailable",
-      "timeline_import_unavailable", "win32_import_procedure_unavailable",
-      "compatible_memory_type_unavailable", "interop_operation_failure"};
-    std::uint32_t fps{};
-    switch (performance_fps_) {
-    case core::FpsCap::Fps30: fps = 30; break;
-    case core::FpsCap::Fps60: fps = 60; break;
-    case core::FpsCap::Fps144: fps = 144; break;
-    case core::FpsCap::Unlimited: break;
-    }
-    const auto mode = swapchain_ ? swapchain_->present_mode : VK_PRESENT_MODE_FIFO_KHR;
-    performance_->observe_runtime({observation_instance_, generation_}, now);
-    performance_->observe_metadata(PerformanceOwner::Replica, {
-      .gpu = physical_properties_.deviceName,
-      .driver = performance_driver_.data(),
-      .os = "Windows",
-      .bridge = active_bridge_mode_ == core::BridgeMode::GpuInterop ? "gpu_interop" : "cpu_copy",
-      .bridge_reason = bridge_selection_ ? reasons[static_cast<std::size_t>(bridge_selection_->reason)] : "pending",
-      .present_mode = mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE" : "FIFO",
-      .ui_policy = "see controller owner metadata",
-      .requested_bridge = bridge_preference_ == WindowsBridgePreference::ForceCpuBaseline ? "cpu" : "auto",
-      .content_width = performance_content_.width,
-      .content_height = performance_content_.height,
-      .allocation_width = capture_allocation_.width,
-      .allocation_height = capture_allocation_.height,
-      .framebuffer_width = framebuffer_.width,
-      .framebuffer_height = framebuffer_.height,
-      .fps_cap = fps,
-    }, now);
-    performance_live_.slots = slots_in_flight();
-    performance_live_.presents = presentations_in_flight();
-    performance_->observe_high_water(PerformanceOwner::Replica, performance_live_, now);
-  }
-
-  WindowsRenderStack::Impl::Impl(GLFWwindow *const native_window,
-                                 const std::uint64_t resource_generation,
-                                 const core::Extent initial_framebuffer,
-                                 const WindowsBridgePreference bridge_preference,
-                                 diagnostics::PerformanceReport *performance, const std::uint64_t observation_instance)
-      : window_{native_window}, performance_{performance}, observation_instance_{observation_instance}, generation_{resource_generation}, bridge_preference_{bridge_preference}, framebuffer_{initial_framebuffer}
-  {
-    BootstrapOperations operations{*this};
-    platform::windows::detail::GraphicsConstructionGuard guard{operations};
-    if (window_ == nullptr || generation_ == 0) {
-      throw graphics_error(core::AppErrorCode::InvalidValue);
-    }
-    frame_bridge_ = std::make_unique<platform::windows::WindowsFrameBridge>(
-      platform::windows::BridgeResourceObserver{
-        .context = this,
-        .observe = [](void *context,
-                      const platform::windows::BridgeResourceEvent event) noexcept {
-          static_cast<Impl *>(context)->observe_performance(
-            event == platform::windows::BridgeResourceEvent::SemaphoreCreated
-              ? PerformanceCounter::SemaphoresCreated
-              : PerformanceCounter::SemaphoresDestroyed);
-        },
-      });
-    const auto startup = frame_bridge_->startup_request();
-    create_vulkan_instance();
-    create_surface();
-    select_physical_device(startup);
-    if (performance_) {
-      std::snprintf(performance_driver_.data(), performance_driver_.size(), "raw:%u", physical_properties_.driverVersion);
-    }
-    create_vulkan_device(startup);
-    frame_bridge_->attach_vulkan_device({
-      .physical_device = physical_device_,
-      .device = device_,
-      .memory_properties = memory_properties_,
-      .limits = physical_properties_.limits,
-      .optional_extension_group_enabled = optional_extension_group_enabled_,
-      .timeline_semaphore_enabled = timeline_semaphore_supported_,
-    });
-    bridge_facts_ = frame_bridge_->capability_facts();
-    bridge_capabilities_collected_ = true;
-    create_vulkan_common_resources();
-    if (!has_zero_dimension(framebuffer_)) {
-      const auto created = create_swapchain(framebuffer_);
-      if (!created) {
-        throw created.error();
-      }
-    }
-    fully_constructed_ = true;
-    guard.disarm();
-  }
-
-  WindowsRenderStack::Impl::~Impl() noexcept
-  {
-    // A destructor cannot manufacture completion. The runtime must keep ticking
-    // this aggregate, or choose non-unwinding process abandonment if it stalls.
-    if (fully_constructed_ && has_unsafe_native_work()) {
-      std::terminate();
-    }
-    destroy_descriptor_pool();
-    if (ring_serial_ != 0 && !detach_ring(ring_serial_)) {
-      std::terminate();
-    }
-    frame_bridge_.reset();
-    release_renderer_resources();
-  }
-
-  bool WindowsRenderStack::Impl::BootstrapOperations::detach_renderer_references() noexcept
-  {
-    owner.destroy_descriptor_pool();
-    return owner.ring_serial_ == 0 ||
-           owner.detach_ring(owner.ring_serial_).has_value();
-  }
-
-  void WindowsRenderStack::Impl::BootstrapOperations::release_bridge_resources() noexcept
-  {
-    owner.frame_bridge_.reset();
-  }
-
-  void WindowsRenderStack::Impl::BootstrapOperations::release_renderer_resources() noexcept
-  {
-    owner.release_renderer_resources();
-  }
-
-  bool WindowsRenderStack::Impl::RingInstallOperations::detach_renderer_references() noexcept
-  {
-    return owner.detach_ring(serial).has_value();
-  }
-
-  void WindowsRenderStack::Impl::RingInstallOperations::release_bridge_resources() noexcept
-  {
-    if (!owner.frame_bridge_->release_ring(serial)) {
-      std::terminate();
-    }
-  }
-
-  void WindowsRenderStack::Impl::RingInstallOperations::release_renderer_resources() noexcept
-  {
-    owner.release_renderer_ring_resources();
-  }
-
-  void WindowsRenderStack::Impl::release_renderer_resources() noexcept
+  void VulkanRenderer::Impl::release_renderer_resources() noexcept
   {
     release_renderer_ring_resources();
     destroy_present_records();
@@ -823,7 +796,7 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::create_vulkan_instance()
+  void VulkanRenderer::Impl::create_vulkan_instance()
   {
     if (glfwVulkanSupported() != GLFW_TRUE) {
       throw graphics_error(core::AppErrorCode::UnsupportedGraphics);
@@ -930,7 +903,7 @@ namespace avb::render {
     instance_ = created_instance;
   }
 
-  void WindowsRenderStack::Impl::create_surface()
+  void VulkanRenderer::Impl::create_surface()
   {
     const auto result =
       glfwCreateWindowSurface(instance_, window_, nullptr, &surface_);
@@ -939,7 +912,7 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::select_physical_device(
+  void VulkanRenderer::Impl::select_physical_device(
     const VulkanStartupRequest &request)
   {
     std::uint32_t device_count{};
@@ -1104,7 +1077,7 @@ namespace avb::render {
     throw graphics_error(core::AppErrorCode::UnsupportedGraphics);
   }
 
-  void WindowsRenderStack::Impl::create_vulkan_device(
+  void VulkanRenderer::Impl::create_vulkan_device(
     const VulkanStartupRequest &request)
   {
     constexpr float priority = 1.0F;
@@ -1239,9 +1212,7 @@ namespace avb::render {
     }
   }
 
-
-
-  void WindowsRenderStack::Impl::create_vulkan_common_resources()
+  void VulkanRenderer::Impl::create_vulkan_common_resources()
   {
     const VkDescriptorSetLayoutBinding binding{
       .binding = 0,
@@ -1369,7 +1340,7 @@ namespace avb::render {
     sampler_ = created_sampler;
   }
 
-  void WindowsRenderStack::Impl::destroy_vulkan_common_resources() noexcept
+  void VulkanRenderer::Impl::destroy_vulkan_common_resources() noexcept
   {
     if (device_ == VK_NULL_HANDLE) {
       return;
@@ -1398,7 +1369,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::create_swapchain(const core::Extent requested)
+  VulkanRenderer::Impl::create_swapchain(const core::Extent requested)
   {
     if (has_zero_dimension(requested)) {
       return {};
@@ -1563,7 +1534,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::create_swapchain_render_resources(
+  VulkanRenderer::Impl::create_swapchain_render_resources(
     SwapchainState &state)
   {
     std::uint32_t image_count{};
@@ -1850,7 +1821,7 @@ namespace avb::render {
     return {};
   }
 
-  void WindowsRenderStack::Impl::destroy_swapchain_state(
+  void VulkanRenderer::Impl::destroy_swapchain_state(
     SwapchainState &state) noexcept
   {
     if (device_ == VK_NULL_HANDLE) {
@@ -1875,7 +1846,7 @@ namespace avb::render {
     state = {};
   }
 
-  void WindowsRenderStack::Impl::destroy_swapchain() noexcept
+  void VulkanRenderer::Impl::destroy_swapchain() noexcept
   {
     if (!swapchain_) {
       return;
@@ -1884,7 +1855,7 @@ namespace avb::render {
     swapchain_.reset();
   }
 
-  void WindowsRenderStack::Impl::destroy_retired_swapchains() noexcept
+  void VulkanRenderer::Impl::destroy_retired_swapchains() noexcept
   {
     for (auto &state : retired_swapchains_) {
       destroy_swapchain_state(state);
@@ -1892,7 +1863,7 @@ namespace avb::render {
     retired_swapchains_.clear();
   }
 
-  void WindowsRenderStack::Impl::retire_active_swapchain()
+  void VulkanRenderer::Impl::retire_active_swapchain()
   {
     if (!swapchain_) {
       return;
@@ -1901,14 +1872,14 @@ namespace avb::render {
     swapchain_.reset();
   }
 
-  std::optional<std::uint32_t> WindowsRenderStack::Impl::find_memory_type(
+  std::optional<std::uint32_t> VulkanRenderer::Impl::find_memory_type(
     const std::uint32_t bits, const VkMemoryPropertyFlags required, const VkMemoryPropertyFlags preferred) const noexcept
   {
     return memory_type_index(memory_properties_, bits, required, preferred);
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::create_buffer_memory(CaptureSlot &slot,
+  VulkanRenderer::Impl::create_buffer_memory(CaptureSlot &slot,
                                                  const VkDeviceSize size)
   {
     const VkBufferCreateInfo buffer_info{
@@ -1976,7 +1947,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::create_image_memory(CaptureSlot &slot)
+  VulkanRenderer::Impl::create_image_memory(CaptureSlot &slot)
   {
     const VkImageCreateInfo image_info{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -2065,7 +2036,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::recreate_render_finished(CaptureSlot &slot)
+  VulkanRenderer::Impl::recreate_render_finished(CaptureSlot &slot)
   {
     if (slot.render_finished_semaphore != VK_NULL_HANDLE) {
       vkDestroySemaphore(device_, slot.render_finished_semaphore, nullptr);
@@ -2090,7 +2061,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::recreate_acquire_semaphore(CaptureSlot &slot)
+  VulkanRenderer::Impl::recreate_acquire_semaphore(CaptureSlot &slot)
   {
     if (slot.acquire_semaphore != VK_NULL_HANDLE) {
       vkDestroySemaphore(device_, slot.acquire_semaphore, nullptr);
@@ -2115,7 +2086,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::create_slot_presentation_resources(
+  VulkanRenderer::Impl::create_slot_presentation_resources(
     CaptureSlot &slot, const VkImageView view, const VkImageLayout layout)
   {
     const VkDescriptorSetAllocateInfo descriptor_info{
@@ -2183,12 +2154,8 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::create_capture_slot(CaptureSlot &slot)
+  VulkanRenderer::Impl::create_capture_slot(CaptureSlot &slot)
   {
-    if (auto created = frame_bridge_->create_cpu_slot(slot.key); !created) {
-      return created;
-    }
-
     const auto byte_count = checked_pixel_bytes(capture_allocation_);
     if (!byte_count) {
       return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
@@ -2203,10 +2170,7 @@ namespace avb::render {
       slot, slot.sampled_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
   }
 
-
-
-
-  void WindowsRenderStack::Impl::destroy_capture_slot(
+  void VulkanRenderer::Impl::destroy_capture_slot(
     CaptureSlot &slot) noexcept
   {
     // Pools span capture allocations. Preserve the command buffer for the next
@@ -2252,7 +2216,7 @@ namespace avb::render {
     slot.command_buffer = command_buffer;
   }
 
-  void WindowsRenderStack::Impl::destroy_descriptor_pool() noexcept
+  void VulkanRenderer::Impl::destroy_descriptor_pool() noexcept
   {
     if (device_ != VK_NULL_HANDLE && descriptor_pool_ != VK_NULL_HANDLE) {
       vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
@@ -2261,7 +2225,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::detach_ring(
+  VulkanRenderer::Impl::detach_ring(
     const std::uint64_t expected_ring_serial) noexcept
   {
     if (expected_ring_serial == 0 || expected_ring_serial != ring_serial_) {
@@ -2303,7 +2267,7 @@ namespace avb::render {
     return {};
   }
 
-  void WindowsRenderStack::Impl::release_renderer_ring_resources() noexcept
+  void VulkanRenderer::Impl::release_renderer_ring_resources() noexcept
   {
     for (auto &slot : slots_) {
       destroy_capture_slot(slot);
@@ -2311,226 +2275,19 @@ namespace avb::render {
     ring_serial_ = 0;
     ring_ready_ = false;
     capture_allocation_ = {};
-    capture_format_ = DXGI_FORMAT_UNKNOWN;
   }
 
-  std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::destroy_capture_slots() noexcept
+  bool VulkanRenderer::Impl::ready_for_frame() const noexcept
   {
-    if (frame_bridge_ && frame_bridge_->has_pending_inputs()) {
-      std::terminate();
-    }
-    if (ring_serial_ != 0) {
-      if (auto detached = detach_ring(ring_serial_); !detached) {
-        return detached;
-      }
-      if (!frame_bridge_->release_ring(ring_serial_)) {
-        std::terminate();
-      }
-    }
-    release_renderer_ring_resources();
-    return {};
-  }
-
-  std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::start_source_ring(
-    const std::uint64_t generation, const core::Extent allocation,
-    const DXGI_FORMAT format) noexcept
-  {
-    if (ring_serial_ != 0) {
-      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
-    }
-    const auto serial = next_ring_serial(last_ring_serial_);
-    if (!serial) {
-      terminal_error_ = graphics_error(core::AppErrorCode::RuntimeStateLost);
-      accepting_frames_ = false;
-      return std::unexpected{*terminal_error_};
-    }
-    last_ring_serial_ = *serial;
-    for (std::size_t index{}; index < slots_.size(); ++index) {
-      slots_[index].key = {*serial, static_cast<std::uint32_t>(index)};
-    }
-    if (auto started = frame_bridge_->start_ring(*serial, generation, allocation,
-                                                 format); !started) {
-      for (auto &slot : slots_) {
-        slot.key = {};
-      }
-      return started;
-    }
-    ring_serial_ = *serial;
-    ring_ready_ = false;
-    capture_allocation_ = allocation;
-    capture_format_ = format;
-    return {};
-  }
-
-  std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::rebuild_capture_slots(const std::uint64_t generation,
-                                                  const core::Extent allocation,
-                                                  const DXGI_FORMAT format)
-  {
-    if (generation == 0 || !checked_pixel_bytes(allocation) ||
-        format != DXGI_FORMAT_B8G8R8A8_UNORM || !render_allocation_idle() ||
-        vulkan_device_lost_ || d3_device_removed_) {
-      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
-    }
-    const bool generation_changed = generation != generation_;
-    invalidate_presentation();
-    for (auto &slot : slots_) {
-      if (slot.phase == SlotPhase::CpuReady ||
-          slot.phase == SlotPhase::GpuReady) {
-        slot.phase = SlotPhase::Empty;
-        slot.gpu_copy = false;
-        slot.producer_wait = {};
-        ++dropped_frames_;
-        observe_performance(PerformanceCounter::Dropped);
-        progress_pending_ = true;
-      }
-    }
-    // The old ring is discarded before constructing replacements. The caller's
-    // capture barrier must remain closed on failure; there is no old-ring rollback.
-    if (auto detached = destroy_capture_slots(); !detached) {
-      return detached;
-    }
-    const auto interop_prefix_available = [this]() noexcept {
-      return bridge_capabilities_collected_ &&
-             bridge_facts_.adapter_luid_matches &&
-             bridge_facts_.external_image_supported &&
-             bridge_facts_.required_d3d11_interfaces_available &&
-             bridge_facts_.shared_fence_or_timeline_semaphore_available &&
-             bridge_facts_.timeline_fence_import_available &&
-             bridge_facts_.win32_import_procedure_available;
-    };
-    const bool cpu_fallback_selected =
-      bridge_selection_ && bridge_selection_->mode == core::BridgeMode::CpuCopy;
-    if (generation_changed && cpu_fallback_selected &&
-        interop_prefix_available()) {
-      // CPU fallback releases generation-local D3 interop objects. Recreate
-      // those capability objects before probing the next generation's handles.
-      frame_bridge_->refresh_interop_capabilities();
-      bridge_facts_ = frame_bridge_->capability_facts();
-    }
-    const bool probe_interop = should_probe_interop_generation(
-      interop_prefix_available(), bridge_selection_, generation_, generation);
-    const bool attempt_interop =
-      bridge_preference_ == WindowsBridgePreference::Automatic && probe_interop;
-
-    bool interop_operation_failed{};
-    if (probe_interop) {
-      if (auto started = start_source_ring(generation, allocation, format); !started) {
-        return started;
-      }
-      RingInstallOperations operations{*this, ring_serial_};
-      platform::windows::detail::GraphicsConstructionGuard guard{operations};
-      const auto probed = frame_bridge_->probe_interop_ring(ring_serial_);
-      if (!probed) {
-        return std::unexpected{probed.error()};
-      }
-      interop_operation_failed = probed->operation_failed;
-      bridge_facts_ = frame_bridge_->capability_facts();
-      if (attempt_interop && bridge_facts_.compatible_memory_type_available &&
-          !interop_operation_failed) {
-        for (auto &slot : slots_) {
-          const auto finished = frame_bridge_->finish_interop_slot(slot.key);
-          if (!finished) {
-            interop_operation_failed = true;
-            break;
-          }
-          if (auto registered = register_external_image(slot.key, *finished);
-              !registered) {
-            interop_operation_failed = true;
-            break;
-          }
-        }
-      }
-      if (attempt_interop && bridge_facts_.compatible_memory_type_available &&
-          !interop_operation_failed && !frame_bridge_->ensure_interop_timeline()) {
-        interop_operation_failed = true;
-      }
-      if (attempt_interop && bridge_facts_.compatible_memory_type_available &&
-          !interop_operation_failed) {
-        ring_ready_ = true;
-        guard.disarm();
-      }
-    }
-    else if (!bridge_selection_) {
-      bridge_facts_.compatible_memory_type_available = false;
-    }
-
-    if (attempt_interop && bridge_facts_.compatible_memory_type_available &&
-        !interop_operation_failed) {
-      active_bridge_mode_ = core::BridgeMode::GpuInterop;
-      const auto selected = select_bridge(bridge_facts_);
-      if (!bridge_selection_ || *bridge_selection_ != selected) {
-        bridge_change_pending_ = selected;
-      }
-      bridge_selection_ = selected;
-    }
-    else {
-      if (auto started = start_source_ring(generation, allocation, format); !started) {
-        return started;
-      }
-      RingInstallOperations operations{*this, ring_serial_};
-      platform::windows::detail::GraphicsConstructionGuard guard{operations};
-      for (auto &slot : slots_) {
-        if (auto created = create_capture_slot(slot); !created) {
-          return created;
-        }
-      }
-      frame_bridge_->release_interop_support();
-      active_bridge_mode_ = core::BridgeMode::CpuCopy;
-      if (bridge_preference_ == WindowsBridgePreference::Automatic &&
-          (!bridge_selection_ ||
-           bridge_selection_->mode == core::BridgeMode::GpuInterop ||
-           generation_changed)) {
-        const auto capability = select_bridge(bridge_facts_);
-        const auto selected =
-          interop_operation_failed ||
-              capability.mode == core::BridgeMode::GpuInterop
-            ? *select_interop_fallback(
-                InteropFallbackPoint::PreSubmitSetupFailure)
-            : capability;
-        if (!bridge_selection_ || *bridge_selection_ != selected) {
-          bridge_change_pending_ = selected;
-        }
-        bridge_selection_ = selected;
-      }
-      else if (bridge_preference_ ==
-               WindowsBridgePreference::ForceCpuBaseline) {
-        const auto capability = select_bridge(bridge_facts_);
-        // Case 14 forces the concrete pre-submit fallback after the real
-        // capability probes. Unsupported hardware keeps its exact first-failed
-        // reason; capable hardware uses the existing operational-fallback reason.
-        const auto selected =
-          interop_operation_failed ||
-              capability.mode == core::BridgeMode::GpuInterop
-            ? *select_interop_fallback(
-                InteropFallbackPoint::PreSubmitSetupFailure)
-            : capability;
-        if (!bridge_selection_ || *bridge_selection_ != selected) {
-          bridge_change_pending_ = selected;
-        }
-        bridge_selection_ = selected;
-      }
-      ring_ready_ = true;
-      guard.disarm();
-    }
-    generation_ = generation;
-    return {};
-  }
-
-  bool WindowsRenderStack::Impl::ready_for_frame() const noexcept
-  {
-    return accepting_frames_ && !terminal_error_ && !d3_device_removed_ &&
+    return accepting_frames_ && !terminal_error_ &&
            !vulkan_device_lost_ && ring_ready_ && ring_serial_ != 0 &&
-           capture_format_ != DXGI_FORMAT_UNKNOWN &&
            std::ranges::any_of(slots_, [](const CaptureSlot &slot) noexcept {
              return slot.phase == SlotPhase::Empty;
            });
   }
 
-  WindowsRenderStack::Impl::CaptureSlot *
-  WindowsRenderStack::Impl::empty_slot() noexcept
+  VulkanRenderer::Impl::CaptureSlot *
+  VulkanRenderer::Impl::empty_slot() noexcept
   {
     const auto found = std::ranges::find_if(slots_, [this](const CaptureSlot &slot) {
       return slot.phase == SlotPhase::Empty && &slot != retained_slot_;
@@ -2543,7 +2300,7 @@ namespace avb::render {
              : nullptr;
   }
 
-  std::optional<SlotKey> WindowsRenderStack::Impl::reserve_source_slot() noexcept
+  std::optional<SlotKey> VulkanRenderer::Impl::reserve_source_slot() noexcept
   {
     if (!ready_for_frame()) {
       return std::nullopt;
@@ -2561,7 +2318,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::cancel_source_reservation(const SlotKey key) noexcept
+  VulkanRenderer::Impl::cancel_source_reservation(const SlotKey key) noexcept
   {
     auto *const slot = find_slot(key, SlotPhase::ProducerPending);
     if (slot == nullptr) {
@@ -2570,7 +2327,6 @@ namespace avb::render {
     slot->phase = SlotPhase::Empty;
     if (slot->restore_retained_on_cancel && ring_ready_ && accepting_frames_ &&
         !draining_ && !terminal_error_ && !vulkan_device_lost_ &&
-        !d3_device_removed_ && !interop_fallback_pending_ &&
         slot->stamp.sequence >= last_submitted_sequence_ &&
         (!retained_slot_ || slot->stamp.sequence >= retained_slot_->stamp.sequence)) {
       retained_slot_ = slot;
@@ -2580,7 +2336,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::register_external_image(
+  VulkanRenderer::Impl::register_external_image(
     const SlotKey key, const ExternalSampledImageView image) noexcept
   {
     auto *const slot = find_slot(key, SlotPhase::Empty);
@@ -2597,7 +2353,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::complete_external_input(
+  VulkanRenderer::Impl::complete_external_input(
     const SlotKey key, const core::Extent content, const FrameStamp stamp,
     const CompletedProducerWait wait) noexcept
   {
@@ -2623,7 +2379,7 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::discard_completed_source(const SlotKey key) noexcept
+  VulkanRenderer::Impl::discard_completed_source(const SlotKey key) noexcept
   {
     auto *const slot = find_slot(key, SlotPhase::ProducerPending);
     if (slot == nullptr) {
@@ -2636,68 +2392,8 @@ namespace avb::render {
     return {};
   }
 
-  void WindowsRenderStack::Impl::submit(
-    platform::windows::WindowsCapturedFrame &&frame)
-  {
-    const auto content = frame.content_size();
-    const auto key = reserve_source_slot();
-    if (!key) {
-      ++dropped_frames_;
-      observe_performance(PerformanceCounter::Dropped);
-      throw graphics_error(core::AppErrorCode::InvalidValue);
-    }
-
-    const FrameStamp stamp{captured_frames_ + 1, frame.capture_timestamp()};
-    const auto submitted = [&]() {
-      try {
-        return frame_bridge_->submit(*key, std::move(frame), stamp);
-      } catch (...) {
-        // Texture projection throws only before adoption/native enqueue. Cancel
-        // while the old retained metadata and completed wait are still intact.
-        if (!cancel_source_reservation(*key)) {
-          std::terminate();
-        }
-        throw;
-      }
-    }();
-    if (!submitted) {
-      if (!cancel_source_reservation(*key)) {
-        std::terminate();
-      }
-      if (submitted.error().code == core::AppErrorCode::InvalidValue) {
-        ++dropped_frames_;
-        observe_performance(PerformanceCounter::Dropped);
-      }
-      throw submitted.error();
-    }
-    performance_content_ = content;
-    if (submitted->d3_copy_bytes != 0) {
-      observe_performance(PerformanceCounter::D3CopyBytes, submitted->d3_copy_bytes);
-    }
-    if (submitted->count_as_dropped) {
-      ++dropped_frames_;
-      observe_performance(PerformanceCounter::Dropped);
-    }
-    if (submitted->fallback_requested) {
-      request_interop_fallback();
-    }
-    if (submitted->d3_device_removed) {
-      d3_device_removed_ = true;
-      accepting_frames_ = false;
-    }
-    if (submitted->disposition ==
-        platform::windows::BridgeSubmitDisposition::SafeDiscard) {
-      if (!discard_completed_source(*key)) {
-        std::terminate();
-      }
-      return;
-    }
-    ++captured_frames_;
-    observe_performance(PerformanceCounter::Admitted);
-  }
-
-  WindowsRenderStack::Impl::CaptureSlot *
-  WindowsRenderStack::Impl::find_slot(const SlotKey key,
+  VulkanRenderer::Impl::CaptureSlot *
+  VulkanRenderer::Impl::find_slot(const SlotKey key,
                                      const SlotPhase phase) noexcept
   {
     if (!matches_slot_key(key, ring_serial_, slots_.size())) {
@@ -2707,13 +2403,8 @@ namespace avb::render {
     return slot.key == key && slot.phase == phase ? &slot : nullptr;
   }
 
-  bool WindowsRenderStack::Impl::has_unsafe_native_work() const noexcept
+  bool VulkanRenderer::Impl::has_unsafe_native_work() const noexcept
   {
-    // Test D3 before the Vulkan-loss shortcut: loss of one API does not discharge
-    // the source-pool lease held by a healthy asynchronous copy on the other.
-    if (frame_bridge_ && frame_bridge_->has_pending_inputs()) {
-      return true;
-    }
     if (std::ranges::any_of(slots_, [](const CaptureSlot &slot) noexcept {
           return slot.phase == SlotPhase::ProducerPending;
         })) {
@@ -2732,7 +2423,7 @@ namespace avb::render {
     });
   }
 
-  SwapchainOwnershipFacts WindowsRenderStack::Impl::swapchain_ownership(
+  SwapchainOwnershipFacts VulkanRenderer::Impl::swapchain_ownership(
     const VkSwapchainKHR handle) const noexcept
   {
     SwapchainOwnershipFacts facts;
@@ -2754,7 +2445,7 @@ namespace avb::render {
     return facts;
   }
 
-  std::size_t WindowsRenderStack::Impl::slots_in_flight() const noexcept
+  std::size_t VulkanRenderer::Impl::slots_in_flight() const noexcept
   {
     return static_cast<std::size_t>(
       std::ranges::count_if(slots_, [](const CaptureSlot &slot) noexcept {
@@ -2762,7 +2453,7 @@ namespace avb::render {
       }));
   }
 
-  std::size_t WindowsRenderStack::Impl::presentations_in_flight() const noexcept
+  std::size_t VulkanRenderer::Impl::presentations_in_flight() const noexcept
   {
     return static_cast<std::size_t>(std::ranges::count_if(
       present_records_,
@@ -2771,21 +2462,20 @@ namespace avb::render {
       }));
   }
 
-  bool WindowsRenderStack::Impl::render_allocation_idle() const noexcept
+  bool VulkanRenderer::Impl::render_allocation_idle() const noexcept
   {
     // A pending present owns its semaphore and swapchain in a separate record.
     // Once slot submission retires it no longer references the capture image or
     // descriptor, so those allocation-local resources can be reconstructed.
-    return (!frame_bridge_ || !frame_bridge_->has_pending_inputs()) &&
-           std::ranges::all_of(slots_, [](const CaptureSlot &slot) noexcept {
+    return std::ranges::all_of(slots_, [](const CaptureSlot &slot) noexcept {
       return slot.phase == SlotPhase::Empty ||
              slot.phase == SlotPhase::CpuReady ||
              slot.phase == SlotPhase::GpuReady;
     });
   }
 
-  WindowsRenderStack::Impl::CaptureSlot *
-  WindowsRenderStack::Impl::ready_slot() noexcept
+  VulkanRenderer::Impl::CaptureSlot *
+  VulkanRenderer::Impl::ready_slot() noexcept
   {
     std::array<RenderFrameCandidate, cpu_slot_count> candidates{};
     for (std::size_t index{}; index < slots_.size(); ++index) {
@@ -2799,7 +2489,7 @@ namespace avb::render {
     for (auto &slot : slots_) {
       if (&slot != newest && (slot.phase == SlotPhase::CpuReady ||
                               slot.phase == SlotPhase::GpuReady)) {
-        // D3 completion has already checked in the WGC frame, and Vulkan has
+        // producer completion has already checked in the source frame, and Vulkan has
         // not used this slot. Dropping stale ready content needs no native wait.
         slot.phase = SlotPhase::Empty;
         ++dropped_frames_;
@@ -2809,8 +2499,8 @@ namespace avb::render {
     return newest;
   }
 
-  WindowsRenderStack::Impl::PresentRecord *
-  WindowsRenderStack::Impl::empty_present_record() noexcept
+  VulkanRenderer::Impl::PresentRecord *
+  VulkanRenderer::Impl::empty_present_record() noexcept
   {
     const auto found = std::ranges::find_if(
       present_records_,
@@ -2821,7 +2511,7 @@ namespace avb::render {
     return &found->emplace();
   }
 
-  void WindowsRenderStack::Impl::destroy_present_records() noexcept
+  void VulkanRenderer::Impl::destroy_present_records() noexcept
   {
     for (auto &record : present_records_) {
       if (!record) {
@@ -2841,96 +2531,7 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::request_interop_fallback() noexcept
-  {
-    if (active_bridge_mode_ != core::BridgeMode::GpuInterop ||
-        interop_fallback_pending_) {
-      return;
-    }
-    accepting_frames_ = false;
-    interop_fallback_pending_ = true;
-  }
-
-  void WindowsRenderStack::Impl::progress_interop_fallback(
-    RenderTickResult &result)
-  {
-    if (!interop_fallback_pending_ || vulkan_device_lost_ || d3_device_removed_) {
-      return;
-    }
-    for (auto &slot : slots_) {
-      if (slot.phase == SlotPhase::GpuReady) {
-        slot.phase = SlotPhase::Empty;
-        slot.gpu_copy = false;
-        slot.producer_wait = {};
-        ++dropped_frames_;
-        observe_performance(PerformanceCounter::Dropped);
-        result.made_progress = true;
-      }
-    }
-    const auto fallback = select_interop_fallback(
-      slots_in_flight() == 0 && presentations_in_flight() == 0
-        ? InteropFallbackPoint::RuntimeWorkRetired
-        : InteropFallbackPoint::RuntimeWorkPending);
-    if (!fallback) {
-      return;
-    }
-
-    // Runtime fallback changes both transport allocations and their shared
-    // timeline. Keep the existing owners intact until every tracked user retires;
-    // the new CPU ring remains within the same resource generation.
-    const auto allocation = capture_allocation_;
-    const auto format = capture_format_;
-    if (auto detached = destroy_capture_slots(); !detached) {
-      interop_fallback_pending_ = false;
-      throw core::AppError{
-        .code = core::AppErrorCode::RuntimeStateLost,
-        .native_detail = detached.error().native_detail,
-      };
-    }
-    if (auto started = start_source_ring(generation_, allocation, format); !started) {
-      interop_fallback_pending_ = false;
-      throw started.error();
-    }
-    RingInstallOperations operations{*this, ring_serial_};
-    platform::windows::detail::GraphicsConstructionGuard guard{operations};
-    for (auto &slot : slots_) {
-      if (auto created = create_capture_slot(slot); !created) {
-        const auto failure = created.error();
-        interop_fallback_pending_ = false;
-        const bool d3_lost = frame_bridge_->d3_device_removed();
-        const bool vulkan_lost =
-          failure.native_detail &&
-          *failure.native_detail ==
-            static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST);
-        if (d3_lost) {
-          mark_d3_device_removed(result);
-        }
-        if (vulkan_lost) {
-          mark_vulkan_device_lost(result);
-        }
-        if (d3_lost || vulkan_lost) {
-          return;
-        }
-        throw core::AppError{
-          .code = core::AppErrorCode::RuntimeStateLost,
-          .native_detail = failure.native_detail,
-        };
-      }
-    }
-    frame_bridge_->release_interop_support();
-    active_bridge_mode_ = core::BridgeMode::CpuCopy;
-    if (!bridge_selection_ || *bridge_selection_ != *fallback) {
-      bridge_change_pending_ = *fallback;
-    }
-    bridge_selection_ = *fallback;
-    interop_fallback_pending_ = false;
-    ring_ready_ = true;
-    accepting_frames_ = !draining_ && !terminal_error_;
-    result.made_progress = true;
-    guard.disarm();
-  }
-
-  void WindowsRenderStack::Impl::set_presentation(
+  void VulkanRenderer::Impl::set_presentation(
     const ReplicaPresentation presentation) noexcept
   {
     if (presentation == presentation_) {
@@ -2943,20 +2544,20 @@ namespace avb::render {
     presentation_dirty_ = true;
   }
 
-  bool WindowsRenderStack::Impl::has_redraw_work() const noexcept
+  bool VulkanRenderer::Impl::has_redraw_work() const noexcept
   {
     return presentation_dirty_ && retained_slot_ && !draining_ &&
-           !terminal_error_ && !vulkan_device_lost_ && !d3_device_removed_ &&
+           !terminal_error_ && !vulkan_device_lost_ &&
            !has_zero_dimension(framebuffer_);
   }
 
-  void WindowsRenderStack::Impl::invalidate_presentation() noexcept
+  void VulkanRenderer::Impl::invalidate_presentation() noexcept
   {
     published_presentation_.reset();
     first_valid_present_sequence_ = next_present_sequence_;
   }
 
-  void WindowsRenderStack::Impl::resize(const core::Extent framebuffer) noexcept
+  void VulkanRenderer::Impl::resize(const core::Extent framebuffer) noexcept
   {
     if (framebuffer == framebuffer_) {
       return;
@@ -2968,7 +2569,7 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::begin_drain() noexcept
+  void VulkanRenderer::Impl::begin_drain() noexcept
   {
     invalidate_presentation();
     accepting_frames_ = false;
@@ -2986,77 +2587,31 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::begin_device_recovery_drain(
-    const DeviceLossKind kind) noexcept
-  {
-    invalidate_presentation();
-    accepting_frames_ = false;
-    draining_ = true;
-    retained_slot_ = nullptr;
-    redraw_requested_ = false;
-    if (kind == DeviceLossKind::VulkanDeviceLost) {
-      vulkan_device_lost_ = true;
-      progress_pending_ = progress_pending_ || presentations_in_flight() != 0;
-      destroy_present_records();
-    }
-    else {
-      d3_device_removed_ = true;
-      frame_bridge_->note_d3_device_removed();
-    }
-
-    for (auto &slot : slots_) {
-      // Even confirmed D3 removal is consumed as a keyed producer event. Keep
-      // its reservation until progress observes it and the bridge releases it.
-      if (slot.phase == SlotPhase::ProducerPending) {
-        continue;
-      }
-      if (plan_device_recovery_slot(kind, slot.phase) !=
-          DeviceRecoverySlotAction::ClearWithoutWait) {
-        continue;
-      }
-      progress_pending_ = progress_pending_ || slot.phase != SlotPhase::Empty ||
-                          slot.acquired_image;
-      slot.phase = SlotPhase::Empty;
-      slot.acquired_image = false;
-    }
-  }
-
-  void WindowsRenderStack::Impl::mark_vulkan_device_lost(
-    RenderTickResult &result) noexcept
+  void VulkanRenderer::Impl::mark_vulkan_device_lost(
+    VulkanTickResult &result) noexcept
   {
     vulkan_device_lost_ = true;
     accepting_frames_ = false;
     result.vulkan_device_lost = true;
-    result.device_loss = DeviceLossKind::VulkanDeviceLost;
   }
 
-  void WindowsRenderStack::Impl::mark_d3_device_removed(
-    RenderTickResult &result) noexcept
-  {
-    d3_device_removed_ = true;
-    frame_bridge_->note_d3_device_removed();
-    accepting_frames_ = false;
-    result.d3_device_removed = true;
-    result.device_loss = DeviceLossKind::D3DeviceRemoved;
-  }
-
-  void WindowsRenderStack::Impl::set_terminal(
-    const VkResult result, RenderTickResult &tick_result) noexcept
+  void VulkanRenderer::Impl::set_terminal(
+    const VkResult result, VulkanTickResult &tick_result) noexcept
   {
     terminal_error_ = vulkan_error(core::AppErrorCode::RuntimeStateLost, result);
     accepting_frames_ = false;
     tick_result.terminal_error = terminal_error_;
   }
 
-  void WindowsRenderStack::Impl::schedule_poll(
-    RenderTickResult &result,
+  void VulkanRenderer::Impl::schedule_poll(
+    VulkanTickResult &result,
     const std::chrono::steady_clock::time_point now) const noexcept
   {
     earlier_deadline(result.next_deadline, now + pending_poll_interval);
   }
 
-  void WindowsRenderStack::Impl::progress_present_records(
-    RenderTickResult &result, const std::chrono::steady_clock::time_point now)
+  void VulkanRenderer::Impl::progress_present_records(
+    VulkanTickResult &result, const std::chrono::steady_clock::time_point now)
   {
     if (vulkan_device_lost_) {
       return;
@@ -3114,103 +2669,8 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::progress_d3_copy(
-    RenderTickResult &result, const std::chrono::steady_clock::time_point now)
-  {
-    const auto progress = frame_bridge_->progress(
-      now, draining_ || vulkan_device_lost_ || interop_fallback_pending_,
-      [this, &result](const SlotKey key, const CpuRowsView rows,
-                      const FrameStamp stamp) {
-        const auto completed = complete_cpu_input(key, rows, stamp);
-        if (completed) {
-          result.made_progress = true;
-        }
-        else if (completed.error().native_detail ==
-                 static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
-          mark_vulkan_device_lost(result);
-        }
-        return completed;
-      });
-    result.made_progress = result.made_progress || progress.made_progress;
-    if (progress.next_deadline) {
-      earlier_deadline(result.next_deadline, *progress.next_deadline);
-    }
-    if (progress.d3_device_removed) {
-      mark_d3_device_removed(result);
-    }
-    if (progress.fallback_requested) {
-      request_interop_fallback();
-    }
-    // Native failures retain D3 provenance even if a numeric HRESULT happens
-    // to overlap a Vulkan result. Only consumer failures came from upload work.
-    if (progress.terminal_error) {
-      terminal_error_ = progress.terminal_error;
-      accepting_frames_ = false;
-      result.terminal_error = terminal_error_;
-    }
-    for (std::size_t index{}; index < progress.completion_count; ++index) {
-      const auto &completion = progress.completions[index];
-      using platform::windows::BridgeCompletionKind;
-      const auto failed_transition = [this, &result](const core::AppError error) {
-        terminal_error_ = error;
-        accepting_frames_ = false;
-        result.terminal_error = terminal_error_;
-      };
-      // CPU readiness was committed inside the synchronous mapped-row callback.
-      // Every other event still owns the matching ProducerPending reservation.
-      if (completion.kind == BridgeCompletionKind::CpuConsumed &&
-          find_slot(completion.key, SlotPhase::CpuReady) == nullptr) {
-        terminal_error_ = graphics_error(core::AppErrorCode::RuntimeStateLost);
-        accepting_frames_ = false;
-        result.terminal_error = terminal_error_;
-        continue;
-      }
-      switch (completion.kind) {
-      case BridgeCompletionKind::ExternalReady: {
-        const auto completed = complete_external_input(
-          completion.key, completion.content, completion.stamp,
-          completion.external_wait);
-        if (!completed) {
-          // The event already proves producer completion. Invalid publication
-          // must consume its reservation without restoring superseded redraw.
-          static_cast<void>(discard_completed_source(completion.key));
-          failed_transition(completed.error());
-        }
-        break;
-      }
-      case BridgeCompletionKind::CpuConsumed:
-        // The synchronous consumer already committed upload and readiness.
-        break;
-      case BridgeCompletionKind::SafeDiscard:
-      case BridgeCompletionKind::CpuConsumerFailed:
-        if (const auto discarded = discard_completed_source(completion.key);
-            !discarded) {
-          failed_transition(discarded.error());
-          break;
-        }
-        if (completion.count_as_dropped) {
-          ++dropped_frames_;
-          observe_performance(PerformanceCounter::Dropped);
-        }
-        if (completion.error) {
-          if (completion.kind == BridgeCompletionKind::CpuConsumerFailed &&
-              completion.error->native_detail ==
-                static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
-            mark_vulkan_device_lost(result);
-          }
-          else {
-            terminal_error_ = completion.error;
-            accepting_frames_ = false;
-            result.terminal_error = terminal_error_;
-          }
-        }
-        break;
-      }
-    }
-  }
-
   std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::complete_cpu_input(
+  VulkanRenderer::Impl::complete_cpu_input(
     const SlotKey key, const CpuRowsView rows, const FrameStamp stamp) noexcept
   {
     auto *const matched = find_slot(key, SlotPhase::ProducerPending);
@@ -3239,7 +2699,7 @@ namespace avb::render {
       return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
     }
     // Upload commands copy the entire allocation, but capture only defines the
-    // content rectangle. Clear the remaining bytes and translate D3's row pitch
+    // content rectangle. Clear the remaining bytes and translate producer's row pitch
     // into the tightly packed allocation stride expected by Vulkan's buffer copy.
     std::memset(slot.mapped_upload, 0, static_cast<std::size_t>(*byte_count));
     observe_performance(PerformanceCounter::CpuClearBytes, *byte_count);
@@ -3299,7 +2759,7 @@ namespace avb::render {
     return {};
   }
 
-  VkResult WindowsRenderStack::Impl::record_commands(
+  VkResult VulkanRenderer::Impl::record_commands(
     CaptureSlot &slot, const std::uint32_t image_index) noexcept
   {
     if (!swapchain_ || image_index >= swapchain_->framebuffers.size()) {
@@ -3402,7 +2862,7 @@ namespace avb::render {
                            0, nullptr, 1, &before_sampling);
     }
     else if (slot.gpu_copy) {
-      // D3 completion supplies the timeline ordering, while this barrier acquires
+      // producer completion supplies the timeline ordering, while this barrier acquires
       // the shared image for Vulkan sampling. Both are needed on retained redraw
       // too, since the prior command sequence returned ownership to EXTERNAL.
       const VkImageMemoryBarrier acquire_external{
@@ -3527,11 +2987,11 @@ namespace avb::render {
                            nullptr, 1, &release_external);
     }
     // The submission fence also covers the external release barrier. Slot reuse
-    // waits for that proof before allowing a later D3 copy to overwrite the image.
+    // waits for that proof before allowing a later producer copy to overwrite the image.
     return vkEndCommandBuffer(slot.command_buffer);
   }
 
-  void WindowsRenderStack::Impl::reset_slot_after_vulkan(CaptureSlot &slot)
+  void VulkanRenderer::Impl::reset_slot_after_vulkan(CaptureSlot &slot)
   {
     // Every caller reaches here only after native use was proven complete (or
     // after the owning swapchain was legally destroyed). A synchronization
@@ -3559,17 +3019,17 @@ namespace avb::render {
       }
     }
     if (completed_content && !draining_ && !terminal_error_ &&
-        !interop_fallback_pending_ &&
+        accepting_frames_ &&
         (!retained_slot_ ||
          slot.stamp.sequence >= retained_slot_->stamp.sequence)) {
-      // Retain only our completed sampled image, never a WGC checkout. GPU
-      // replay reacquires it from EXTERNAL and waits on the same completed D3
-      // timeline value; no D3 writer touches this slot before it is reused.
+      // Retain only our completed sampled image, never a source checkout. GPU
+      // replay reacquires it from EXTERNAL and waits on the same completed producer
+      // timeline value; no producer writer touches this slot before it is reused.
       retained_slot_ = &slot;
     }
   }
 
-  VkResult WindowsRenderStack::Impl::release_swapchain_image(
+  VkResult VulkanRenderer::Impl::release_swapchain_image(
     const VkSwapchainKHR swapchain, const std::uint32_t image_index) noexcept
   {
     switch (maintenance_variant_) {
@@ -3607,8 +3067,8 @@ namespace avb::render {
     return VK_ERROR_EXTENSION_NOT_PRESENT;
   }
 
-  void WindowsRenderStack::Impl::release_acquired_image(
-    CaptureSlot &slot, RenderTickResult &result)
+  void VulkanRenderer::Impl::release_acquired_image(
+    CaptureSlot &slot, VulkanTickResult &result)
   {
     // progress_submission has already observed the phase's proof fence. Completed
     // but unconsumed binary signals can now be destroyed even when image release
@@ -3654,8 +3114,8 @@ namespace avb::render {
     set_terminal(release_result, result);
   }
 
-  void WindowsRenderStack::Impl::progress_submission(
-    CaptureSlot &slot, RenderTickResult &result, const std::chrono::steady_clock::time_point now)
+  void VulkanRenderer::Impl::progress_submission(
+    CaptureSlot &slot, VulkanTickResult &result, const std::chrono::steady_clock::time_point now)
   {
     VkFence proof_fence{VK_NULL_HANDLE};
     switch (proof_fence_for_slot(slot.phase)) {
@@ -3668,7 +3128,13 @@ namespace avb::render {
     case SlotProofFence::None:
       return;
     }
-    const auto status = vkGetFenceStatus(device_, proof_fence);
+    auto status = vkGetFenceStatus(device_, proof_fence);
+    if (status == VK_SUCCESS && proof_fence != slot.acquire_fence) {
+      // Acquisition signals its fence after its semaphore. A submission waiting
+      // on that semaphore can finish while the acquire fence signal is still
+      // pending, so observe both fences before resetting the reusable slot.
+      status = vkGetFenceStatus(device_, slot.acquire_fence);
+    }
     if (status == VK_NOT_READY) {
       schedule_poll(result, now);
       return;
@@ -3693,10 +3159,9 @@ namespace avb::render {
     release_acquired_image(slot, result);
   }
 
-  void WindowsRenderStack::Impl::progress_slots(
-    RenderTickResult &result, const std::chrono::steady_clock::time_point now)
+  void VulkanRenderer::Impl::progress_slots(
+    VulkanTickResult &result, const std::chrono::steady_clock::time_point now)
   {
-    progress_d3_copy(result, now);
     for (auto &slot : slots_) {
       switch (slot.phase) {
       case SlotPhase::ProducerPending:
@@ -3718,8 +3183,8 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::try_present(
-    CaptureSlot &slot, PresentRecord &record, RenderTickResult &result, const std::chrono::steady_clock::time_point now)
+  void VulkanRenderer::Impl::try_present(
+    CaptureSlot &slot, PresentRecord &record, VulkanTickResult &result, const std::chrono::steady_clock::time_point now)
   {
     std::uint32_t image_index{(std::numeric_limits<std::uint32_t>::max)()};
     const auto acquire_result = vkAcquireNextImageKHR(
@@ -3769,7 +3234,7 @@ namespace avb::render {
       return;
     }
 
-    // WSI availability gates attachment writes; shared D3 data gates sampling.
+    // WSI availability gates attachment writes; shared producer data gates sampling.
     // The CPU path uses only the acquire wait and has no imported timeline.
     const std::array wait_semaphores{slot.acquire_semaphore, slot.producer_wait.semaphore};
     const std::array<VkPipelineStageFlags, 2> wait_stages{
@@ -3797,7 +3262,7 @@ namespace avb::render {
       .signalSemaphoreCount = 1,
       .pSignalSemaphores = &slot.render_finished_semaphore,
     };
-    // The D3 timeline target has already completed before this submission is
+    // The producer timeline target has already completed before this submission is
     // attempted; no external wait can depend on later main-loop progress.
     const auto submit_result =
       vkQueueSubmit(graphics_queue_, 1, &submit_info, slot.submission_fence);
@@ -3968,7 +3433,7 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::clear_release_retained_after_swapchain_destroy(
+  void VulkanRenderer::Impl::clear_release_retained_after_swapchain_destroy(
     const VkSwapchainKHR handle)
   {
     for (auto &slot : slots_) {
@@ -3981,8 +3446,8 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::progress_retired_swapchains(
-    RenderTickResult &result)
+  void VulkanRenderer::Impl::progress_retired_swapchains(
+    VulkanTickResult &result)
   {
     auto state = retired_swapchains_.begin();
     while (state != retired_swapchains_.end()) {
@@ -3998,7 +3463,7 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::begin_recovery_episode(
+  void VulkanRenderer::Impl::begin_recovery_episode(
     const GraphicsFailureCategory category,
     const std::chrono::steady_clock::time_point now)
   {
@@ -4026,8 +3491,8 @@ namespace avb::render {
     recovery_last_error_.reset();
   }
 
-  void WindowsRenderStack::Impl::note_recovery_failure(
-    const core::AppError &error, RenderTickResult &result, const std::chrono::steady_clock::time_point now)
+  void VulkanRenderer::Impl::note_recovery_failure(
+    const core::AppError &error, VulkanTickResult &result, const std::chrono::steady_clock::time_point now)
   {
     recovery_last_error_ = error;
     if (error.native_detail == static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
@@ -4077,7 +3542,7 @@ namespace avb::render {
                      now + strictly_future_retry_delay(*retry.retry_after));
   }
 
-  void WindowsRenderStack::Impl::reset_recovery_after_present(
+  void VulkanRenderer::Impl::reset_recovery_after_present(
     const VkSwapchainKHR handle) noexcept
   {
     if (!recovery_episode_) {
@@ -4111,8 +3576,8 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::progress_recreation(
-    RenderTickResult &result, const std::chrono::steady_clock::time_point now)
+  void VulkanRenderer::Impl::progress_recreation(
+    VulkanTickResult &result, const std::chrono::steady_clock::time_point now)
   {
     progress_retired_swapchains(result);
 
@@ -4147,15 +3612,12 @@ namespace avb::render {
            recovery_episode_->state.awaiting_successful_present)
         ? GraphicsFailureCategory::Surface
         : GraphicsFailureCategory::Swapchain;
-    const auto scope = graphics_recovery_scope(category);
-    if (!render_stack_local_recovery(scope)) {
-      return;
-    }
+    const bool recreate_surface = category == GraphicsFailureCategory::Surface;
     if (!surface_recovery_pending_ && !swapchain_recreate_pending_ &&
         swapchain_) {
       return;
     }
-    if (scope.recreate_surface && !surface_recovery_pending_) {
+    if (recreate_surface && !surface_recovery_pending_) {
       if (!surface_recovery_active_) {
         result.surface_recovery_started = true;
       }
@@ -4165,7 +3627,7 @@ namespace avb::render {
     }
     begin_recovery_episode(category, now);
 
-    if (scope.recreate_surface) {
+    if (recreate_surface) {
       if (swapchain_) {
         const auto ownership = swapchain_ownership(swapchain_->handle);
         if (ownership.native_image_use_pending) {
@@ -4222,7 +3684,7 @@ namespace avb::render {
       recovery_episode_->state,
       GraphicsRecoveryObservation::ConstructionAttempted);
 
-    if (scope.recreate_surface) {
+    if (recreate_surface) {
       if (surface_ != VK_NULL_HANDLE) {
         vkDestroySurfaceKHR(instance_, surface_, nullptr);
         surface_ = VK_NULL_HANDLE;
@@ -4265,251 +3727,121 @@ namespace avb::render {
     recovery_last_error_.reset();
     swapchain_recreate_pending_ = false;
 
-    if (scope.recreate_surface) {
+    if (recreate_surface) {
       surface_recovery_pending_ = false;
       surface_recovery_active_ = false;
       result.surface_recovery_completed = true;
     }
     progress_retired_swapchains(result);
   }
-
-  RenderTickResult WindowsRenderStack::Impl::tick(
-    const core::Extent framebuffer,
-    const std::chrono::steady_clock::time_point now) noexcept
+  VulkanRenderer::VulkanRenderer(GLFWwindow *window, const std::uint64_t generation, const core::Extent framebuffer, const VulkanStartupRequest &startup, diagnostics::PerformanceReport *performance, const std::uint64_t observation_instance)
+      : implementation_{std::make_unique<Impl>(window, generation, framebuffer, startup, performance, observation_instance)} {}
+  VulkanRenderer::~VulkanRenderer() noexcept = default;
+  VulkanDeviceBorrow VulkanRenderer::device_borrow() const noexcept
   {
-    RenderTickResult result;
-    try {
-      result.made_progress = std::exchange(progress_pending_, false);
-      if (framebuffer != framebuffer_) {
-        resize(framebuffer);
-      }
-      if (performance_) observe_performance_metadata(std::chrono::steady_clock::now());
-      result.presentation_suspended = has_zero_dimension(framebuffer_);
-      result.vulkan_device_lost = vulkan_device_lost_;
-      result.d3_device_removed = d3_device_removed_;
-      if (vulkan_device_lost_) {
-        result.device_loss = DeviceLossKind::VulkanDeviceLost;
-      }
-      else if (d3_device_removed_) {
-        result.device_loss = DeviceLossKind::D3DeviceRemoved;
-      }
-      result.terminal_error = terminal_error_;
-
-      // Retire existing owners before considering new work. These passes remain
-      // active for zero-size framebuffers, terminal errors, and closed admission.
-      progress_present_records(result, now);
-      progress_slots(result, now);
-      for (auto &record : present_records_) {
-        if (record && record->fence == VK_NULL_HANDLE) {
-          record.reset();
-        }
-      }
-      progress_interop_fallback(result);
-
-      if (!vulkan_device_lost_) {
-        progress_recreation(result, now);
-      }
-
-      if (!draining_ && !terminal_error_ && !vulkan_device_lost_ &&
-          !interop_fallback_pending_ && !surface_recovery_pending_ &&
-          !swapchain_recreate_pending_ && !has_zero_dimension(framebuffer_) &&
-          swapchain_) {
-        // At most one acquire/submit/present attempt per tick, using a free bounded
-        // present record. A full record set supplies its own future poll deadline.
-        if (auto *const slot = ready_slot()) {
-          if (auto *const record = empty_present_record()) {
-            try_present(*slot, *record, result, now);
-            if (record->fence == VK_NULL_HANDLE) {
-              const auto found = std::ranges::find_if(
-                present_records_, [record](const auto &candidate) noexcept {
-                  return candidate && &*candidate == record;
-                });
-              if (found != present_records_.end()) {
-                found->reset();
-              }
-            }
-          }
-        }
-      }
-    } catch (const core::AppError &error) {
-      if (error.native_detail ==
-          static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
-        mark_vulkan_device_lost(result);
-      }
-      else {
-        terminal_error_ = error;
-        accepting_frames_ = false;
-        result.terminal_error = error;
-      }
-    } catch (const std::bad_alloc &) {
-      terminal_error_ =
-        graphics_error(core::AppErrorCode::RuntimeStateLost, E_OUTOFMEMORY);
-      accepting_frames_ = false;
-      result.terminal_error = terminal_error_;
-    } catch (...) {
-      terminal_error_ = graphics_error(core::AppErrorCode::RuntimeStateLost);
-      accepting_frames_ = false;
-      result.terminal_error = terminal_error_;
-    }
-
-    if (has_unsafe_native_work()) {
-      schedule_poll(result, now);
-    }
-    // This is graphics-owner drain proof only. Capture callback/checkout barriers
-    // are combined with it by the caller before releasing the whole runtime.
-    result.drain_complete =
-      draining_ && !frame_bridge_->has_pending_inputs() &&
-      slots_in_flight() == 0 && presentations_in_flight() == 0;
-    result.cleanup_pending =
-      interop_fallback_pending_ || surface_recovery_pending_ ||
-      swapchain_recreate_pending_ || !retired_swapchains_.empty();
-    result.captured_frames = captured_frames_;
-    result.presented_frames = presented_frames_;
-    result.dropped_frames = dropped_frames_;
-    result.slots_in_flight = slots_in_flight();
-    result.presentations_in_flight = presentations_in_flight();
-    if (performance_) {
-      // Retirement observers run while their records still occupy a container.
-      // Publish the final state as well, so a later measurement boundary uses
-      // the current occupancy after the last pending record has been erased.
-      performance_live_.slots = result.slots_in_flight;
-      performance_live_.presents = result.presentations_in_flight;
-      performance_->observe_high_water(PerformanceOwner::Replica, performance_live_, std::chrono::steady_clock::now());
-    }
-    result.vulkan_device_lost = vulkan_device_lost_;
-    result.d3_device_removed = d3_device_removed_;
-    if (vulkan_device_lost_) {
-      result.device_loss = DeviceLossKind::VulkanDeviceLost;
-    }
-    else if (d3_device_removed_) {
-      result.device_loss = DeviceLossKind::D3DeviceRemoved;
-    }
-    else {
-      result.device_loss.reset();
-    }
-    if (draining_ || terminal_error_ || vulkan_device_lost_ || d3_device_removed_ ||
-        surface_recovery_pending_ || swapchain_recreate_pending_ ||
-        has_zero_dimension(framebuffer_)) {
-      invalidate_presentation();
-    }
-    result.presentation = published_presentation_;
-    return result;
+    const auto &owner = *implementation_;
+    return {.physical_device = owner.physical_device_, .device = owner.device_, .memory_properties = owner.memory_properties_, .limits = owner.physical_properties_.limits, .optional_extension_group_enabled = owner.optional_extension_group_enabled_, .timeline_semaphore_enabled = owner.timeline_semaphore_supported_};
   }
-
-  WindowsRenderStack::WindowsRenderStack(
-    platform::windows::OverlayWindow &overlay,
-    const std::uint64_t resource_generation,
-    const WindowsBridgePreference bridge_preference,
-    diagnostics::PerformanceReport *performance, const std::uint64_t observation_instance)
-      : implementation_{std::make_unique<Impl>(
-          overlay.native_window(), resource_generation, overlay.framebuffer_extent(), bridge_preference, performance, observation_instance)} {}
-
-  void WindowsRenderStack::set_performance_fps(const core::FpsCap fps) noexcept
-  {
-    implementation_->set_performance_fps(fps);
-  }
-
-  WindowsRenderStack::~WindowsRenderStack() noexcept = default;
-
-  ID3D11Device &WindowsRenderStack::capture_device() noexcept
-  {
-    return implementation_->capture_device();
-  }
-
-  bool WindowsRenderStack::ready_for_frame() const noexcept
-  {
-    return implementation_->ready_for_frame();
-  }
-
-  void WindowsRenderStack::set_presentation(const ReplicaPresentation presentation) noexcept
-  {
-    implementation_->set_presentation(presentation);
-  }
-
-  bool WindowsRenderStack::has_redraw_work() const noexcept
-  {
-    return implementation_->has_redraw_work();
-  }
-
-  void WindowsRenderStack::request_redraw() noexcept
-  {
-    implementation_->request_redraw();
-  }
-
-  void WindowsRenderStack::submit(
-    platform::windows::WindowsCapturedFrame &&frame)
-  {
-    implementation_->submit(std::move(frame));
-  }
-
-  RenderTickResult WindowsRenderStack::tick(
-    const core::Extent framebuffer,
-    const std::chrono::steady_clock::time_point now) noexcept
-  {
-    return implementation_->tick(framebuffer, now);
-  }
-
-  bool WindowsRenderStack::render_allocation_idle() const noexcept
-  {
-    return implementation_->render_allocation_idle();
-  }
-
+  std::expected<std::uint64_t, core::AppError>
+  VulkanRenderer::begin_ring(const core::Extent allocation) noexcept
+  { return implementation_->begin_ring(allocation); }
   std::expected<void, core::AppError>
-  WindowsRenderStack::rebuild_capture_slots(const std::uint64_t generation,
-                                            const core::Extent allocation,
-                                            const DXGI_FORMAT format)
+  VulkanRenderer::create_cpu_slot(const SlotKey key)
   {
-    return implementation_->rebuild_capture_slots(generation, allocation, format);
+    auto *slot = implementation_->find_slot(key, RenderSlotPhase::Empty);
+    if (slot == nullptr || implementation_->ring_ready_ ||
+        slot->upload_buffer != VK_NULL_HANDLE ||
+        slot->external_image.image != VK_NULL_HANDLE) {
+      return std::unexpected{graphics_error(core::AppErrorCode::InvalidValue)};
+    }
+    return implementation_->create_capture_slot(*slot);
   }
-
-  void WindowsRenderStack::resize(const core::Extent framebuffer) noexcept
+  std::expected<void, core::AppError>
+  VulkanRenderer::register_external_image(const SlotKey key, const ExternalSampledImageView image) noexcept
+  { return implementation_->register_external_image(key, image); }
+  std::expected<void, core::AppError>
+  VulkanRenderer::publish_ring(const std::uint64_t serial, const std::uint64_t generation) noexcept
+  { return implementation_->publish_ring(serial, generation); }
+  bool VulkanRenderer::ready_for_frame() const noexcept
+  { return implementation_->ready_for_frame(); }
+  std::optional<SlotKey> VulkanRenderer::reserve_source_slot() noexcept
+  { return implementation_->reserve_source_slot(); }
+  std::expected<void, core::AppError>
+  VulkanRenderer::cancel_source_reservation(const SlotKey key) noexcept
+  { return implementation_->cancel_source_reservation(key); }
+  std::expected<void, core::AppError>
+  VulkanRenderer::complete_cpu_input(const SlotKey key, const CpuRowsView rows, const FrameStamp stamp) noexcept
+  { return implementation_->complete_cpu_input(key, rows, stamp); }
+  std::expected<void, core::AppError>
+  VulkanRenderer::complete_external_input(const SlotKey key, const core::Extent content, const FrameStamp stamp, const CompletedProducerWait wait) noexcept
+  { return implementation_->complete_external_input(key, content, stamp, wait); }
+  std::expected<void, core::AppError>
+  VulkanRenderer::discard_completed_source(const SlotKey key) noexcept
+  { return implementation_->discard_completed_source(key); }
+  std::expected<void, core::AppError>
+  VulkanRenderer::detach_ring(const std::uint64_t serial) noexcept
+  { return implementation_->detach_ring(serial); }
+  void VulkanRenderer::release_ring_resources() noexcept
   {
-    implementation_->resize(framebuffer);
+    // The facade releases producer imports between detach and this step.
+    // A remaining key identifies a missing detach rather than safe teardown.
+    for (const auto &slot : implementation_->slots_) {
+      if (slot.key.ring_serial != 0) std::terminate();
+    }
+    implementation_->release_renderer_ring_resources();
   }
-
-  void WindowsRenderStack::begin_drain() noexcept
+  void VulkanRenderer::detach_for_shutdown() noexcept
+  { implementation_->detach_for_shutdown(); }
+  bool VulkanRenderer::render_allocation_idle() const noexcept
+  { return implementation_->render_allocation_idle(); }
+  void VulkanRenderer::discard_ready_inputs() noexcept
+  { implementation_->discard_ready_inputs(); }
+  void VulkanRenderer::set_source_admission(const bool enabled) noexcept
   {
-    implementation_->begin_drain();
+    implementation_->accepting_frames_ = enabled && !implementation_->draining_ &&
+                                         !implementation_->terminal_error_ && !implementation_->vulkan_device_lost_;
   }
-
-  void WindowsRenderStack::begin_device_recovery_drain(
-    const DeviceLossKind kind) noexcept
+  void VulkanRenderer::set_presentation(const ReplicaPresentation presentation) noexcept
+  { implementation_->set_presentation(presentation); }
+  bool VulkanRenderer::has_redraw_work() const noexcept
+  { return implementation_->has_redraw_work(); }
+  void VulkanRenderer::request_redraw() noexcept
+  { implementation_->redraw_requested_ = true; }
+  void VulkanRenderer::resize(const core::Extent framebuffer) noexcept
+  { implementation_->resize(framebuffer); }
+  void VulkanRenderer::begin_drain() noexcept
+  { implementation_->begin_drain(); }
+  void VulkanRenderer::begin_recovery_drain(const bool device_lost) noexcept
+  { implementation_->begin_recovery_drain(device_lost); }
+  void VulkanRenderer::note_device_loss() noexcept
   {
-    implementation_->begin_device_recovery_drain(kind);
+    implementation_->vulkan_device_lost_ = true;
+    implementation_->accepting_frames_ = false;
   }
-
-  std::uint64_t WindowsRenderStack::generation() const noexcept
+  bool VulkanRenderer::vulkan_device_lost() const noexcept
+  { return implementation_->vulkan_device_lost_; }
+  std::uint64_t VulkanRenderer::generation() const noexcept
+  { return implementation_->generation_; }
+  std::uint64_t VulkanRenderer::gpu_interop_frames_submitted() const noexcept
+  { return implementation_->gpu_interop_frames_submitted_; }
+  VulkanTickResult VulkanRenderer::begin_tick(const core::Extent framebuffer,
+                                              const std::chrono::steady_clock::time_point now) noexcept
+  { return implementation_->begin_tick(framebuffer, now); }
+  void VulkanRenderer::retire_submissions(VulkanTickResult &result,
+                                          const std::chrono::steady_clock::time_point now) noexcept
+  { implementation_->retire_submissions(result, now); }
+  void VulkanRenderer::finish_tick(VulkanTickResult &result,
+                                   const std::chrono::steady_clock::time_point now,
+                                   const bool allow_present,
+                                   const bool allow_recovery) noexcept
+  { implementation_->finish_tick(result, now, allow_present, allow_recovery); }
+  void VulkanRenderer::observe_external_semaphore(const bool created) noexcept
   {
-    return implementation_->generation();
+    implementation_->observe_performance(created ? PerformanceCounter::SemaphoresCreated
+                                                 : PerformanceCounter::SemaphoresDestroyed);
   }
-
-  BridgeCapabilityFacts
-  WindowsRenderStack::bridge_capability_facts() const noexcept
-  {
-    return implementation_->bridge_capability_facts();
-  }
-
-  std::optional<BridgeSelection>
-  WindowsRenderStack::bridge_selection() const noexcept
-  {
-    return implementation_->bridge_selection();
-  }
-
-  core::BridgeMode WindowsRenderStack::active_bridge_mode() const noexcept
-  {
-    return implementation_->active_bridge_mode();
-  }
-
-  std::uint64_t
-  WindowsRenderStack::gpu_interop_frames_submitted() const noexcept
-  {
-    return implementation_->gpu_interop_frames_submitted();
-  }
-
-  std::optional<BridgeSelection>
-  WindowsRenderStack::take_bridge_mode_change() noexcept
-  {
-    return implementation_->take_bridge_mode_change();
-  }
+  void VulkanRenderer::observe_metadata(const VulkanObservationContext context,
+                                        const std::chrono::steady_clock::time_point now) noexcept
+  { implementation_->observe_metadata(context, now); }
 
 }    // namespace avb::render

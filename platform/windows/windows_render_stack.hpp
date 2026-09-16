@@ -1,8 +1,8 @@
 /// @file
 /// @brief Concrete replica graphics boundary: the runtime supplies capture checkouts
 /// and receives native facts/deadlines, without exposing graphics to the UI.
-#ifndef AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP
-#define AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP
+#ifndef AVB0795_PLATFORM_WINDOWS_WINDOWS_RENDER_STACK_HPP
+#define AVB0795_PLATFORM_WINDOWS_WINDOWS_RENDER_STACK_HPP
 
 #include "avb/core/types.hpp"
 #include "platform/windows/detail/bridge_policy.hpp"
@@ -59,9 +59,12 @@ namespace avb::render {
     std::optional<PresentationSnapshot> presentation;
   };
 
-  /// @brief Own one replica's D3D device, Vulkan device/WSI, and three capture slots.
+  /// @brief Compose the Windows frame bridge and shared Vulkan renderer for one replica.
   ///
-  /// All calls run on the main thread. The borrowed OverlayWindow must outlive
+  /// The bridge owns native copies/imports and the renderer owns canonical slots,
+  /// descriptors, submissions and WSI. This facade selects transport and combines
+  /// independent progress/loss facts. All calls run on the main thread.
+  /// The borrowed OverlayWindow must outlive
   /// this stack; published owners must drain before destruction.
   /// Copy and move are disabled so outstanding work keeps a stable native owner.
   class WindowsRenderStack final {
@@ -188,4 +191,4 @@ namespace avb::render {
 
 }    // namespace avb::render
 
-#endif    // AVB0795_RENDER_WINDOWS_RENDER_STACK_HPP
+#endif    // AVB0795_PLATFORM_WINDOWS_WINDOWS_RENDER_STACK_HPP

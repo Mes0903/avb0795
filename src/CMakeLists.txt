@@ -81,6 +81,36 @@ target_compile_features(avb0795_ui PUBLIC cxx_std_23)
 # Only the latter needs both capture and presentation dependencies; a frontend
 # target must not inherit these dependencies as a shortcut to native operations.
 if(WIN32)
+  # This owner consumes Vulkan/GLFW and neutral frame values. Current dependency
+  # configuration enables graphics on Windows; the renderer itself has a separate
+  # source/link boundary from native capture and the Windows composition facade.
+  add_library(avb0795_vulkan_renderer
+    ${PROJECT_SOURCE_DIR}/render/graphics_retry_policy.cpp
+    ${PROJECT_SOURCE_DIR}/render/render_math.cpp
+    ${PROJECT_SOURCE_DIR}/render/vulkan_renderer.cpp
+    ${AVB0795_REPLICA_SHADER_SOURCE}
+  )
+
+  add_dependencies(avb0795_vulkan_renderer avb0795_replica_shaders)
+
+  target_include_directories(avb0795_vulkan_renderer
+    PUBLIC
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/include
+    PRIVATE
+      ${PROJECT_BINARY_DIR}/generated
+  )
+
+  target_link_libraries(avb0795_vulkan_renderer
+    PUBLIC
+      avb0795_core
+      Vulkan::Vulkan
+    PRIVATE
+      avb0795_diagnostics
+      glfw
+  )
+  target_compile_features(avb0795_vulkan_renderer PUBLIC cxx_std_23)
+
   add_library(avb0795_windows
     ${PROJECT_SOURCE_DIR}/platform/windows/capture_exclusion.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/controller_font.cpp
@@ -127,25 +157,18 @@ if(WIN32)
   add_library(avb0795_windows_graphics
     ${PROJECT_SOURCE_DIR}/platform/windows/detail/bridge_policy.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_frame_bridge.cpp
-    ${PROJECT_SOURCE_DIR}/render/graphics_retry_policy.cpp
-    ${PROJECT_SOURCE_DIR}/render/render_math.cpp
-    ${PROJECT_SOURCE_DIR}/render/windows_render_stack.cpp
+    ${PROJECT_SOURCE_DIR}/platform/windows/windows_render_stack.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/detail/overlay_policy.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/overlay_window.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/win32_overlay_adapter.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_replica_runtime.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/windows_runtime_factory.cpp
-    ${AVB0795_REPLICA_SHADER_SOURCE}
   )
-
-  add_dependencies(avb0795_windows_graphics avb0795_replica_shaders)
 
   target_include_directories(avb0795_windows_graphics
     PUBLIC
       ${PROJECT_SOURCE_DIR}
       ${PROJECT_SOURCE_DIR}/include
-    PRIVATE
-      ${PROJECT_BINARY_DIR}/generated
   )
 
   target_link_libraries(avb0795_windows_graphics
@@ -153,6 +176,7 @@ if(WIN32)
       avb0795_core
       avb0795_app
       avb0795_windows
+      avb0795_vulkan_renderer
       avb0795_diagnostics
       glfw
       Vulkan::Vulkan
@@ -190,6 +214,7 @@ if(WIN32)
       avb0795_app
       avb0795_ui
       avb0795_diagnostics
+      avb0795_vulkan_renderer
       glfw
       Vulkan::Vulkan
       imgui
