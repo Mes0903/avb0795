@@ -60,6 +60,15 @@ namespace avb::ui {
     /// Discard the candidate immediately; the next render closes its modal.
     void cancel_hotkey_recording() noexcept;
 
+    /// @brief Report an ongoing local gesture that benefits from interactive cadence.
+    /// Recorder release barriers and opacity drafts persist between frames. This
+    /// context-free observation lets the host retain responsive frame timing while
+    /// the view continues to own those transient interaction values.
+    [[nodiscard]] bool has_active_interaction() const noexcept
+    {
+      return hotkey_recording_.has_value() || opacity_editing_.has_value();
+    }
+
   private:
     void render_contents(const app::ControllerViewState &state,
                          const CommandSink &command_sink);
@@ -79,6 +88,9 @@ namespace avb::ui {
     struct OpacityEditing {
       core::SessionId session_id;
       int percent{100};
+      // Persist the end-of-gesture obligation across hidden input-only frames,
+      // which can outlive ImGui's per-frame deactivation notification.
+      bool preview_emitted{};
     };
     std::optional<OpacityEditing> opacity_editing_;
     /// Owned coordinate draft, discarded when any source/presentation identity changes.

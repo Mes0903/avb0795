@@ -42,6 +42,8 @@ avb0795.exe --performance-report B5-01.json --performance-scope replica --perfor
 | 指標 | 觀測邊界 |
 | --- | --- |
 | `ui_build` | Backend NewFrame 前至 ImGui Render 後的主執行緒耗時 |
+| `hidden_syncs` | 隱藏 controller 完成一次完整 input queue 同步 |
+| `graphics_only_wakes` | Host 完成 application／graphics progress，該輪 UI cadence 選擇省略 UI frame |
 | `admitted` | Render stack 接受 checkout 並建立來源 copy obligation |
 | `submitted` | Vulkan queue submit 成功；retained redraw 另列計數 |
 | `present_retired` | 成功／suboptimal present 的 fence 已完成 |
@@ -86,6 +88,43 @@ Driver metadata 的 `raw:` 前綴表示 Vulkan 回報的原始 vendor-encoded dr
 
 對照時先比較 admitted／submitted／present-retired／dropped／retained-redraw 工作量，再比較 p50／p95 與三次 run 的 median／range。Throughput 下降超過 5% 會觸發警戒；intake-to-submit p95 同時增加超過 5% 與 0.5 ms 則觸發獨立警戒。診斷開關的觀測成本以相同 workload 下的 process CPU 與 throughput 配對呈現。
 
+## Controller 更新期限
+
+為了讓擷取與 GPU 完成檢查各自維持進度，controller 需要獨立決定何時建立 ImGui 畫面。`DesktopHost` 使用純值 `UiCadence` 計算 UI deadline，再與 Application、graphics owner 的 deadline 合併。
+
+```mermaid
+flowchart TD
+    Pump[GLFW event pump] --> Progress[Controller graphics progress]
+    Progress --> App[Application step]
+    App --> Decide[UiCadence decision]
+    Decide -->|Visible| Widgets[Backend NewFrame → widgets → Render → present attempt]
+    Decide -->|HiddenSync| Sync[完整 input queue → NewFrame → EndFrame]
+    Decide -->|None| Wait[合併三個 owner 的最早 deadline]
+    Widgets --> Wait
+    Sync --> Wait
+    Wait -->|UI command| Pump
+    Wait -->|deadline / native event| Pump
+```
+
+| 狀態 | UI 更新方式 |
+| --- | --- |
+| 初次顯示、還原 | 立即建立一幀 |
+| 最近 500 ms 有輸入，或持續按鍵／編輯／popup／快捷鍵錄製 | 每次 build 完成後至少間隔 16.667 ms |
+| 可見且閒置 | 每次 build 完成後間隔 100 ms |
+| 最小化、framebuffer 為零 | 事件驅動的一次 input 同步；同步後由 Application／graphics deadline 與 native event 喚醒 |
+
+Windows 最小化狀態與 framebuffer 尺寸共同決定可見性。Native input callback 先記錄 activity，再轉送 ImGui backend；backend 保存既有 callback chain。Capture wake 供 Application／graphics progress 使用。UI command 進入 queue 後，下一輪立即 pump events 與執行 Application step。
+
+為了讓累積的游標移入事件對應當下位置，host 在 backend 處理 entry 後，透過 GLFW 取得 window-local 座標並加入 ImGui input queue。這個取樣涵蓋「移動、移出、回到相同位置」集中於兩次 UI build 之間的情形；callback 轉送與 queue 寫入共同受 host 的 exception firewall 保護。
+
+隱藏同步暫時將 `ConfigInputTrickleEventQueue` 設為 false，讓同批 press、release、focus events 完整消化，結束後恢復原設定。可見 UI 持續使用原本的 trickling 行為。到期的 widget build 持續處理互動，native GPU capacity 決定該幀的 present admission。
+
+為了將已接受的透明度存入偏好設定，ControllerView 的 gesture draft 保存 preview 與待 commit 狀態；還原後確認手勢結束，再透過 typed command 交給 Application 儲存 accepted state。Opacity 與 region 數值欄位啟用 scoped `LiveEditOnInputScalar`，打字時將解析後的數值寫入既有 draft，讓草稿跨越多次隱藏同步。Opacity 沿 preview 更新目前畫面，編輯結束時保存；region 沿「套用範圍」一次送出完整座標。Escape 使用 widget 的還原語意回到本次編輯起值。
+
+ImGui 的 scalar widget patch 將 temporary text export 綁定至當次 active editor，讓同 ID 的文字輸入與後續拖曳各自沿用對應數值。CMake 在所有 UI 平台驗證這份 patch 的輸出雜湊；下載來源使用獨立的 Git 目錄探索邊界與 LF 格式，以固定 patch 結果。
+
+報告的 `owners.controller.metadata.ui_policy` 保存實際 cadence 數值；replica metadata 引用 controller owner 的說明。B1／B2 的閒置 UI builds 預期接近每秒 10 次；B3–B6 的最小化穩態預期為零次週期性 widget build。輸入、恢復顯示與測試操作的額外更新由對應計數與 manifest 解釋。
+
 ## 本階段驗證範圍
 
-Task 1 先建立觀測工具與基線。UI cadence、同步物件重用與 CPU padding 精簡依後續 task 推進。效能比較的結論以對應的實測報告與 manifest 為依據；程式建置、純政策測試、硬體擷取測試與 benchmark 四項分別記錄。
+Task 1 建立觀測工具與基線；Task 2 接入 UI cadence 與 input continuity。同步物件重用與 CPU padding 精簡依後續 task 推進。效能比較的結論以對應的實測報告與 manifest 為依據；程式建置、純政策測試、互動驗收、硬體擷取測試與 benchmark 分別記錄。

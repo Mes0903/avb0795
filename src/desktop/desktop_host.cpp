@@ -8,6 +8,8 @@
 #include "avb/desktop/desktop_host.hpp"
 #include "avb/diagnostics/performance_report.hpp"
 #include "controller_font.hpp"
+#include "imgui_input_sync.hpp"
+#include "ui_cadence.hpp"
 
 #include "avb/ui/controller_view.hpp"
 #include "render/graphics_retry_policy.hpp"
@@ -270,6 +272,43 @@ namespace avb::desktop {
     static void window_close_callback(GLFWwindow *window) noexcept;
     /// Cancel recording at the focus-loss edge before queued ImGui events coalesce.
     static void window_focus_callback(GLFWwindow *window, int focused) noexcept;
+    static void key_callback(GLFWwindow *window, int key, int scancode, int action, int mods) noexcept;
+    static void char_callback(GLFWwindow *window, unsigned int character) noexcept;
+    static void mouse_button_callback(GLFWwindow *window, int button, int action, int mods) noexcept;
+    static void scroll_callback(GLFWwindow *window, double x, double y) noexcept;
+    static void cursor_position_callback(GLFWwindow *window, double x, double y) noexcept;
+    static void cursor_enter_callback(GLFWwindow *window, int entered) noexcept;
+    static void framebuffer_callback(GLFWwindow *window, int width, int height) noexcept;
+    static void content_scale_callback(GLFWwindow *window, float x, float y) noexcept;
+    static void refresh_callback(GLFWwindow *window) noexcept;
+    static void iconify_callback(GLFWwindow *window, int iconified) noexcept;
+
+    /// @brief Observe activity and contain failures across a typed native callback.
+    /// Input hooks forward exactly once to the ImGui backend, which owns its saved
+    /// predecessor chain. Display hooks forward to their separately saved native
+    /// predecessor; a null predecessor still records the activity observation.
+    template <typename... Args>
+    static void forward_input(GLFWwindow *window,
+                              void (*callback)(GLFWwindow *, Args...),
+                              Args... args) noexcept
+    {
+      auto *const self = static_cast<Impl *>(glfwGetWindowUserPointer(window));
+      if (self == nullptr) return;
+      self->ui_cadence_.note_input(std::chrono::steady_clock::now());
+      try {
+        if (callback != nullptr) callback(window, args...);
+      } catch (...) {
+        self->enter_fatal(FatalKind::Unexpected,
+                         graphics_error(core::AppErrorCode::RuntimeStateLost));
+      }
+    }
+
+    /// Observe native drawable state independently of the widget-build deadline.
+    /// Windows may retain a small framebuffer while iconified; both facts govern
+    /// visibility and swapchain reconstruction admission.
+    void observe_controller_visibility(std::chrono::steady_clock::time_point now) noexcept;
+    /// Combine public ImGui held-input/editing facts with view-owned gestures.
+    [[nodiscard]] bool interaction_active() const noexcept;
 
     /// Enqueue a view command and mark that the next event wait must be skipped.
     void emit(app::AppCommand command);
@@ -307,8 +346,9 @@ namespace avb::desktop {
     /// The record tracks font upload so staging survives until submission proof.
     [[nodiscard]] VkResult record_frame(FrameRecord &record,
                                         ImDrawData &draw_data);
-    /// Step the application, render its immutable view and enqueue emitted
-    /// commands; controller presentation remains private to this host.
+    /// Render the application's current immutable view and enqueue emitted commands.
+    /// The caller advances the application independently and admits this UI frame
+    /// through its cadence policy; native capacity governs the one present attempt.
     void render_controller(app::Application &application,
                            std::chrono::steady_clock::time_point now);
     /// Acquire at timeout zero and independently classify command submit/present.
@@ -380,7 +420,7 @@ namespace avb::desktop {
     /// Choose host/device memory by required flags, preferring optional flags.
     [[nodiscard]] std::optional<std::uint32_t>
     memory_type(std::uint32_t bits, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred = 0) const noexcept;
-    /// Read physical framebuffer dimensions; minimization produces zero extent.
+    /// Read physical framebuffer dimensions; native iconification is observed separately.
     [[nodiscard]] VkExtent2D framebuffer_extent() const noexcept;
     /// Wait for events only until the earliest required observation deadline;
     /// already-due work returns immediately instead of losing its next step.
@@ -400,6 +440,12 @@ namespace avb::desktop {
     core::CaptureExclusionStatus controller_exclusion_{};
     std::unique_ptr<ControllerWindowInteraction> window_interaction_;
     ui::ControllerView controller_view_;
+    detail::UiCadence ui_cadence_;
+    GLFWframebuffersizefun previous_framebuffer_callback_{};
+    GLFWwindowcontentscalefun previous_content_scale_callback_{};
+    GLFWwindowrefreshfun previous_refresh_callback_{};
+    GLFWwindowiconifyfun previous_iconify_callback_{};
+    bool display_callbacks_installed_{};
     // The atlas borrows these bytes; context destruction precedes vector release.
     std::vector<std::byte> font_data_;
 
@@ -480,7 +526,7 @@ namespace avb::desktop {
       .os = "Windows",
       .bridge = "controller",
       .present_mode = "FIFO",
-      .ui_policy = "baseline: UI builds on every host iteration; graphics poll 2ms",
+      .ui_policy = "active 16.667ms; idle 100ms; grace 500ms; hidden input-driven; graphics poll 2ms",
       .framebuffer_width = extent.width,
       .framebuffer_height = extent.height,
     }, now);
@@ -522,10 +568,20 @@ namespace avb::desktop {
       create_font_texture();
       glfwSetWindowUserPointer(window_, this);
       glfwSetWindowCloseCallback(window_, window_close_callback);
-      // The ImGui backend saved the previous focus hook during initialization.
-      // Our wrapper forwards to that backend; Shutdown restores its saved hook
-      // before releasing the context, removing this wrapper in the same lifetime.
+      // Backend initialization preserves the input predecessor chain. These
+      // wrappers add cadence observations; backend shutdown restores that chain.
       glfwSetWindowFocusCallback(window_, window_focus_callback);
+      glfwSetKeyCallback(window_, key_callback);
+      glfwSetCharCallback(window_, char_callback);
+      glfwSetMouseButtonCallback(window_, mouse_button_callback);
+      glfwSetScrollCallback(window_, scroll_callback);
+      glfwSetCursorPosCallback(window_, cursor_position_callback);
+      glfwSetCursorEnterCallback(window_, cursor_enter_callback);
+      previous_framebuffer_callback_ = glfwSetFramebufferSizeCallback(window_, framebuffer_callback);
+      previous_content_scale_callback_ = glfwSetWindowContentScaleCallback(window_, content_scale_callback);
+      previous_refresh_callback_ = glfwSetWindowRefreshCallback(window_, refresh_callback);
+      previous_iconify_callback_ = glfwSetWindowIconifyCallback(window_, iconify_callback);
+      display_callbacks_installed_ = true;
       fully_constructed_ = true;
     } catch (...) {
       cleanup_partial();
@@ -582,13 +638,119 @@ namespace avb::desktop {
     if (focused == GLFW_FALSE) {
       self->controller_view_.cancel_hotkey_recording();
     }
-    try {
-      ImGui_ImplGlfw_WindowFocusCallback(window, focused);
-    } catch (...) {
-      self->enter_fatal(
-        FatalKind::Unexpected,
-        graphics_error(core::AppErrorCode::RuntimeStateLost));
+    forward_input(window, ImGui_ImplGlfw_WindowFocusCallback, focused);
+  }
+
+  void DesktopHost::Impl::key_callback(
+    GLFWwindow *const window, const int key, const int scancode,
+    const int action, const int mods) noexcept
+  {
+    forward_input(window, ImGui_ImplGlfw_KeyCallback, key, scancode, action, mods);
+  }
+
+  void DesktopHost::Impl::char_callback(
+    GLFWwindow *const window, const unsigned int character) noexcept
+  {
+    forward_input(window, ImGui_ImplGlfw_CharCallback, character);
+  }
+
+  void DesktopHost::Impl::mouse_button_callback(
+    GLFWwindow *const window, const int button, const int action, const int mods) noexcept
+  {
+    forward_input(window, ImGui_ImplGlfw_MouseButtonCallback, button, action, mods);
+  }
+
+  void DesktopHost::Impl::scroll_callback(
+    GLFWwindow *const window, const double x, const double y) noexcept
+  {
+    forward_input(window, ImGui_ImplGlfw_ScrollCallback, x, y);
+  }
+
+  void DesktopHost::Impl::cursor_position_callback(
+    GLFWwindow *const window, const double x, const double y) noexcept
+  {
+    forward_input(window, ImGui_ImplGlfw_CursorPosCallback, x, y);
+  }
+
+  void DesktopHost::Impl::cursor_enter_callback(
+    GLFWwindow *const window, const int entered) noexcept
+  {
+    forward_input(window, +[](GLFWwindow *target, const int state) {
+      ImGui_ImplGlfw_CursorEnterCallback(target, state);
+      if (state == GLFW_TRUE) {
+        // A leave/enter batch can restore the backend's last consumed frame
+        // position while GLFW suppresses a same-position motion callback. Sample
+        // the native window-local position at entry so a deferred UI frame sees
+        // the current location. Keep this queue write inside forward_input's
+        // exception firewall and preserve exactly one backend callback dispatch.
+        double x{}, y{};
+        glfwGetCursorPos(target, &x, &y);
+        ImGui::GetIO().AddMousePosEvent(static_cast<float>(x), static_cast<float>(y));
+      }
+    }, entered);
+  }
+
+  void DesktopHost::Impl::framebuffer_callback(
+    GLFWwindow *const window, const int width, const int height) noexcept
+  {
+    if (auto *const self = static_cast<Impl *>(glfwGetWindowUserPointer(window))) {
+      forward_input(window, self->previous_framebuffer_callback_, width, height);
     }
+  }
+
+  void DesktopHost::Impl::content_scale_callback(
+    GLFWwindow *const window, const float x, const float y) noexcept
+  {
+    if (auto *const self = static_cast<Impl *>(glfwGetWindowUserPointer(window))) {
+      forward_input(window, self->previous_content_scale_callback_, x, y);
+    }
+  }
+
+  void DesktopHost::Impl::refresh_callback(GLFWwindow *const window) noexcept
+  {
+    if (auto *const self = static_cast<Impl *>(glfwGetWindowUserPointer(window))) {
+      forward_input(window, self->previous_refresh_callback_);
+    }
+  }
+
+  void DesktopHost::Impl::iconify_callback(
+    GLFWwindow *const window, const int iconified) noexcept
+  {
+    if (auto *const self = static_cast<Impl *>(glfwGetWindowUserPointer(window))) {
+      forward_input(window, self->previous_iconify_callback_, iconified);
+    }
+  }
+
+  void DesktopHost::Impl::observe_controller_visibility(
+    const std::chrono::steady_clock::time_point now) noexcept
+  {
+    const auto extent = framebuffer_extent();
+    const bool visible = glfwGetWindowAttrib(window_, GLFW_ICONIFIED) != GLFW_TRUE &&
+                         !zero_extent(extent);
+    ui_cadence_.set_visible(visible, now);
+    if (visible && active_swapchain_ &&
+        (extent.width != active_swapchain_->extent.width ||
+         extent.height != active_swapchain_->extent.height)) {
+      swapchain_recreate_pending_ = true;
+      schedule_poll(now, false);
+    }
+  }
+
+  bool DesktopHost::Impl::interaction_active() const noexcept
+  {
+    if (controller_view_.has_active_interaction() || ImGui::IsAnyItemActive() ||
+        ImGui::GetIO().WantTextInput ||
+        ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId |
+                                    ImGuiPopupFlags_AnyPopupLevel)) {
+      return true;
+    }
+    for (int button = 0; button < ImGuiMouseButton_COUNT; ++button) {
+      if (ImGui::IsMouseDown(button)) return true;
+    }
+    for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; ++key) {
+      if (ImGui::IsKeyDown(static_cast<ImGuiKey>(key))) return true;
+    }
+    return false;
   }
 
   void DesktopHost::Impl::emit(app::AppCommand command)
@@ -618,7 +780,9 @@ namespace avb::desktop {
       controller_view_.cancel_hotkey_recording();
       return false;
     }
-    return controller_view_.try_record_hotkey(chord);
+    const bool recorded = controller_view_.try_record_hotkey(chord);
+    if (recorded) ui_cadence_.note_input(std::chrono::steady_clock::now());
+    return recorded;
   }
 
   void DesktopHost::Impl::create_instance()
@@ -2327,7 +2491,8 @@ namespace avb::desktop {
       return;
     }
     const auto requested_extent = framebuffer_extent();
-    if (zero_extent(requested_extent)) {
+    if (zero_extent(requested_extent) ||
+        glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE) {
       return;
     }
 
@@ -2454,23 +2619,9 @@ namespace avb::desktop {
     app::Application &application,
     const std::chrono::steady_clock::time_point now)
   {
-    // Advancing the application is independent of having drawable pixels. A zero
-    // framebuffer suppresses presentation below, not commands, recovery or drain.
-    // The view is borrowed only within this iteration; UI commands are queued for
-    // the next step rather than mutating application state while rendering it.
-    application.step(now);
-    if (application.exit_disposition() != core::ExitDisposition::Continue) {
-      return;
-    }
-
-    const auto current_extent = framebuffer_extent();
-    if (active_swapchain_ && !zero_extent(current_extent) &&
-        (current_extent.width != active_swapchain_->extent.width ||
-         current_extent.height != active_swapchain_->extent.height)) {
-      swapchain_recreate_pending_ = true;
-      schedule_poll(now, false);
-    }
-
+    // A due visible frame consumes queued input even while native capacity is
+    // occupied. The view borrows the current projection through this call; its
+    // owning command values enter the application's next independently run step.
     if (performance_) {
       const auto observed = std::chrono::steady_clock::now();
       performance_->observe_first_ui(observed);
@@ -2498,9 +2649,14 @@ namespace avb::desktop {
     window_interaction_->set_drag_region(
       display.x > 0.0F ? frame.drag_right / display.x : 0.0F,
       display.y > 0.0F ? frame.drag_bottom / display.y : 0.0F);
-    if (!zero_extent(current_extent) && fatal_kind_ == FatalKind::None) {
+    ui_cadence_.did_build(std::chrono::steady_clock::now());
+    if (!zero_extent(framebuffer_extent()) &&
+        glfwGetWindowAttrib(window_, GLFW_ICONIFIED) != GLFW_TRUE &&
+        fatal_kind_ == FatalKind::None) {
       attempt_present(*ImGui::GetDrawData(), now);
     }
+    // Native iconify can synchronously queue focus/release callbacks. Acknowledge
+    // this frame above so those newly observed inputs request a hidden sync.
     if (frame.minimize_requested && fatal_kind_ == FatalKind::None) {
       glfwIconifyWindow(window_);
     }
@@ -2617,8 +2773,11 @@ namespace avb::desktop {
     application.shutdown();
     while (application.exit_disposition() ==
            core::ExitDisposition::Continue) {
+      glfwPollEvents();
       const auto now = std::chrono::steady_clock::now();
-      if (!controller_firewall) {
+      const bool graphics_allowed = !controller_firewall &&
+        fatal_kind_ != FatalKind::DeviceLost && fatal_kind_ != FatalKind::Unexpected;
+      if (graphics_allowed) {
         progress(now, true);
       }
       application.step(now);
@@ -2630,7 +2789,8 @@ namespace avb::desktop {
           now - drain_stalled_threshold - std::chrono::milliseconds{1};
       }
       auto deadline = application.next_deadline();
-      if (!controller_firewall && fatal_kind_ != FatalKind::DeviceLost &&
+      if (graphics_allowed && fatal_kind_ != FatalKind::DeviceLost &&
+          fatal_kind_ != FatalKind::Unexpected &&
           !drain_stalled(now) && graphics_deadline_) {
         earlier_deadline(deadline, *graphics_deadline_);
       }
@@ -2645,29 +2805,47 @@ namespace avb::desktop {
       while (application.exit_disposition() ==
                core::ExitDisposition::Continue &&
              fatal_kind_ == FatalKind::None) {
+        glfwPollEvents();
+        if (fatal_kind_ != FatalKind::None) break;
         const auto now = std::chrono::steady_clock::now();
         if (performance_) performance_->advance(now);
+        observe_controller_visibility(now);
         progress(now, false);
         if (fatal_kind_ != FatalKind::None) {
           break;
         }
         if (performance_) observe_performance_metadata(std::chrono::steady_clock::now());
-        render_controller(application, now);
+        application.step(now);
+        if (application.exit_disposition() != core::ExitDisposition::Continue ||
+            fatal_kind_ != FatalKind::None) break;
+        const auto ui = ui_cadence_.decision(std::chrono::steady_clock::now(),
+                                            interaction_active());
+        if (ui.mode == detail::UiTickMode::Visible) {
+          render_controller(application, now);
+        } else if (ui.mode == detail::UiTickMode::HiddenSync) {
+          detail::synchronize_hidden_imgui_input([] {
+            ImGui_ImplVulkan_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+          });
+          ui_cadence_.did_build(std::chrono::steady_clock::now());
+          observe_performance(PerformanceCounter::HiddenSyncs);
+        } else {
+          observe_performance(PerformanceCounter::GraphicsOnlyWakes);
+        }
         if (application.exit_disposition() != core::ExitDisposition::Continue ||
             fatal_kind_ != FatalKind::None) {
           break;
         }
-        // UI commands were enqueued after Application::step in this iteration.
-        // Run another step immediately even when no native wake is forthcoming.
-        if (command_emitted_) {
-          command_emitted_ = false;
-          continue;
-        }
-        auto deadline = application.next_deadline();
-        if (graphics_deadline_) {
-          earlier_deadline(deadline, *graphics_deadline_);
-        }
-        wait_until(deadline, true);
+        // A UI action may synchronously iconify the window. Observe its resulting
+        // visibility before choosing a wait so the pending hidden input is drained.
+        const auto after_ui = std::chrono::steady_clock::now();
+        observe_controller_visibility(after_ui);
+        const auto next_ui = ui_cadence_.decision(after_ui, interaction_active());
+        const auto wait = detail::choose_host_wait(
+          std::exchange(command_emitted_, false), application.next_deadline(),
+          graphics_deadline_, next_ui.next_deadline);
+        if (wait.immediate_reentry) continue;
+        wait_until(wait.deadline, true);
       }
 
       if (application.exit_disposition() ==
@@ -2691,6 +2869,11 @@ namespace avb::desktop {
       stopping_controller_ = true;
       no_progress_since_ = std::chrono::steady_clock::now();
       while (!controller_drained()) {
+        glfwPollEvents();
+        if (fatal_kind_ == FatalKind::DeviceLost ||
+            fatal_kind_ == FatalKind::Unexpected) {
+          return {.exit_code = abandon_exit_code, .abandon_process = true};
+        }
         const auto now = std::chrono::steady_clock::now();
         progress(now, true);
         if (fatal_kind_ == FatalKind::DeviceLost ||
@@ -2822,6 +3005,13 @@ namespace avb::desktop {
     // Callers admit only never-submitted startup state or already-retired work.
     // Remove the atlas descriptor/backend/context while their device and borrowed
     // font storage still exist, then destroy images, pools, device and surface.
+    if (display_callbacks_installed_) {
+      glfwSetFramebufferSizeCallback(window_, previous_framebuffer_callback_);
+      glfwSetWindowContentScaleCallback(window_, previous_content_scale_callback_);
+      glfwSetWindowRefreshCallback(window_, previous_refresh_callback_);
+      glfwSetWindowIconifyCallback(window_, previous_iconify_callback_);
+      display_callbacks_installed_ = false;
+    }
     if (imgui_vulkan_initialized_) {
       if (font_texture_.descriptor != VK_NULL_HANDLE) {
         if (auto *const texture_data = ImGui::GetIO().Fonts->TexData;

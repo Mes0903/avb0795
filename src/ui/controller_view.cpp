@@ -373,9 +373,14 @@ namespace avb::ui {
     int opacity = opacity_editing_ ? opacity_editing_->percent
                                     : state.settings.opacity_percent;
     ImGui::BeginDisabled(!state.controls.opacity.enabled);
+    // Parsed input belongs to this view's gesture draft. Publishing it while
+    // typing keeps that value across arbitrarily many hidden input-only frames;
+    // the gesture-ending command remains the persistence boundary.
+    ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true);
     const bool opacity_changed = ImGui::DragInt(
       widget_label(i18n::TextId::Opacity, "opacity", language).c_str(),
       &opacity, 1.0F, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::PopItemFlag();
     const bool opacity_active = ImGui::IsItemActive();
     const bool opacity_finished = ImGui::IsItemDeactivatedAfterEdit();
     if (!opacity_editing_ && (ImGui::IsItemActivated() || opacity_changed)) {
@@ -385,11 +390,15 @@ namespace avb::ui {
     ImGui::EndDisabled();
     if (opacity_editing_) {
       opacity_editing_->percent = opacity;
+      opacity_editing_->preview_emitted |= opacity_changed;
       emit_if(opacity_changed, command_sink,
               app::SetOpacity{opacity_editing_->session_id, opacity, false});
       // Queue the last preview first. Commit only flushes the accepted value,
       // so a rejected preview is never implicitly retried when the gesture ends.
-      emit_if(opacity_finished, command_sink,
+      // Hidden input frames may consume the widget's deactivation edge before
+      // it is drawn again. The view retains its preview obligation until the
+      // gesture is inactive; the command handler commits its accepted value.
+      emit_if(opacity_finished || (!opacity_active && opacity_editing_->preview_emitted), command_sink,
               app::SetOpacity{opacity_editing_->session_id, opacity, true});
       if (!opacity_active) {
         opacity_editing_.reset();
@@ -559,11 +568,15 @@ namespace avb::ui {
     constexpr std::array labels{i18n::TextId::RegionX, i18n::TextId::RegionY,
                                i18n::TextId::RegionWidth, i18n::TextId::RegionHeight};
     constexpr std::array ids{"region_x", "region_y", "region_width", "region_height"};
+    // Keep parsed coordinates in the existing source-scoped draft while typing.
+    // The Apply action below remains the command boundary for the whole tuple.
+    ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true);
     for (std::size_t index = 0; index < draft.coordinates.size(); ++index) {
       ImGui::DragInt(widget_label(labels[index], ids[index], language).c_str(),
                      &draft.coordinates[index], 1.0F, 0, std::numeric_limits<int>::max(),
                      "%d", ImGuiSliderFlags_AlwaysClamp);
     }
+    ImGui::PopItemFlag();
     ImGui::EndDisabled();
     std::optional<core::PixelRegion> candidate;
     const auto &values = draft.coordinates;

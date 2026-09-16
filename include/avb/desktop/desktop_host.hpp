@@ -108,10 +108,12 @@ namespace avb::desktop {
     [[nodiscard]] bool try_record_hotkey(core::HotkeyChord chord) noexcept;
     /// @brief Drive the controller until application shutdown and ownership disposition.
     ///
-    /// Borrow application for the entire call. Each iteration progresses prior
-    /// controller work, advances the application, renders its snapshot, then
-    /// considers waiting. Commands emitted by that render force another iteration
-    /// so they cannot be stranded behind an indefinite event wait.
+    /// Borrow application for the entire call. Each iteration pumps native events,
+    /// progresses prior controller work and advances the application. UI cadence
+    /// separately schedules snapshot rendering: active interaction uses a 16.667 ms
+    /// period, idle visibility uses 100 ms, and hidden input is synchronized on
+    /// demand. Commands emitted by a rendered frame force another pumped iteration.
+    /// Application, graphics and UI deadlines contribute independently to the wait.
     /// Controller failure still drives application shutdown without requiring a
     /// drawable UI. The returned disposition, not merely the exit code, determines
     /// whether this host and the other composed owners may be destroyed.

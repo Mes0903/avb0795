@@ -710,7 +710,7 @@ namespace avb::render {
       .bridge = active_bridge_mode_ == core::BridgeMode::GpuInterop ? "gpu_interop" : "cpu_copy",
       .bridge_reason = bridge_selection_ ? reasons[static_cast<std::size_t>(bridge_selection_->reason)] : "pending",
       .present_mode = mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE" : "FIFO",
-      .ui_policy = "baseline: UI builds on every host iteration; graphics poll 2ms",
+      .ui_policy = "see controller owner metadata",
       .requested_bridge = bridge_preference_ == WindowsBridgePreference::ForceCpuBaseline ? "cpu" : "auto",
       .content_width = performance_content_.width,
       .content_height = performance_content_.height,
