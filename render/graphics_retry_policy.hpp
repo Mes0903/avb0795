@@ -137,6 +137,75 @@ namespace avb::render {
     ReleaseRetained,
   };
 
+  /// @brief Bounded present capacity is reserved before acquire, then transferred
+  /// to independent present proof. A reserved use can also end without enqueue.
+  enum class PresentUsePhase { Free,
+                               Reserved,
+                               PresentPending };
+
+  /// @brief One use of a permanent native record; serials belong to the device
+  /// owner and must survive capture-ring and swapchain replacement.
+  struct PresentUseKey final {
+    std::size_t index{};
+    std::uint64_t serial{};
+  };
+
+  struct PresentUseState final {
+    PresentUsePhase phase{PresentUsePhase::Free};
+    std::uint64_t serial{};
+  };
+
+  /// @brief Reserve an unused record without wrapping its owner-wide identity.
+  /// The owner first finds capacity, then treats serial exhaustion as terminal.
+  [[nodiscard]] constexpr std::optional<PresentUseKey> reserve_present_use(
+    PresentUseState &state, const std::size_t index,
+    std::uint64_t &last_serial) noexcept
+  {
+    if (state.phase != PresentUsePhase::Free ||
+        last_serial == (std::numeric_limits<std::uint64_t>::max)()) {
+      return std::nullopt;
+    }
+    state = {PresentUsePhase::Reserved, ++last_serial};
+    return PresentUseKey{index, state.serial};
+  }
+
+  /// @brief Validate the actual owner index, current serial and required phase.
+  [[nodiscard]] constexpr bool matches_present_use(
+    const PresentUseState state, const PresentUseKey key,
+    const std::size_t owner_index, const PresentUsePhase expected) noexcept
+  {
+    return expected != PresentUsePhase::Free && key.index == owner_index &&
+           key.serial != 0 && key.serial == state.serial && state.phase == expected;
+  }
+
+  /// @brief Transfer a reserved use only when present was enqueued or uncertain.
+  [[nodiscard]] constexpr bool enqueue_present_use(
+    PresentUseState &state, const PresentUseKey key,
+    const std::size_t owner_index) noexcept
+  {
+    if (!matches_present_use(state, key, owner_index, PresentUsePhase::Reserved)) {
+      return false;
+    }
+    state.phase = PresentUsePhase::PresentPending;
+    return true;
+  }
+
+  /// @brief Consume an active use exactly once after its owner's native proof.
+  /// Reserved uses require no-image acquire or proven submission/acquire plus
+  /// release/destruction. Pending uses require the independent present fence.
+  /// Clear ownership before any fallible native reset/replacement; a reset error
+  /// closes admission and leaves the permanent handles for final teardown.
+  [[nodiscard]] constexpr bool release_present_use(
+    PresentUseState &state, const PresentUseKey key, const std::size_t owner_index,
+    const PresentUsePhase expected) noexcept
+  {
+    if (!matches_present_use(state, key, owner_index, expected)) {
+      return false;
+    }
+    state.phase = PresentUsePhase::Free;
+    return true;
+  }
+
   /// Selection-only view of a ring slot; retained is a borrowed-owner marker.
   struct RenderFrameCandidate final {
     RenderSlotPhase phase{RenderSlotPhase::Empty};

@@ -117,7 +117,9 @@ namespace avb::render {
       VkFence acquire_fence{VK_NULL_HANDLE};
       VkFence submission_fence{VK_NULL_HANDLE};
       VkSemaphore acquire_semaphore{VK_NULL_HANDLE};
-      VkSemaphore render_finished_semaphore{VK_NULL_HANDLE};
+      // Borrowed until presentation takes independent ownership, or acquire /
+      // submission and image-release proofs permit cancellation.
+      std::optional<PresentUseKey> present_use;
       VkSwapchainKHR owning_swapchain{VK_NULL_HANDLE};
       std::uint32_t acquired_image_index{};
       bool acquired_image{};
@@ -129,9 +131,10 @@ namespace avb::render {
       bool gpu_copy{};
     };
 
-    /// @brief Independent presentation lease: semaphore and WSI outlive the submission
-    /// record until the attached maintenance1 present fence proves retirement.
+    /// @brief Permanent native present resources, independent of capture rings.
+    /// A pending use keeps its WSI reference until maintenance1 present proof.
     struct PresentRecord final {
+      PresentUseState use;
       VkFence fence{VK_NULL_HANDLE};
       VkSemaphore wait_semaphore{VK_NULL_HANDLE};
       VkSwapchainKHR swapchain{VK_NULL_HANDLE};
@@ -211,7 +214,7 @@ namespace avb::render {
     std::expected<void, core::AppError>
     create_image_memory(CaptureSlot &slot);
     std::expected<void, core::AppError>
-    recreate_render_finished(CaptureSlot &slot);
+    recreate_render_finished(PresentRecord &record);
     std::expected<void, core::AppError>
     recreate_acquire_semaphore(CaptureSlot &slot);
     std::expected<void, core::AppError>
@@ -252,7 +255,9 @@ namespace avb::render {
     CaptureSlot *
     ready_slot() noexcept;
     PresentRecord *
-    empty_present_record() noexcept;
+    reserve_present_record(CaptureSlot &slot);
+    PresentRecord &reserved_present_record(const CaptureSlot &slot);
+    void create_present_records();
     void destroy_present_records() noexcept;
     void set_presentation(
       const ReplicaPresentation presentation) noexcept;
@@ -360,8 +365,8 @@ namespace avb::render {
     std::uint64_t next_present_sequence_{1};
     std::uint64_t first_valid_present_sequence_{1};
     // Present records are bounded independently of reusable source-copy slots.
-    std::array<std::optional<PresentRecord>, detail::present_record_count>
-      present_records_{};
+    std::array<PresentRecord, detail::present_record_count> present_records_{};
+    std::uint64_t last_present_use_serial_{};
     std::optional<SwapchainState> swapchain_;
     std::vector<SwapchainState> retired_swapchains_;
 

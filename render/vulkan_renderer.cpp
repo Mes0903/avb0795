@@ -92,6 +92,7 @@ namespace avb::render {
       }
       create_vulkan_device(startup);
       create_vulkan_common_resources();
+      create_present_records();
       if (!has_zero_dimension(framebuffer_)) {
         if (const auto created = create_swapchain(framebuffer_); !created) {
           throw created.error();
@@ -157,7 +158,7 @@ namespace avb::render {
                  slot.acquire_fence != VK_NULL_HANDLE &&
                  slot.submission_fence != VK_NULL_HANDLE &&
                  slot.acquire_semaphore != VK_NULL_HANDLE &&
-                 slot.render_finished_semaphore != VK_NULL_HANDLE &&
+                 !slot.present_use &&
                  (slot.sampled_view != VK_NULL_HANDLE ||
                   slot.external_image.view != VK_NULL_HANDLE);
         })) {
@@ -205,6 +206,7 @@ namespace avb::render {
                           slot.acquired_image;
       slot.phase = SlotPhase::Empty;
       slot.acquired_image = false;
+      slot.present_use.reset();
     }
   }
 
@@ -252,9 +254,6 @@ namespace avb::render {
   {
     try {
       progress_slots(result, now);
-      for (auto &record : present_records_) {
-        if (record && record->fence == VK_NULL_HANDLE) record.reset();
-      }
     } catch (const core::AppError &error) {
       contain_failure(result, error);
     } catch (const std::bad_alloc &) {
@@ -277,15 +276,8 @@ namespace avb::render {
           !surface_recovery_pending_ && !swapchain_recreate_pending_ &&
           !has_zero_dimension(framebuffer_) && swapchain_) {
         if (auto *const slot = ready_slot()) {
-          if (auto *const record = empty_present_record()) {
+          if (auto *const record = reserve_present_record(*slot)) {
             try_present(*slot, *record, result, now);
-            if (record->fence == VK_NULL_HANDLE) {
-              const auto found = std::ranges::find_if(
-                present_records_, [record](const auto &candidate) noexcept {
-                  return candidate && &*candidate == record;
-                });
-              if (found != present_records_.end()) found->reset();
-            }
           }
         }
       }
@@ -561,12 +553,12 @@ namespace avb::render {
   }
 
   std::expected<void, core::AppError>
-  VulkanRenderer::Impl::recreate_render_finished(CaptureSlot &slot)
+  VulkanRenderer::Impl::recreate_render_finished(PresentRecord &record)
   {
-    if (slot.render_finished_semaphore != VK_NULL_HANDLE) {
-      vkDestroySemaphore(device_, slot.render_finished_semaphore, nullptr);
+    if (record.wait_semaphore != VK_NULL_HANDLE) {
+      vkDestroySemaphore(device_, record.wait_semaphore, nullptr);
       observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      slot.render_finished_semaphore = VK_NULL_HANDLE;
+      record.wait_semaphore = VK_NULL_HANDLE;
     }
     const VkSemaphoreCreateInfo info{
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -580,7 +572,7 @@ namespace avb::render {
       return std::unexpected{
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
-    slot.render_finished_semaphore = created_render_finished_semaphore;
+    record.wait_semaphore = created_render_finished_semaphore;
     observe_performance(PerformanceCounter::SemaphoresCreated);
     return {};
   }
@@ -672,10 +664,7 @@ namespace avb::render {
     }
     slot.submission_fence = created_submission_fence;
     observe_performance(PerformanceCounter::FencesCreated);
-    if (auto created = recreate_acquire_semaphore(slot); !created) {
-      return created;
-    }
-    return recreate_render_finished(slot);
+    return recreate_acquire_semaphore(slot);
   }
 
   std::expected<void, core::AppError>
@@ -702,10 +691,6 @@ namespace avb::render {
     // ring while clearing every allocation-local owner and borrowed mapping.
     const auto command_buffer = slot.command_buffer;
     if (device_ != VK_NULL_HANDLE) {
-      if (slot.render_finished_semaphore != VK_NULL_HANDLE) {
-        vkDestroySemaphore(device_, slot.render_finished_semaphore, nullptr);
-        observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      }
       if (slot.acquire_semaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(device_, slot.acquire_semaphore, nullptr);
         observe_performance(PerformanceCounter::SemaphoresDestroyed);
@@ -756,7 +741,7 @@ namespace avb::render {
       if (slot.key != SlotKey{expected_ring_serial, static_cast<std::uint32_t>(index)} ||
           slot.phase == SlotPhase::ProducerPending ||
           (!vulkan_device_lost_ &&
-           (slot.acquired_image ||
+           (slot.acquired_image || slot.present_use ||
             (slot.phase != SlotPhase::Empty && slot.phase != SlotPhase::CpuReady &&
              slot.phase != SlotPhase::GpuReady)))) {
         return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
@@ -781,6 +766,7 @@ namespace avb::render {
       slot.phase = SlotPhase::Empty;
       slot.acquired_image = false;
       slot.owning_swapchain = VK_NULL_HANDLE;
+      slot.present_use.reset();
     }
     return {};
   }
@@ -932,7 +918,7 @@ namespace avb::render {
       return false;
     }
     if (std::ranges::any_of(present_records_, [](const auto &record) noexcept {
-          return record.has_value();
+          return record.use.phase != PresentUsePhase::Free;
         })) {
       return true;
     }
@@ -953,8 +939,8 @@ namespace avb::render {
   {
     return static_cast<std::size_t>(std::ranges::count_if(
       present_records_,
-      [](const std::optional<PresentRecord> &record) noexcept {
-        return record.has_value();
+      [](const PresentRecord &record) noexcept {
+        return record.use.phase != PresentUsePhase::Free;
       }));
   }
 
@@ -1390,6 +1376,18 @@ namespace avb::render {
     // after the owning swapchain was legally destroyed). A synchronization
     // reset/allocation failure therefore makes the slot unusable, not in flight.
     const bool completed_content = slot.phase == SlotPhase::Submitted;
+    PresentRecord *cancelled_present{};
+    if (slot.present_use) {
+      auto &record = reserved_present_record(slot);
+      const auto index = static_cast<std::size_t>(&record - present_records_.data());
+      if (!release_present_use(record.use, *slot.present_use, index,
+                               PresentUsePhase::Reserved)) {
+        throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+      }
+      slot.present_use.reset();
+      record.swapchain = VK_NULL_HANDLE;
+      cancelled_present = &record;
+    }
     slot.acquired_image = false;
     slot.owning_swapchain = VK_NULL_HANDLE;
     slot.phase = SlotPhase::Empty;
@@ -1405,8 +1403,8 @@ namespace avb::render {
                              .native_detail = created.error().native_detail};
       }
     }
-    if (slot.render_finished_semaphore == VK_NULL_HANDLE) {
-      if (auto created = recreate_render_finished(slot); !created) {
+    if (cancelled_present && cancelled_present->wait_semaphore == VK_NULL_HANDLE) {
+      if (auto created = recreate_render_finished(*cancelled_present); !created) {
         throw core::AppError{.code = core::AppErrorCode::RuntimeStateLost,
                              .native_detail = created.error().native_detail};
       }
@@ -1494,11 +1492,22 @@ namespace avb::render {
   void VulkanRenderer::Impl::try_present(
     CaptureSlot &slot, PresentRecord &record, VulkanTickResult &result, const std::chrono::steady_clock::time_point now)
   {
+    if (&reserved_present_record(slot) != &record) {
+      throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+    }
+    const auto record_index = static_cast<std::size_t>(&record - present_records_.data());
     std::uint32_t image_index{(std::numeric_limits<std::uint32_t>::max)()};
     const auto acquire_result = vkAcquireNextImageKHR(
       device_, swapchain_->handle, 0, slot.acquire_semaphore,
       slot.acquire_fence, &image_index);
     const auto acquire = classify_acquire_result(acquire_result, false);
+    if (acquire.ownership == AcquireOwnership::Unchanged) {
+      if (!release_present_use(record.use, *slot.present_use, record_index,
+                               PresentUsePhase::Reserved)) {
+        throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+      }
+      slot.present_use.reset();
+    }
     switch (acquire.action) {
     case AcquireAction::Wait:
       schedule_poll(result, now);
@@ -1530,6 +1539,7 @@ namespace avb::render {
     slot.acquired_image = true;
     slot.owning_swapchain = swapchain_->handle;
     slot.acquired_image_index = image_index;
+    record.swapchain = slot.owning_swapchain;
     const auto command_result = record_commands(slot, image_index);
     if (command_result != VK_SUCCESS) {
       slot.phase = SlotPhase::AcquireProofPending;
@@ -1568,7 +1578,7 @@ namespace avb::render {
       .commandBufferCount = 1,
       .pCommandBuffers = &slot.command_buffer,
       .signalSemaphoreCount = 1,
-      .pSignalSemaphores = &slot.render_finished_semaphore,
+      .pSignalSemaphores = &record.wait_semaphore,
     };
     // The producer timeline target has already completed before this submission is
     // attempted; no external wait can depend on later main-loop progress.
@@ -1613,32 +1623,12 @@ namespace avb::render {
       break;
     }
 
-    const VkFenceCreateInfo fence_info{
-      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-      .pNext = nullptr,
-      .flags = 0,
-    };
-    VkFence present_fence{VK_NULL_HANDLE};
-    auto present_result =
-      vkCreateFence(device_, &fence_info, nullptr, &present_fence);
-    if (present_result != VK_SUCCESS) {
-      slot.phase = slot_phase_after_present(PresentOwnership::NotEnqueued);
-      if (present_result == VK_ERROR_DEVICE_LOST) {
-        mark_vulkan_device_lost(result);
-        return;
-      }
-      set_terminal(present_result, result);
-      schedule_poll(result, now);
-      return;
-    }
-
-    observe_performance(PerformanceCounter::FencesCreated);
 #if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
     const VkSwapchainPresentFenceInfoKHR present_fence_khr{
       .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR,
       .pNext = nullptr,
       .swapchainCount = 1,
-      .pFences = &present_fence,
+      .pFences = &record.fence,
     };
 #endif
 #if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
@@ -1646,7 +1636,7 @@ namespace avb::render {
       .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT,
       .pNext = nullptr,
       .swapchainCount = 1,
-      .pFences = &present_fence,
+      .pFences = &record.fence,
     };
 #endif
     const void *present_fence_info{};
@@ -1665,8 +1655,6 @@ namespace avb::render {
       break;
     }
     if (present_fence_info == nullptr) {
-      vkDestroyFence(device_, present_fence, nullptr);
-      observe_performance(PerformanceCounter::FencesDestroyed);
       slot.phase = slot_phase_after_present(PresentOwnership::NotEnqueued);
       set_terminal(VK_ERROR_EXTENSION_NOT_PRESENT, result);
       schedule_poll(result, now);
@@ -1677,27 +1665,27 @@ namespace avb::render {
       .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
       .pNext = present_fence_info,
       .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &slot.render_finished_semaphore,
+      .pWaitSemaphores = &record.wait_semaphore,
       .swapchainCount = 1,
       .pSwapchains = &swapchain_handle,
       .pImageIndices = &image_index,
       .pResults = nullptr,
     };
-    present_result = vkQueuePresentKHR(present_queue_, &present_info);
+    const auto present_result = vkQueuePresentKHR(present_queue_, &present_info);
     const auto present = classify_present_result(present_result);
     slot.phase = slot_phase_after_present(present.ownership);
     if (present.ownership == PresentOwnership::NotEnqueued) {
-      vkDestroyFence(device_, present_fence, nullptr);
-      observe_performance(PerformanceCounter::FencesDestroyed);
       set_terminal(present_result, result);
       schedule_poll(result, now);
       return;
     }
 
-    record.fence = present_fence;
     // Submission completion permits the slot to recycle; presentation owns the
     // consumed semaphore until its separate fence retires the queue operation.
-    record.wait_semaphore = slot.render_finished_semaphore;
+    if (!enqueue_present_use(record.use, *slot.present_use, record_index)) {
+      throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+    }
+    slot.present_use.reset();
     record.swapchain = swapchain_handle;
     record.counts_as_presented =
       present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR;
@@ -1712,7 +1700,6 @@ namespace avb::render {
     }
     record.confirms_recovery = swapchain_->recovery_candidate;
     record.uncertain = present.ownership == PresentOwnership::Uncertain;
-    slot.render_finished_semaphore = VK_NULL_HANDLE;
     slot.acquired_image = false;
     schedule_poll(result, now);
 

@@ -123,6 +123,33 @@ flowchart TD
 
 Acquire、submit、present 與 release 的結果分類位於 [`graphics_retry_policy.hpp`](../../render/graphics_retry_policy.hpp)。分類提供 ownership facts 與後續動作，native handle 的生命週期由 renderer 維護。
 
+## 固定容量的 presentation resources
+
+```mermaid
+stateDiagram-v2
+  [*] --> Free: 建立三組 semaphore 與 fence
+  Free --> Reserved: reserve / 配發 index 與 serial
+  Reserved --> PresentPending: present enqueued 或 uncertain
+  Reserved --> Free: acquire 維持原狀，或完成 image release
+  Reserved --> Reserved: release retained / 等待 WSI 回收
+  PresentPending --> Free: present fence 完成 / reset fence
+```
+
+為了降低持續擷取時的 native allocation 成本，renderer 需要保存可重用的呈現資源，同時分別追蹤 acquire／submission 與 presentation 的完成證據。Device bootstrap 建立三筆固定的 `PresentRecord`，每筆持有一個 binary semaphore 與一個 present fence。Capture slot 持有自己的 acquire semaphore、acquire fence、submission fence 與 command buffer；`present_use` 借用一筆已預留的 present record。
+
+為了辨識同一筆資源的多次使用，`PresentUseKey` 將陣列 index 與 owner-wide serial 組合；每次預留推進 serial，ring／swapchain replacement 保留這個序號。`PresentUseState` 提供 `Free`、`Reserved`、`PresentPending` 三個狀態，現有共用值政策負責檢查身分與轉移前置狀態；Vulkan owner 負責觀察 native proof 與操作 handles。
+
+一次 draw 在 acquire 前預留容量。Acquire 回報原狀時立即歸還 reservation；取得 image 後，record 跟隨該 slot 的 acquire／submission 及 image release。Present enqueue 成功或結果屬 uncertain 時，record 轉為 `PresentPending`，接續獨立追蹤 present fence。正常 retirement 將該次計數結算、清除 active metadata 並 reset fence，兩個 handles 保留供後續 draw 使用。
+
+異常路徑依取得的完成證據處理：
+
+- Submit／present 的 known-not-enqueued 結果保留 reservation，等待對應 acquire／submission proof 與 image release。
+- 已完成且仍待消費的 binary signal 依既有 release policy 更換 semaphore。
+- `ReleaseRetained` 保留容量與 swapchain 身分，合法 WSI destruction 完成後歸還 reservation。
+- Native reset／replacement error 發生前先消耗已證明的 ownership，錯誤由外層 containment 關閉 admission，後續 ticks 持續處理其餘工作。
+
+為了維持 bounded accounting，drain 與 pool occupancy 同時計入 `Reserved` 和 `PresentPending`。WSI 的 `present_fence_pending` 根據 `PresentPending` 彙整，`Reserved` 的 image ownership 則由對應 slot 提供。三個 slot 加三筆 present records 的固定配置為三個 command buffers、九個 fences 與六個 binary semaphores；GPU bridge 的 imported timeline semaphore 另依 bridge lifetime 計入 diagnostics。
+
 ## Detach、drain 與 diagnostics
 
 ```mermaid

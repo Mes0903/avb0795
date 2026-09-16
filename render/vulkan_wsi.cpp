@@ -551,40 +551,85 @@ namespace avb::render {
     }
     facts.present_fence_pending = std::ranges::any_of(
       present_records_, [handle](const auto &record) noexcept {
-        return record && record->swapchain == handle;
+        return record.use.phase == PresentUsePhase::PresentPending &&
+               record.swapchain == handle;
       });
     return facts;
   }
 
   VulkanRenderer::Impl::PresentRecord *
-  VulkanRenderer::Impl::empty_present_record() noexcept
+  VulkanRenderer::Impl::reserve_present_record(CaptureSlot &slot)
   {
     const auto found = std::ranges::find_if(
       present_records_,
-      [](const std::optional<PresentRecord> &record) { return !record; });
+      [](const PresentRecord &record) { return record.use.phase == PresentUsePhase::Free; });
     if (found == present_records_.end()) {
       return nullptr;
     }
-    return &found->emplace();
+    if (slot.present_use || found->fence == VK_NULL_HANDLE ||
+        found->wait_semaphore == VK_NULL_HANDLE) {
+      throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+    }
+    const auto index = static_cast<std::size_t>(found - present_records_.begin());
+    slot.present_use = reserve_present_use(found->use, index, last_present_use_serial_);
+    if (!slot.present_use) {
+      // Capacity was available: refusal here is identity exhaustion. The outer
+      // tick contains this failure and permanently closes this owner's admission.
+      throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+    }
+    return &*found;
+  }
+
+  VulkanRenderer::Impl::PresentRecord &
+  VulkanRenderer::Impl::reserved_present_record(const CaptureSlot &slot)
+  {
+    if (!slot.present_use || slot.present_use->index >= present_records_.size()) {
+      throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+    }
+    auto &record = present_records_[slot.present_use->index];
+    if (!matches_present_use(record.use, *slot.present_use,
+                             static_cast<std::size_t>(&record - present_records_.data()),
+                             PresentUsePhase::Reserved)) {
+      throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+    }
+    return record;
+  }
+
+  void VulkanRenderer::Impl::create_present_records()
+  {
+    const VkFenceCreateInfo info{
+      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+      .pNext = nullptr,
+      .flags = 0,
+    };
+    for (auto &record : present_records_) {
+      VkFence created{VK_NULL_HANDLE};
+      const auto result = vkCreateFence(device_, &info, nullptr, &created);
+      if (result != VK_SUCCESS) {
+        throw vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result);
+      }
+      record.fence = created;
+      observe_performance(PerformanceCounter::FencesCreated);
+      if (const auto semaphore = recreate_render_finished(record); !semaphore) {
+        throw semaphore.error();
+      }
+    }
   }
 
   void VulkanRenderer::Impl::destroy_present_records() noexcept
   {
     for (auto &record : present_records_) {
-      if (!record) {
-        continue;
-      }
       if (device_ != VK_NULL_HANDLE) {
-        if (record->wait_semaphore != VK_NULL_HANDLE) {
-          vkDestroySemaphore(device_, record->wait_semaphore, nullptr);
+        if (record.wait_semaphore != VK_NULL_HANDLE) {
+          vkDestroySemaphore(device_, record.wait_semaphore, nullptr);
           observe_performance(PerformanceCounter::SemaphoresDestroyed);
         }
-        if (record->fence != VK_NULL_HANDLE) {
-          vkDestroyFence(device_, record->fence, nullptr);
+        if (record.fence != VK_NULL_HANDLE) {
+          vkDestroyFence(device_, record.fence, nullptr);
           observe_performance(PerformanceCounter::FencesDestroyed);
         }
       }
-      record.reset();
+      record = {};
     }
   }
 
@@ -607,10 +652,10 @@ namespace avb::render {
       return;
     }
     for (auto &record : present_records_) {
-      if (!record) {
+      if (record.use.phase != PresentUsePhase::PresentPending) {
         continue;
       }
-      const auto status = vkGetFenceStatus(device_, record->fence);
+      const auto status = vkGetFenceStatus(device_, record.fence);
       if (status == VK_NOT_READY) {
         schedule_poll(result, now);
         continue;
@@ -624,7 +669,13 @@ namespace avb::render {
         schedule_poll(result, now);
         continue;
       }
-      if (record->counts_as_presented) {
+      const auto index = static_cast<std::size_t>(&record - present_records_.data());
+      if (!release_present_use(record.use, {index, record.use.serial}, index,
+                               PresentUsePhase::PresentPending)) {
+        throw graphics_error(core::AppErrorCode::RuntimeStateLost);
+      }
+      result.made_progress = true;
+      if (record.counts_as_presented) {
         // Enqueue success is insufficient for accounting or retry reset. Only
         // the present fence's retirement discharges this presentation record.
         ++presented_frames_;
@@ -639,23 +690,29 @@ namespace avb::render {
           }
           last_present_observed_at_ = observed;
         }
-        if (record->confirms_recovery) {
-          reset_recovery_after_present(record->swapchain);
+        if (record.confirms_recovery) {
+          reset_recovery_after_present(record.swapchain);
         }
-        if (record->presentation && swapchain_ &&
-            record->swapchain == swapchain_->handle &&
-            record->presentation->present_sequence >= first_valid_present_sequence_ &&
+        if (record.presentation && swapchain_ &&
+            record.swapchain == swapchain_->handle &&
+            record.presentation->present_sequence >= first_valid_present_sequence_ &&
             (!published_presentation_ ||
-             record->presentation->present_sequence > published_presentation_->present_sequence)) {
-          published_presentation_ = record->presentation;
+             record.presentation->present_sequence > published_presentation_->present_sequence)) {
+          published_presentation_ = record.presentation;
         }
       }
-      vkDestroySemaphore(device_, record->wait_semaphore, nullptr);
-      observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      vkDestroyFence(device_, record->fence, nullptr);
-      observe_performance(PerformanceCounter::FencesDestroyed);
-      record.reset();
-      result.made_progress = true;
+      record.swapchain = VK_NULL_HANDLE;
+      record.counts_as_presented = false;
+      record.confirms_recovery = false;
+      record.uncertain = false;
+      record.presentation.reset();
+      // Native ownership and accounting were consumed above. A reset failure
+      // leaves a free, unusable record under closed admission, never a second
+      // retirement of the same present on the next tick.
+      const auto reset = vkResetFences(device_, 1, &record.fence);
+      if (reset != VK_SUCCESS) {
+        throw vulkan_error(core::AppErrorCode::RuntimeStateLost, reset);
+      }
     }
   }
 
@@ -716,10 +773,13 @@ namespace avb::render {
       slot.acquire_semaphore = VK_NULL_HANDLE;
     }
     if (release_plan.destroy_render_finished_semaphore &&
-        slot.render_finished_semaphore != VK_NULL_HANDLE) {
-      vkDestroySemaphore(device_, slot.render_finished_semaphore, nullptr);
-      observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      slot.render_finished_semaphore = VK_NULL_HANDLE;
+        slot.present_use) {
+      auto &record = reserved_present_record(slot);
+      if (record.wait_semaphore != VK_NULL_HANDLE) {
+        vkDestroySemaphore(device_, record.wait_semaphore, nullptr);
+        observe_performance(PerformanceCounter::SemaphoresDestroyed);
+        record.wait_semaphore = VK_NULL_HANDLE;
+      }
     }
 
     if (release_plan.clear_acquired_ownership) {
@@ -790,9 +850,7 @@ namespace avb::render {
       state.recovery_candidate = false;
     }
     for (auto &record : present_records_) {
-      if (record) {
-        record->confirms_recovery = false;
-      }
+      record.confirms_recovery = false;
     }
     recovery_episode_ = RecoveryEpisode{
       .category = category,
@@ -881,9 +939,7 @@ namespace avb::render {
       state.recovery_candidate = false;
     }
     for (auto &record : present_records_) {
-      if (record) {
-        record->confirms_recovery = false;
-      }
+      record.confirms_recovery = false;
     }
   }
 
