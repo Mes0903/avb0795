@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <new>
 #include <optional>
 #include <utility>
@@ -85,8 +86,9 @@ namespace avb::platform::windows {
   }    // namespace
 
   WindowsRuntimeFactory::WindowsRuntimeFactory(
-    WindowsSourceRegistry &registry, WakeMainLoop wake_main_loop, const render::WindowsBridgePreference bridge_preference)
-      : registry_{registry}, wake_main_loop_{std::move(wake_main_loop)}, bridge_preference_{bridge_preference} {}
+    WindowsSourceRegistry &registry, WakeMainLoop wake_main_loop, const render::WindowsBridgePreference bridge_preference,
+    diagnostics::PerformanceReport *performance)
+      : registry_{registry}, wake_main_loop_{std::move(wake_main_loop)}, bridge_preference_{bridge_preference}, performance_{performance} {}
 
   std::expected<std::unique_ptr<app::IReplicaRuntime>, core::AppError>
   WindowsRuntimeFactory::create(const core::SourceDescriptor &source,
@@ -148,8 +150,13 @@ namespace avb::platform::windows {
         return std::unexpected{factory_error(presented.error())};
       }
 
+      if (performance_ && next_observation_instance_ == (std::numeric_limits<std::uint64_t>::max)()) {
+        return std::unexpected{core::AppError{core::AppErrorCode::RuntimeConstructionFailure}};
+      }
+      const auto observation_instance = performance_ ? next_observation_instance_++ : 0;
       auto render_stack = std::make_unique<render::WindowsRenderStack>(
-        **overlay, initial_resource_generation, bridge_preference_);
+        **overlay, initial_resource_generation, bridge_preference_, performance_, observation_instance);
+      render_stack->set_performance_fps(settings.fps_cap);
       render_stack->set_presentation({settings.region, false, {}});
       auto capture_job = WgcCaptureJob::create_inactive(
         **source_owner, render_stack->capture_device(),
@@ -185,7 +192,7 @@ namespace avb::platform::windows {
         std::move(*overlay), std::move(*adapter), std::move(render_stack),
         std::move(*capture_job), std::move(browser_keep_alive), settings,
         allocation, exclusion, bridge_preference_, capture_pool_buffer_count,
-        wake_main_loop_);
+        wake_main_loop_, performance_, observation_instance);
       // The complete aggregate exists before the last fallible StartCapture operation.
       const auto activated = runtime->activate_for_publication();
       if (!activated) {

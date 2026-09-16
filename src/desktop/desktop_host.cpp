@@ -6,6 +6,7 @@
 /// replica resources. Normal destruction follows proven retirement; uncertain
 /// ownership is reported to the composition root for non-unwinding exit.
 #include "avb/desktop/desktop_host.hpp"
+#include "avb/diagnostics/performance_report.hpp"
 #include "controller_font.hpp"
 
 #include "avb/ui/controller_view.hpp"
@@ -36,6 +37,9 @@
 #include <vector>
 
 namespace avb::desktop {
+  using diagnostics::PerformanceCounter;
+  using diagnostics::PerformanceOwner;
+  using diagnostics::PerformanceSample;
   namespace {
 
     using namespace std::chrono_literals;
@@ -186,6 +190,7 @@ namespace avb::desktop {
       VkSemaphore wait_semaphore{VK_NULL_HANDLE};
       VkSwapchainKHR swapchain{VK_NULL_HANDLE};
       bool confirms_recovery{};
+      bool counts_as_presented{};
     };
 
     /// Active or retired controller WSI allocation, including all image views and
@@ -231,7 +236,8 @@ namespace avb::desktop {
 
     /// Adopt the controller window and font storage, then build private Vulkan
     /// and ImGui owners without submitting startup work.
-    Impl(GLFWwindow *window, CommandSink command_sink, ControllerWindowSetup setup, std::vector<std::byte> font_data);
+    Impl(GLFWwindow *window, CommandSink command_sink, ControllerWindowSetup setup, std::vector<std::byte> font_data,
+         diagnostics::PerformanceReport *performance);
     /// Require a drained controller; destruction is not a blocking drain path.
     ~Impl() noexcept;
 
@@ -256,6 +262,9 @@ namespace avb::desktop {
     [[nodiscard]] HostRunResult run(app::Application &application) noexcept;
 
   private:
+    /// Record native-owner scalars while preserving the ordinary disabled path.
+    void observe_performance(PerformanceCounter counter, std::uint64_t value = 1) noexcept;
+    void observe_performance_metadata(std::chrono::steady_clock::time_point now) noexcept;
     /// Convert controller close into a portable Quit command once. Contain sink
     /// allocation failure before returning across the GLFW callback boundary.
     static void window_close_callback(GLFWwindow *window) noexcept;
@@ -383,6 +392,10 @@ namespace avb::desktop {
                                     bool controller_firewall);
 
     GLFWwindow *window_{};
+    diagnostics::PerformanceReport *performance_{};
+    diagnostics::PerformanceHighWater performance_live_{};
+    VkPhysicalDeviceProperties performance_device_{};
+    std::array<char, 32> performance_driver_{};
     CommandSink command_sink_;
     core::CaptureExclusionStatus controller_exclusion_{};
     std::unique_ptr<ControllerWindowInteraction> window_interaction_;
@@ -435,9 +448,50 @@ namespace avb::desktop {
     bool fully_constructed_{};
   };
 
+  void DesktopHost::Impl::observe_performance(const PerformanceCounter counter,
+                                            const std::uint64_t value) noexcept
+  {
+    if (!performance_) return;
+    switch (counter) {
+    case PerformanceCounter::CommandBuffersCreated: performance_live_.command_buffers += value; break;
+    case PerformanceCounter::CommandBuffersDestroyed: performance_live_.command_buffers -= value; break;
+    case PerformanceCounter::FencesCreated: performance_live_.fences += value; break;
+    case PerformanceCounter::FencesDestroyed: performance_live_.fences -= value; break;
+    case PerformanceCounter::SemaphoresCreated: performance_live_.semaphores += value; break;
+    case PerformanceCounter::SemaphoresDestroyed: performance_live_.semaphores -= value; break;
+    default: break;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    performance_live_.slots = frames_.size() + (acquire_record_ ? 1U : 0U);
+    performance_live_.presents = presents_.size();
+    performance_->observe_counter(PerformanceOwner::Controller, counter, value, now);
+    performance_->observe_high_water(PerformanceOwner::Controller, performance_live_, now);
+  }
+
+  void DesktopHost::Impl::observe_performance_metadata(
+    const std::chrono::steady_clock::time_point now) noexcept
+  {
+    const auto extent = framebuffer_extent();
+    performance_live_.slots = frames_.size() + (acquire_record_ ? 1U : 0U);
+    performance_live_.presents = presents_.size();
+    performance_->observe_metadata(PerformanceOwner::Controller, {
+      .gpu = performance_device_.deviceName,
+      .driver = performance_driver_.data(),
+      .os = "Windows",
+      .bridge = "controller",
+      .present_mode = "FIFO",
+      .ui_policy = "baseline: UI builds on every host iteration; graphics poll 2ms",
+      .framebuffer_width = extent.width,
+      .framebuffer_height = extent.height,
+    }, now);
+    performance_->observe_high_water(PerformanceOwner::Controller, performance_live_, now);
+  }
+
   DesktopHost::Impl::Impl(
-    GLFWwindow *const window, CommandSink command_sink, ControllerWindowSetup setup, std::vector<std::byte> font_data)
+    GLFWwindow *const window, CommandSink command_sink, ControllerWindowSetup setup, std::vector<std::byte> font_data,
+    diagnostics::PerformanceReport *performance)
       : window_{window},
+        performance_{performance},
         command_sink_{std::move(command_sink)},
         controller_exclusion_{setup.exclusion},
         window_interaction_{std::move(setup.interaction)},
@@ -450,6 +504,10 @@ namespace avb::desktop {
       create_instance();
       create_surface();
       select_physical_device();
+      if (performance_) {
+        vkGetPhysicalDeviceProperties(physical_device_, &performance_device_);
+        std::snprintf(performance_driver_.data(), performance_driver_.size(), "raw:%u", performance_device_.driverVersion);
+      }
       create_device();
       create_common_resources();
 
@@ -503,6 +561,9 @@ namespace avb::desktop {
     try {
       self->command_emitted_ =
         self->command_sink_(app::AppCommand{app::Quit{}});
+      if (self->command_emitted_ && self->performance_) {
+        self->performance_->observe_stop(PerformanceOwner::Controller, std::chrono::steady_clock::now());
+      }
     } catch (...) {
       self->enter_fatal(
         FatalKind::Unexpected,
@@ -536,6 +597,9 @@ namespace avb::desktop {
     if (command_sink_(std::move(command))) {
       command_emitted_ = true;
       close_command_emitted_ = close_command_emitted_ || closing;
+      if (closing && performance_) {
+        performance_->observe_stop(PerformanceOwner::Controller, std::chrono::steady_clock::now());
+      }
     }
   }
 
@@ -1576,6 +1640,7 @@ namespace avb::desktop {
         core::AppErrorCode::RuntimeStateLost, result)};
     }
     record.command_buffer = command_buffer;
+    observe_performance(PerformanceCounter::CommandBuffersCreated);
     const VkFenceCreateInfo fence_info{
       .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
       .pNext = nullptr,
@@ -1585,11 +1650,13 @@ namespace avb::desktop {
     result = vkCreateFence(device_, &fence_info, nullptr, &acquire_fence);
     if (result == VK_SUCCESS) {
       record.acquire_fence = acquire_fence;
+      observe_performance(PerformanceCounter::FencesCreated);
       VkFence submission_fence{VK_NULL_HANDLE};
       result =
         vkCreateFence(device_, &fence_info, nullptr, &submission_fence);
       if (result == VK_SUCCESS) {
         record.submission_fence = submission_fence;
+        observe_performance(PerformanceCounter::FencesCreated);
       }
     }
     const VkSemaphoreCreateInfo semaphore_info{
@@ -1603,6 +1670,7 @@ namespace avb::desktop {
                                  &acquire_semaphore);
       if (result == VK_SUCCESS) {
         record.acquire_semaphore = acquire_semaphore;
+        observe_performance(PerformanceCounter::SemaphoresCreated);
       }
     }
     if (result == VK_SUCCESS) {
@@ -1611,6 +1679,7 @@ namespace avb::desktop {
                                  &render_finished_semaphore);
       if (result == VK_SUCCESS) {
         record.render_finished_semaphore = render_finished_semaphore;
+        observe_performance(PerformanceCounter::SemaphoresCreated);
       }
     }
     if (result != VK_SUCCESS) {
@@ -1869,6 +1938,7 @@ namespace avb::desktop {
       schedule_poll(now, false);
       return;
     case render::SubmitOutcome::Enqueued:
+      observe_performance(PerformanceCounter::Submitted);
       record.phase = FramePhase::Submitted;
       if (record.uploads_font) {
         font_texture_.upload_pending = false;
@@ -1894,6 +1964,7 @@ namespace avb::desktop {
       schedule_poll(now, false);
       return;
     }
+    observe_performance(PerformanceCounter::FencesCreated);
     presents_.push_back({
       .fence = present_fence,
       .swapchain = record.swapchain,
@@ -1934,6 +2005,7 @@ namespace avb::desktop {
     if (present_fence_info == nullptr) {
       presents_.pop_back();
       vkDestroyFence(device_, present_fence, nullptr);
+      observe_performance(PerformanceCounter::FencesDestroyed);
       record.phase = FramePhase::PresentNotEnqueued;
       enter_fatal(FatalKind::Terminal,
                   graphics_error(core::AppErrorCode::UnsupportedGraphics));
@@ -1956,6 +2028,7 @@ namespace avb::desktop {
     if (classification.ownership == render::PresentOwnership::NotEnqueued) {
       presents_.pop_back();
       vkDestroyFence(device_, present_fence, nullptr);
+      observe_performance(PerformanceCounter::FencesDestroyed);
       record.phase = FramePhase::PresentNotEnqueued;
       enter_fatal(FatalKind::Terminal,
                   vulkan_error(core::AppErrorCode::RuntimeStateLost,
@@ -1967,6 +2040,7 @@ namespace avb::desktop {
     // A queue fence covers draw commands; this semaphore is now owned by the
     // independent present operation and cannot retire with that queue fence.
     present.wait_semaphore = record.render_finished_semaphore;
+    present.counts_as_presented = present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR;
     record.render_finished_semaphore = VK_NULL_HANDLE;
     record.acquired = false;
     record.phase = FramePhase::Submitted;
@@ -2169,6 +2243,7 @@ namespace avb::desktop {
       }
 
       const bool confirms_recovery = current->confirms_recovery;
+      if (current->counts_as_presented) observe_performance(PerformanceCounter::PresentRetired);
       destroy_present_record(*current);
       current = presents_.erase(current);
       made_progress_ = true;
@@ -2396,6 +2471,12 @@ namespace avb::desktop {
       schedule_poll(now, false);
     }
 
+    if (performance_) {
+      const auto observed = std::chrono::steady_clock::now();
+      performance_->observe_first_ui(observed);
+    }
+    const auto ui_started = performance_ ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
@@ -2407,6 +2488,12 @@ namespace avb::desktop {
       [this](app::AppCommand command) { emit(std::move(command)); },
       logical_resize_margin * std::max({1.0F, xscale, yscale}));
     ImGui::Render();
+    if (performance_) {
+      const auto finished = std::chrono::steady_clock::now();
+      performance_->observe_counter(PerformanceOwner::Controller, PerformanceCounter::UiBuilds, 1, finished);
+      performance_->observe_sample(PerformanceSample::UiBuild,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(finished - ui_started), finished);
+    }
     const auto display = ImGui::GetIO().DisplaySize;
     window_interaction_->set_drag_region(
       display.x > 0.0F ? frame.drag_right / display.x : 0.0F,
@@ -2442,6 +2529,9 @@ namespace avb::desktop {
   void DesktopHost::Impl::enter_fatal(const FatalKind kind,
                                       const core::AppError error) noexcept
   {
+    if (performance_) {
+      performance_->observe_stop(PerformanceOwner::Controller, std::chrono::steady_clock::now());
+    }
     const bool promote = fatal_kind_ == FatalKind::None ||
                          kind == FatalKind::DeviceLost ||
                          kind == FatalKind::Unexpected;
@@ -2556,10 +2646,12 @@ namespace avb::desktop {
                core::ExitDisposition::Continue &&
              fatal_kind_ == FatalKind::None) {
         const auto now = std::chrono::steady_clock::now();
+        if (performance_) performance_->advance(now);
         progress(now, false);
         if (fatal_kind_ != FatalKind::None) {
           break;
         }
+        if (performance_) observe_performance_metadata(std::chrono::steady_clock::now());
         render_controller(application, now);
         if (application.exit_disposition() != core::ExitDisposition::Continue ||
             fatal_kind_ != FatalKind::None) {
@@ -2633,20 +2725,25 @@ namespace avb::desktop {
     if (device_ != VK_NULL_HANDLE) {
       if (record.acquire_semaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(device_, record.acquire_semaphore, nullptr);
+        observe_performance(PerformanceCounter::SemaphoresDestroyed);
       }
       if (record.render_finished_semaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(device_, record.render_finished_semaphore, nullptr);
+        observe_performance(PerformanceCounter::SemaphoresDestroyed);
       }
       if (record.acquire_fence != VK_NULL_HANDLE) {
         vkDestroyFence(device_, record.acquire_fence, nullptr);
+        observe_performance(PerformanceCounter::FencesDestroyed);
       }
       if (record.submission_fence != VK_NULL_HANDLE) {
         vkDestroyFence(device_, record.submission_fence, nullptr);
+        observe_performance(PerformanceCounter::FencesDestroyed);
       }
       if (record.command_buffer != VK_NULL_HANDLE &&
           command_pool_ != VK_NULL_HANDLE) {
         vkFreeCommandBuffers(device_, command_pool_, 1,
                              &record.command_buffer);
+        observe_performance(PerformanceCounter::CommandBuffersDestroyed);
       }
     }
     record = {};
@@ -2658,9 +2755,11 @@ namespace avb::desktop {
     if (device_ != VK_NULL_HANDLE) {
       if (record.wait_semaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(device_, record.wait_semaphore, nullptr);
+        observe_performance(PerformanceCounter::SemaphoresDestroyed);
       }
       if (record.fence != VK_NULL_HANDLE) {
         vkDestroyFence(device_, record.fence, nullptr);
+        observe_performance(PerformanceCounter::FencesDestroyed);
       }
     }
     record = {};
@@ -2799,7 +2898,8 @@ namespace avb::desktop {
   DesktopHost &DesktopHost::operator=(DesktopHost &&) noexcept = default;
 
   std::expected<DesktopHost, core::AppError> DesktopHost::create(
-    CommandSink command_sink, ControllerWindowCreated window_created, std::vector<std::byte> font_data)
+    CommandSink command_sink, ControllerWindowCreated window_created, std::vector<std::byte> font_data,
+    diagnostics::PerformanceReport *performance)
   {
     if (!command_sink || !window_created) {
       return std::unexpected{
@@ -2830,7 +2930,7 @@ namespace avb::desktop {
         return std::unexpected{setup.error()};
       }
       auto impl =
-        std::make_unique<Impl>(window, std::move(command_sink), std::move(*setup), std::move(font_data));
+        std::make_unique<Impl>(window, std::move(command_sink), std::move(*setup), std::move(font_data), performance);
       glfwShowWindow(window);
       return DesktopHost{std::move(impl)};
     } catch (const BackendVulkanFailure &failure) {

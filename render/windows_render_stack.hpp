@@ -20,6 +20,8 @@
 
 struct ID3D11Device;
 
+namespace avb::diagnostics { class PerformanceReport; }
+
 namespace avb::platform::windows {
   class OverlayWindow;
   class WindowsCapturedFrame;
@@ -91,10 +93,15 @@ namespace avb::render {
     /// separately before capture starts; a zero framebuffer defers WSI creation.
     /// Throws core::AppError for invalid inputs or native setup failure; C++
     /// allocation failures can also propagate from construction.
+    /// An enabled collector outlives this stack and every replacement using its
+    /// observation instance. Instance identifies a runtime across device rebuilds;
+    /// resource_generation describes the runtime's current allocation epoch.
     WindowsRenderStack(platform::windows::OverlayWindow &overlay,
                        std::uint64_t resource_generation,
                        WindowsBridgePreference bridge_preference =
-                         WindowsBridgePreference::Automatic);
+                         WindowsBridgePreference::Automatic,
+                       diagnostics::PerformanceReport *performance = nullptr,
+                       std::uint64_t observation_instance = 0);
     /// @brief Release resources after native-use or matching device-loss proof.
     ///
     /// The caller must finish the drain protocol before destroying a published
@@ -128,6 +135,9 @@ namespace avb::render {
     /// Stores an owned value and marks retained content dirty. Capture allocation,
     /// native window styles and scheduling remain with their existing owners.
     void set_presentation(ReplicaPresentation presentation) noexcept;
+    /// Supply the runtime-owned scheduler setting as observation metadata. This
+    /// value describes workload; frame admission remains with the runtime.
+    void set_performance_fps(core::FpsCap fps) noexcept;
     /// @brief Report a dirty retained image eligible for scheduler admission.
     [[nodiscard]] bool has_redraw_work() const noexcept;
     /// @brief Grant one redraw attempt after the runtime's FPS admission.

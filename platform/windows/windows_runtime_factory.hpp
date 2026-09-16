@@ -11,6 +11,8 @@
 
 #include <functional>
 
+namespace avb::diagnostics { class PerformanceReport; }
+
 namespace avb::platform::windows {
 
   /// @brief Assemble a complete native runtime around one resolved catalog identity.
@@ -27,7 +29,8 @@ namespace avb::platform::windows {
     WindowsRuntimeFactory(WindowsSourceRegistry &registry,
                           WakeMainLoop wake_main_loop,
                           render::WindowsBridgePreference bridge_preference =
-                            render::WindowsBridgePreference::Automatic);
+                            render::WindowsBridgePreference::Automatic,
+                          diagnostics::PerformanceReport *performance = nullptr);
 
     /// @brief Resolve once, construct in dependency order, and publish after start.
     ///
@@ -47,6 +50,9 @@ namespace avb::platform::windows {
     WindowsSourceRegistry &registry_;
     WakeMainLoop wake_main_loop_;
     render::WindowsBridgePreference bridge_preference_;
+    // Borrowed from composition through every produced runtime's full drain.
+    diagnostics::PerformanceReport *performance_{};
+    std::uint64_t next_observation_instance_{1};
   };
 
 }    // namespace avb::platform::windows

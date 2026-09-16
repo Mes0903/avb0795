@@ -3,6 +3,7 @@
 /// See the matching header for the caller-facing lifetime and thread contract.
 
 #include "platform/windows/windows_replica_runtime.hpp"
+#include "avb/diagnostics/performance_report.hpp"
 
 #include "platform/windows/features/browser_capture_keep_alive.hpp"
 #include "platform/windows/overlay_window.hpp"
@@ -261,6 +262,7 @@ namespace avb::platform::windows {
         }
       }
       owner.settings_ = requested;
+      if (owner.render_stack_) owner.render_stack_->set_performance_fps(requested.fps_cap);
       if (owner.render_stack_) {
         owner.render_stack_->set_presentation({requested.region, requested.selecting_region,
                                                owner.selection_preview_});
@@ -270,13 +272,17 @@ namespace avb::platform::windows {
   };
 
   WindowsReplicaRuntime::WindowsReplicaRuntime(
-    ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive, const core::ReplicaSettings settings, const core::Extent allocation, const core::CaptureExclusionStatus capture_exclusion, const render::WindowsBridgePreference bridge_preference, const std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop) noexcept
-      : source_{std::move(source)}, overlay_{std::move(overlay)}, adapter_{std::move(adapter)}, render_stack_{std::move(render_stack)}, capture_job_{std::move(capture_job)}, browser_keep_alive_{std::move(browser_keep_alive)}, scheduler_{settings.fps_cap, Clock::now()}, settings_{settings}, allocation_{allocation}, bridge_preference_{bridge_preference}, pool_buffer_count_{pool_buffer_count}, wake_main_loop_{std::move(wake_main_loop)}, initial_capture_exclusion_{capture_exclusion} {}
+    ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive, const core::ReplicaSettings settings, const core::Extent allocation, const core::CaptureExclusionStatus capture_exclusion, const render::WindowsBridgePreference bridge_preference, const std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop,
+    diagnostics::PerformanceReport *performance, const std::uint64_t observation_instance) noexcept
+      : source_{std::move(source)}, overlay_{std::move(overlay)}, adapter_{std::move(adapter)}, render_stack_{std::move(render_stack)}, capture_job_{std::move(capture_job)}, browser_keep_alive_{std::move(browser_keep_alive)}, scheduler_{settings.fps_cap, Clock::now()}, settings_{settings}, allocation_{allocation}, bridge_preference_{bridge_preference}, pool_buffer_count_{pool_buffer_count}, wake_main_loop_{std::move(wake_main_loop)}, performance_{performance}, observation_instance_{observation_instance}, initial_capture_exclusion_{capture_exclusion} {}
 
   WindowsReplicaRuntime::~WindowsReplicaRuntime() noexcept
   {
     if (published_ && !stopped_) {
       std::terminate();
+    }
+    if (published_ && performance_) {
+      performance_->observe_runtime({}, Clock::now());
     }
   }
 
@@ -407,6 +413,9 @@ namespace avb::platform::windows {
       return;
     }
     stop_requested_ = true;
+    if (performance_) {
+      performance_->observe_stop(diagnostics::PerformanceOwner::Replica, Clock::now());
+    }
     if (adapter_) {
       adapter_->set_region_selection(false);
     }
@@ -580,7 +589,8 @@ namespace avb::platform::windows {
     try {
       // Rebuild locally; failed partial owners never replace the stable runtime aggregate.
       auto replacement_render = std::make_unique<render::WindowsRenderStack>(
-        *overlay_, *decision.candidate_generation, bridge_preference_);
+        *overlay_, *decision.candidate_generation, bridge_preference_, performance_, observation_instance_);
+      replacement_render->set_performance_fps(settings_.fps_cap);
       replacement_render->set_presentation({settings_.region, false, {}});
       auto replacement_job = WgcCaptureJob::create_inactive(
         *source_, replacement_render->capture_device(),

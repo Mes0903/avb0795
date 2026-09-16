@@ -20,6 +20,8 @@
 
 struct GLFWwindow;
 
+namespace avb::diagnostics { class PerformanceReport; }
+
 namespace avb::desktop {
 
   /// @brief Separate the process result from permission to destroy retained owners.
@@ -73,9 +75,12 @@ namespace avb::desktop {
     /// construction, while its status is retained for later presentation.
     /// Startup failures release partial, never-submitted resources, so the caller
     /// receives either a complete movable host or a typed construction error.
+    /// An enabled performance collector is borrowed through startup, run/drain,
+    /// and destruction; composition must keep that collector alive throughout.
     /// @pre GLFW is initialized and this is its main thread; both callables exist.
     [[nodiscard]] static std::expected<DesktopHost, core::AppError>
-    create(CommandSink command_sink, ControllerWindowCreated window_created, std::vector<std::byte> font_data);
+    create(CommandSink command_sink, ControllerWindowCreated window_created, std::vector<std::byte> font_data,
+           diagnostics::PerformanceReport *performance = nullptr);
 
     /// Destroy before run or after a non-abandon result; never wait for the GPU.
     /// Unresolved submitted work violates the implementation's destruction

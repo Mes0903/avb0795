@@ -8,6 +8,7 @@
 #include "avb/app/application.hpp"
 #include "avb/app/config_store.hpp"
 #include "avb/desktop/desktop_host.hpp"
+#include "avb/diagnostics/performance_report.hpp"
 #include "platform/windows/capture_exclusion.hpp"
 #include "platform/windows/windows_controller_window.hpp"
 #include "platform/windows/controller_font.hpp"
@@ -33,10 +34,69 @@
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
+#include <memory>
+#include <optional>
 #include <string_view>
 #include <utility>
 
 namespace {
+
+  /// @brief Process-local observation options, validated before native startup.
+  /// The report destination has exclusive-create semantics. Capture preferences
+  /// here select this diagnostic run; persisted user preferences keep their owner.
+  struct PerformanceOptions {
+    std::optional<std::filesystem::path> report;
+    avb::diagnostics::PerformanceScope scope{avb::diagnostics::PerformanceScope::Replica};
+    avb::render::WindowsBridgePreference bridge{avb::render::WindowsBridgePreference::Automatic};
+  };
+
+  [[nodiscard]] std::expected<PerformanceOptions, std::string_view>
+  parse_performance_options(const int argc, char *argv[])
+  {
+    PerformanceOptions options;
+    bool scope_seen{}, bridge_seen{};
+    for (int index = 1; index < argc; ++index) {
+      const std::string_view option{argv[index]};
+      if (index + 1 == argc) {
+        return std::unexpected{"option requires a value"};
+      }
+      const std::string_view value{argv[++index]};
+      if (value.empty() || value.starts_with("--")) {
+        return std::unexpected{"option requires a value"};
+      }
+      if (option == "--performance-report" && !options.report) {
+        options.report = std::filesystem::path{value};
+      }
+      else if (option == "--performance-scope" && !scope_seen) {
+        scope_seen = true;
+        if (value == "controller") options.scope = avb::diagnostics::PerformanceScope::Controller;
+        else if (value != "replica") return std::unexpected{"unknown performance scope"};
+      }
+      else if (option == "--performance-bridge" && !bridge_seen) {
+        bridge_seen = true;
+        if (value == "cpu") options.bridge = avb::render::WindowsBridgePreference::ForceCpuBaseline;
+        else if (value != "auto") return std::unexpected{"unknown performance bridge"};
+      }
+      else {
+        return std::unexpected{"unknown or duplicate option"};
+      }
+    }
+    if ((scope_seen || bridge_seen) && !options.report) {
+      return std::unexpected{"performance scope/bridge requires --performance-report"};
+    }
+    if (options.report) {
+      std::error_code error;
+      const auto parent = options.report->has_parent_path()
+        ? options.report->parent_path() : std::filesystem::path{"."};
+      if (!std::filesystem::is_directory(parent, error) || error) {
+        return std::unexpected{"report parent directory must exist"};
+      }
+      if (std::filesystem::exists(*options.report, error) || error) {
+        return std::unexpected{"report path must be new"};
+      }
+    }
+    return options;
+  }
 
   // Static UI capabilities describe behavior; actual bridge support is measured
   // only after a concrete capture/graphics generation has been constructed.
@@ -114,9 +174,13 @@ namespace {
   /// actual session and shutdown workflow; this function only wires dependencies.
   /// An abandon result is handled while every owner is still alive, because a
   /// normal return would destroy resources whose completion has not been proven.
-  [[nodiscard]] int run_application()
+  [[nodiscard]] int run_application(const PerformanceOptions &options)
   {
     using namespace avb;
+
+    // This owner precedes every borrower, including startup-failure unwinding.
+    auto performance = options.report
+      ? std::make_unique<diagnostics::PerformanceReport>(options.scope) : nullptr;
 
     // Queue outlives callbacks; the host is constructed before native services
     // whose admitted wake operations borrow it.
@@ -143,7 +207,7 @@ namespace {
         }
         return desktop::ControllerWindowSetup{*exclusion, std::move(*interaction)};
       },
-      std::move(*font_data));
+      std::move(*font_data), performance.get());
     if (!host_result) {
       report_error("controller startup", host_result.error());
       return 5;
@@ -155,7 +219,7 @@ namespace {
     platform::windows::WindowsSourceRegistry source_registry;
     platform::windows::WindowsSourceCatalog source_catalog{source_registry};
     platform::windows::WindowsRuntimeFactory runtime_factory{
-      source_registry, [&host]() noexcept { host.wake(); }};
+      source_registry, [&host]() noexcept { host.wake(); }, options.bridge, performance.get()};
 
     auto hotkey_result = platform::windows::WindowsGlobalHotkey::create(
       [&commands, &host](core::HotkeyChord chord) {
@@ -205,6 +269,14 @@ namespace {
       std::fflush(nullptr);
       std::_Exit(result.exit_code != 0 ? result.exit_code : 7);
     }
+    if (performance) {
+      performance->finish(diagnostics::PerformanceReport::Clock::now());
+      if (const auto written = performance->write_new(*options.report); !written) {
+        std::fprintf(stderr, "performance report write failed (reason=%d)\n",
+                     static_cast<int>(written.error()));
+        return 8;
+      }
+    }
     return result.exit_code;
   }
 
@@ -216,8 +288,23 @@ namespace {
 /// COM and GLFW remain initialized until a normal return has unwound all composed
 /// services. Startup failures have fixed diagnostic exit paths; the separate
 /// abandon path deliberately never returns here to perform ordinary teardown.
-int main()
+int main(const int argc, char *argv[])
 {
+  PerformanceOptions options;
+  try {
+    const auto parsed = parse_performance_options(argc, argv);
+    if (!parsed) {
+      std::fprintf(stderr, "%.*s\nUsage: avb0795 [--performance-report <new.json> "
+                          "[--performance-scope controller|replica] "
+                          "[--performance-bridge auto|cpu]]\n",
+                   static_cast<int>(parsed.error().size()), parsed.error().data());
+      return 1;
+    }
+    options = *parsed;
+  } catch (...) {
+    std::fputs("invalid performance report options\n", stderr);
+    return 1;
+  }
   const auto dpi =
     avb::platform::windows::establish_per_monitor_v2_dpi_awareness();
   if (!dpi) {
@@ -254,7 +341,7 @@ int main()
 
   int exit_code{};
   try {
-    exit_code = run_application();
+    exit_code = run_application(options);
   } catch (const avb::core::AppError &error) {
     report_error("application startup", error);
     exit_code = 6;

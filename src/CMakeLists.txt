@@ -152,6 +152,7 @@ if(WIN32)
       avb0795_core
       avb0795_app
       avb0795_windows
+      avb0795_diagnostics
       glfw
       Vulkan::Vulkan
       d3d11
@@ -187,6 +188,7 @@ if(WIN32)
     PRIVATE
       avb0795_app
       avb0795_ui
+      avb0795_diagnostics
       glfw
       Vulkan::Vulkan
       imgui
@@ -204,6 +206,7 @@ if(WIN32)
       avb0795_desktop
       avb0795_windows
       avb0795_windows_graphics
+      avb0795_diagnostics
       glfw
       windowsapp
   )

@@ -2,6 +2,7 @@
 /// @brief Replica-only native graphics owner. Main-thread ticks advance a bounded
 /// D3-to-Vulkan ring and independent WSI retirement without synchronous waits.
 #include "render/windows_render_stack.hpp"
+#include "avb/diagnostics/performance_report.hpp"
 
 #include "avb/render/replica_shaders.hpp"
 #include "platform/windows/overlay_window.hpp"
@@ -26,6 +27,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <expected>
 #include <limits>
@@ -37,6 +39,9 @@
 #include <vector>
 
 namespace avb::render {
+  using diagnostics::PerformanceCounter;
+  using diagnostics::PerformanceOwner;
+  using diagnostics::PerformanceSample;
   namespace {
 
     using Microsoft::WRL::ComPtr;
@@ -230,6 +235,7 @@ namespace avb::render {
       core::Extent content{};
       SlotPhase phase{SlotPhase::Empty};
       std::uint64_t content_sequence{};
+      std::chrono::steady_clock::time_point intake_observed_at{};
       PresentationSnapshot recorded_presentation{};
 
       // CPU transport owns host-visible upload storage plus a separate sampled
@@ -291,6 +297,7 @@ namespace avb::render {
       VkSwapchainKHR handle{VK_NULL_HANDLE};
       VkFormat format{VK_FORMAT_UNDEFINED};
       VkExtent2D extent{};
+      VkPresentModeKHR present_mode{VK_PRESENT_MODE_FIFO_KHR};
       VkRenderPass render_pass{VK_NULL_HANDLE};
       VkPipeline pipeline{VK_NULL_HANDLE};
       std::vector<VkImage> images;
@@ -308,7 +315,8 @@ namespace avb::render {
 
     /// Construct device and WSI owners around a borrowed overlay on the main
     /// thread; partial setup enqueues no work and can unwind immediately.
-    Impl(GLFWwindow *native_window, std::uint64_t resource_generation, core::Extent initial_framebuffer, WindowsBridgePreference bridge_preference);
+    Impl(GLFWwindow *native_window, std::uint64_t resource_generation, core::Extent initial_framebuffer, WindowsBridgePreference bridge_preference,
+         diagnostics::PerformanceReport *performance, std::uint64_t observation_instance);
     /// Require established native-use or matching device-loss proof; never wait.
     ~Impl() noexcept;
 
@@ -327,6 +335,7 @@ namespace avb::render {
     /// Retain the checkout until query/fence completion or confirmed D3 removal.
     void submit(platform::windows::WindowsCapturedFrame &&frame);
     void set_presentation(ReplicaPresentation presentation) noexcept;
+    void set_performance_fps(core::FpsCap fps) noexcept { performance_fps_ = fps; }
     [[nodiscard]] bool has_redraw_work() const noexcept;
     void request_redraw() noexcept { redraw_requested_ = true; }
     void invalidate_presentation() noexcept;
@@ -382,6 +391,8 @@ namespace avb::render {
     }
 
   private:
+    void observe_performance(PerformanceCounter counter, std::uint64_t value = 1) noexcept;
+    void observe_performance_metadata(std::chrono::steady_clock::time_point now) noexcept;
     /// Create the hardware BGRA device used by WGC and all source copies.
     void create_d3_device();
     /// Enable GLFW surface and mandatory maintenance1 requirements before use.
@@ -548,6 +559,13 @@ namespace avb::render {
 
     // Borrowed window outlives all surfaces; generation is supplied by runtime.
     GLFWwindow *window_{};
+    diagnostics::PerformanceReport *performance_{};
+    std::uint64_t observation_instance_{};
+    diagnostics::PerformanceHighWater performance_live_{};
+    core::Extent performance_content_{};
+    core::FpsCap performance_fps_{core::FpsCap::Fps60};
+    std::array<char, 32> performance_driver_{};
+    std::optional<std::chrono::steady_clock::time_point> last_present_observed_at_;
     std::uint64_t generation_{};
     WindowsBridgePreference bridge_preference_{};
     core::Extent framebuffer_{};
@@ -647,11 +665,72 @@ namespace avb::render {
     std::uint64_t gpu_interop_frames_submitted_{};
   };
 
+  void WindowsRenderStack::Impl::observe_performance(const PerformanceCounter counter,
+                                                   const std::uint64_t value) noexcept
+  {
+    if (!performance_) return;
+    switch (counter) {
+    case PerformanceCounter::CommandBuffersCreated: performance_live_.command_buffers += value; break;
+    case PerformanceCounter::CommandBuffersDestroyed: performance_live_.command_buffers -= value; break;
+    case PerformanceCounter::FencesCreated: performance_live_.fences += value; break;
+    case PerformanceCounter::FencesDestroyed: performance_live_.fences -= value; break;
+    case PerformanceCounter::SemaphoresCreated: performance_live_.semaphores += value; break;
+    case PerformanceCounter::SemaphoresDestroyed: performance_live_.semaphores -= value; break;
+    default: break;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    performance_->observe_runtime({observation_instance_, generation_}, now);
+    performance_->observe_counter(PerformanceOwner::Replica, counter, value, now);
+    performance_live_.slots = slots_in_flight();
+    performance_live_.presents = presentations_in_flight();
+    performance_->observe_high_water(PerformanceOwner::Replica, performance_live_, now);
+  }
+
+  void WindowsRenderStack::Impl::observe_performance_metadata(
+    const std::chrono::steady_clock::time_point now) noexcept
+  {
+    constexpr std::array reasons{
+      "none", "adapter_luid_unavailable_or_mismatch", "external_image_unsupported",
+      "required_d3d11_interfaces_unavailable", "shared_fence_or_timeline_unavailable",
+      "timeline_import_unavailable", "win32_import_procedure_unavailable",
+      "compatible_memory_type_unavailable", "interop_operation_failure"};
+    std::uint32_t fps{};
+    switch (performance_fps_) {
+    case core::FpsCap::Fps30: fps = 30; break;
+    case core::FpsCap::Fps60: fps = 60; break;
+    case core::FpsCap::Fps144: fps = 144; break;
+    case core::FpsCap::Unlimited: break;
+    }
+    const auto mode = swapchain_ ? swapchain_->present_mode : VK_PRESENT_MODE_FIFO_KHR;
+    performance_->observe_runtime({observation_instance_, generation_}, now);
+    performance_->observe_metadata(PerformanceOwner::Replica, {
+      .gpu = physical_properties_.deviceName,
+      .driver = performance_driver_.data(),
+      .os = "Windows",
+      .bridge = active_bridge_mode_ == core::BridgeMode::GpuInterop ? "gpu_interop" : "cpu_copy",
+      .bridge_reason = bridge_selection_ ? reasons[static_cast<std::size_t>(bridge_selection_->reason)] : "pending",
+      .present_mode = mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE" : "FIFO",
+      .ui_policy = "baseline: UI builds on every host iteration; graphics poll 2ms",
+      .requested_bridge = bridge_preference_ == WindowsBridgePreference::ForceCpuBaseline ? "cpu" : "auto",
+      .content_width = performance_content_.width,
+      .content_height = performance_content_.height,
+      .allocation_width = capture_allocation_.width,
+      .allocation_height = capture_allocation_.height,
+      .framebuffer_width = framebuffer_.width,
+      .framebuffer_height = framebuffer_.height,
+      .fps_cap = fps,
+    }, now);
+    performance_live_.slots = slots_in_flight();
+    performance_live_.presents = presentations_in_flight();
+    performance_->observe_high_water(PerformanceOwner::Replica, performance_live_, now);
+  }
+
   WindowsRenderStack::Impl::Impl(GLFWwindow *const native_window,
                                  const std::uint64_t resource_generation,
                                  const core::Extent initial_framebuffer,
-                                 const WindowsBridgePreference bridge_preference)
-      : window_{native_window}, generation_{resource_generation}, bridge_preference_{bridge_preference}, framebuffer_{initial_framebuffer}
+                                 const WindowsBridgePreference bridge_preference,
+                                 diagnostics::PerformanceReport *performance, const std::uint64_t observation_instance)
+      : window_{native_window}, performance_{performance}, observation_instance_{observation_instance}, generation_{resource_generation}, bridge_preference_{bridge_preference}, framebuffer_{initial_framebuffer}
   {
     try {
       if (window_ == nullptr || generation_ == 0) {
@@ -661,6 +740,9 @@ namespace avb::render {
       create_vulkan_instance();
       create_surface();
       select_physical_device();
+      if (performance_) {
+        std::snprintf(performance_driver_.data(), performance_driver_.size(), "raw:%u", physical_properties_.driverVersion);
+      }
       create_vulkan_device();
       collect_bridge_capabilities();
       create_vulkan_common_resources();
@@ -1321,6 +1403,7 @@ namespace avb::render {
       return false;
     }
     interop_timeline_ = created_timeline;
+    observe_performance(PerformanceCounter::SemaphoresCreated);
 
     HANDLE raw_handle{};
     const auto shared = interop_fence_->CreateSharedHandle(nullptr, GENERIC_ALL,
@@ -1328,6 +1411,7 @@ namespace avb::render {
     UniqueWin32Handle handle{raw_handle};
     if (FAILED(shared) || !handle) {
       vkDestroySemaphore(device_, interop_timeline_, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       interop_timeline_ = VK_NULL_HANDLE;
       return false;
     }
@@ -1342,6 +1426,7 @@ namespace avb::render {
     };
     if (import_semaphore_handle_(device_, &import_info) != VK_SUCCESS) {
       vkDestroySemaphore(device_, interop_timeline_, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       interop_timeline_ = VK_NULL_HANDLE;
       return false;
     }
@@ -1447,6 +1532,7 @@ namespace avb::render {
     for (std::size_t index = 0; index < slots_.size(); ++index) {
       slots_[index].command_buffer = command_buffers[index];
     }
+    observe_performance(PerformanceCounter::CommandBuffersCreated, command_buffers.size());
 
     const VkSamplerCreateInfo sampler_info{
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -1487,11 +1573,13 @@ namespace avb::render {
     }
     if (interop_timeline_ != VK_NULL_HANDLE) {
       vkDestroySemaphore(device_, interop_timeline_, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       interop_timeline_ = VK_NULL_HANDLE;
       interop_timeline_ready_ = false;
     }
     if (command_pool_ != VK_NULL_HANDLE) {
       vkDestroyCommandPool(device_, command_pool_, nullptr);
+      observe_performance(PerformanceCounter::CommandBuffersDestroyed, performance_live_.command_buffers);
       command_pool_ = VK_NULL_HANDLE;
       for (auto &slot : slots_) {
         slot.command_buffer = VK_NULL_HANDLE;
@@ -1648,6 +1736,7 @@ namespace avb::render {
     SwapchainState candidate;
     candidate.format = selected_format->format;
     candidate.extent = extent;
+    candidate.present_mode = create_info.presentMode;
     // Passing oldSwapchain retires it even if native creation fails. Move its
     // resources into tracked retirement before the call so failure cannot expose
     // the old handle as active or lose the outstanding present leases.
@@ -2182,6 +2271,7 @@ namespace avb::render {
   {
     if (slot.render_finished_semaphore != VK_NULL_HANDLE) {
       vkDestroySemaphore(device_, slot.render_finished_semaphore, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       slot.render_finished_semaphore = VK_NULL_HANDLE;
     }
     const VkSemaphoreCreateInfo info{
@@ -2197,6 +2287,7 @@ namespace avb::render {
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
     slot.render_finished_semaphore = created_render_finished_semaphore;
+    observe_performance(PerformanceCounter::SemaphoresCreated);
     return {};
   }
 
@@ -2205,6 +2296,7 @@ namespace avb::render {
   {
     if (slot.acquire_semaphore != VK_NULL_HANDLE) {
       vkDestroySemaphore(device_, slot.acquire_semaphore, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       slot.acquire_semaphore = VK_NULL_HANDLE;
     }
     const VkSemaphoreCreateInfo info{
@@ -2220,6 +2312,7 @@ namespace avb::render {
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
     slot.acquire_semaphore = created_acquire_semaphore;
+    observe_performance(PerformanceCounter::SemaphoresCreated);
     return {};
   }
 
@@ -2274,6 +2367,7 @@ namespace avb::render {
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
     slot.acquire_fence = created_acquire_fence;
+    observe_performance(PerformanceCounter::FencesCreated);
 
     VkFence created_submission_fence{VK_NULL_HANDLE};
     result =
@@ -2283,6 +2377,7 @@ namespace avb::render {
         vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
     }
     slot.submission_fence = created_submission_fence;
+    observe_performance(PerformanceCounter::FencesCreated);
     if (auto created = recreate_acquire_semaphore(slot); !created) {
       return created;
     }
@@ -2567,15 +2662,19 @@ namespace avb::render {
     if (device_ != VK_NULL_HANDLE) {
       if (slot.render_finished_semaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(device_, slot.render_finished_semaphore, nullptr);
+        observe_performance(PerformanceCounter::SemaphoresDestroyed);
       }
       if (slot.acquire_semaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(device_, slot.acquire_semaphore, nullptr);
+        observe_performance(PerformanceCounter::SemaphoresDestroyed);
       }
       if (slot.submission_fence != VK_NULL_HANDLE) {
         vkDestroyFence(device_, slot.submission_fence, nullptr);
+        observe_performance(PerformanceCounter::FencesDestroyed);
       }
       if (slot.acquire_fence != VK_NULL_HANDLE) {
         vkDestroyFence(device_, slot.acquire_fence, nullptr);
+        observe_performance(PerformanceCounter::FencesDestroyed);
       }
       destroy_interop_slot(slot);
       if (slot.sampled_view != VK_NULL_HANDLE) {
@@ -2630,6 +2729,7 @@ namespace avb::render {
         slot.gpu_copy = false;
         slot.d3_fence_target = 0;
         ++dropped_frames_;
+        observe_performance(PerformanceCounter::Dropped);
         progress_pending_ = true;
       }
     }
@@ -2738,6 +2838,7 @@ namespace avb::render {
       }
       if (interop_timeline_ != VK_NULL_HANDLE) {
         vkDestroySemaphore(device_, interop_timeline_, nullptr);
+        observe_performance(PerformanceCounter::SemaphoresDestroyed);
         interop_timeline_ = VK_NULL_HANDLE;
       }
       interop_timeline_ready_ = false;
@@ -2821,6 +2922,7 @@ namespace avb::render {
         content.width > capture_allocation_.width ||
         content.height > capture_allocation_.height) {
       ++dropped_frames_;
+      observe_performance(PerformanceCounter::Dropped);
       throw graphics_error(core::AppErrorCode::InvalidValue);
     }
 
@@ -2834,6 +2936,7 @@ namespace avb::render {
         source_info.Height < content.height ||
         source_info.Format != capture_format_) {
       ++dropped_frames_;
+      observe_performance(PerformanceCounter::Dropped);
       throw graphics_error(core::AppErrorCode::InvalidValue);
     }
 
@@ -2851,19 +2954,23 @@ namespace avb::render {
     // Keep the pool checkout alive across asynchronous D3 access. A texture
     // interface alone would not prevent WGC from recycling its pool buffer.
     slot->frame.emplace(std::move(frame));
+    slot->intake_observed_at = slot->frame->capture_timestamp();
     slot->content = content;
+    performance_content_ = content;
     slot->gpu_copy = active_bridge_mode_ == core::BridgeMode::GpuInterop;
     if (slot->gpu_copy) {
       if (next_d3_fence_target_ == (std::numeric_limits<std::uint64_t>::max)()) {
         slot->frame.reset();
         slot->gpu_copy = false;
         ++dropped_frames_;
+        observe_performance(PerformanceCounter::Dropped);
         request_interop_fallback();
         return;
       }
       slot->d3_fence_target = next_d3_fence_target_++;
       d3_context_->CopySubresourceRegion(slot->interop_texture.Get(), 0, 0, 0, 0,
                                          source_texture.Get(), 0, &source_box);
+      observe_performance(PerformanceCounter::D3CopyBytes, static_cast<std::uint64_t>(content.width) * content.height * bytes_per_pixel);
       const auto signal_result =
         d3_context4_->Signal(interop_fence_.Get(), slot->d3_fence_target);
       if (FAILED(signal_result)) {
@@ -2876,6 +2983,7 @@ namespace avb::render {
           slot->frame.reset();
           slot->phase = SlotPhase::Empty;
           ++dropped_frames_;
+          observe_performance(PerformanceCounter::Dropped);
           return;
         }
         d3_context_->End(slot->copy_query.Get());
@@ -2890,11 +2998,13 @@ namespace avb::render {
     else {
       d3_context_->CopySubresourceRegion(slot->readback_texture.Get(), 0, 0, 0, 0,
                                          source_texture.Get(), 0, &source_box);
+      observe_performance(PerformanceCounter::D3CopyBytes, static_cast<std::uint64_t>(content.width) * content.height * bytes_per_pixel);
       d3_context_->End(slot->copy_query.Get());
       d3_context_->Flush();
     }
     slot->phase = SlotPhase::D3CopyPending;
     ++captured_frames_;
+    observe_performance(PerformanceCounter::Admitted);
     slot->content_sequence = captured_frames_;
   }
 
@@ -2991,6 +3101,7 @@ namespace avb::render {
         // not used this slot. Dropping stale ready content needs no native wait.
         slot.phase = SlotPhase::Empty;
         ++dropped_frames_;
+        observe_performance(PerformanceCounter::Dropped);
       }
     }
     return newest;
@@ -3017,9 +3128,11 @@ namespace avb::render {
       if (device_ != VK_NULL_HANDLE) {
         if (record->wait_semaphore != VK_NULL_HANDLE) {
           vkDestroySemaphore(device_, record->wait_semaphore, nullptr);
+          observe_performance(PerformanceCounter::SemaphoresDestroyed);
         }
         if (record->fence != VK_NULL_HANDLE) {
           vkDestroyFence(device_, record->fence, nullptr);
+          observe_performance(PerformanceCounter::FencesDestroyed);
         }
       }
       record.reset();
@@ -3048,6 +3161,7 @@ namespace avb::render {
         slot.gpu_copy = false;
         slot.d3_fence_target = 0;
         ++dropped_frames_;
+        observe_performance(PerformanceCounter::Dropped);
         result.made_progress = true;
       }
     }
@@ -3099,6 +3213,7 @@ namespace avb::render {
     }
     if (interop_timeline_ != VK_NULL_HANDLE) {
       vkDestroySemaphore(device_, interop_timeline_, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       interop_timeline_ = VK_NULL_HANDLE;
     }
     interop_timeline_ready_ = false;
@@ -3165,6 +3280,7 @@ namespace avb::render {
           slot.phase == SlotPhase::GpuReady) {
         slot.phase = SlotPhase::Empty;
         ++dropped_frames_;
+        observe_performance(PerformanceCounter::Dropped);
         progress_pending_ = true;
       }
     }
@@ -3261,6 +3377,17 @@ namespace avb::render {
         // Enqueue success is insufficient for accounting or retry reset. Only
         // the present fence's retirement discharges this presentation record.
         ++presented_frames_;
+        if (performance_) {
+          const auto observed = std::chrono::steady_clock::now();
+          performance_->observe_runtime({observation_instance_, generation_}, observed);
+          performance_->observe_first_present(observed);
+          performance_->observe_counter(PerformanceOwner::Replica, PerformanceCounter::PresentRetired, 1, observed);
+          if (last_present_observed_at_) {
+            performance_->observe_sample(PerformanceSample::PresentRetirementInterval,
+              std::chrono::duration_cast<std::chrono::nanoseconds>(observed - *last_present_observed_at_), observed);
+          }
+          last_present_observed_at_ = observed;
+        }
         if (record->confirms_recovery) {
           reset_recovery_after_present(record->swapchain);
         }
@@ -3273,7 +3400,9 @@ namespace avb::render {
         }
       }
       vkDestroySemaphore(device_, record->wait_semaphore, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       vkDestroyFence(device_, record->fence, nullptr);
+      observe_performance(PerformanceCounter::FencesDestroyed);
       record.reset();
       result.made_progress = true;
     }
@@ -3308,6 +3437,7 @@ namespace avb::render {
       if (draining_ || vulkan_device_lost_ || interop_fallback_pending_) {
         slot.phase = SlotPhase::Empty;
         ++dropped_frames_;
+        observe_performance(PerformanceCounter::Dropped);
         return;
       }
       slot.phase = SlotPhase::GpuReady;
@@ -3350,12 +3480,14 @@ namespace avb::render {
       slot.gpu_copy = false;
       slot.query_completion = false;
       ++dropped_frames_;
+      observe_performance(PerformanceCounter::Dropped);
       result.made_progress = true;
       return;
     }
     if (draining_ || vulkan_device_lost_) {
       slot.phase = SlotPhase::Empty;
       ++dropped_frames_;
+      observe_performance(PerformanceCounter::Dropped);
       result.made_progress = true;
       return;
     }
@@ -3401,6 +3533,7 @@ namespace avb::render {
     // content rectangle. Clear the remaining bytes and translate D3's row pitch
     // into the tightly packed allocation stride expected by Vulkan's buffer copy.
     std::memset(slot.mapped_upload, 0, static_cast<std::size_t>(*byte_count));
+    observe_performance(PerformanceCounter::CpuClearBytes, *byte_count);
     auto *const destination = static_cast<std::byte *>(slot.mapped_upload);
     const auto *const source = static_cast<const std::byte *>(mapped.pData);
     const auto destination_pitch =
@@ -3411,6 +3544,8 @@ namespace avb::render {
                   row_bytes);
     }
     d3_context_->Unmap(slot.readback_texture.Get(), 0);
+
+    observe_performance(PerformanceCounter::CpuCopyBytes, static_cast<std::uint64_t>(row_bytes) * slot.content.height);
 
     if (!slot.upload_coherent) {
       // Flush whole noncoherent atoms. If rounding would overflow or extend past
@@ -3530,6 +3665,7 @@ namespace avb::render {
       vkCmdCopyBufferToImage(slot.command_buffer, slot.upload_buffer,
                              slot.sampled_image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+      observe_performance(PerformanceCounter::VulkanUploadBytes, static_cast<std::uint64_t>(capture_allocation_.width) * capture_allocation_.height * bytes_per_pixel);
 
       const VkImageMemoryBarrier before_sampling{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -3776,11 +3912,13 @@ namespace avb::render {
     if (release_plan.destroy_acquire_semaphore &&
         slot.acquire_semaphore != VK_NULL_HANDLE) {
       vkDestroySemaphore(device_, slot.acquire_semaphore, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       slot.acquire_semaphore = VK_NULL_HANDLE;
     }
     if (release_plan.destroy_render_finished_semaphore &&
         slot.render_finished_semaphore != VK_NULL_HANDLE) {
       vkDestroySemaphore(device_, slot.render_finished_semaphore, nullptr);
+      observe_performance(PerformanceCounter::SemaphoresDestroyed);
       slot.render_finished_semaphore = VK_NULL_HANDLE;
     }
 
@@ -3970,6 +4108,18 @@ namespace avb::render {
       schedule_poll(result, now);
       return;
     case SubmitOutcome::Enqueued:
+      if (performance_) {
+        const auto submitted_at = std::chrono::steady_clock::now();
+        performance_->observe_runtime({observation_instance_, generation_}, submitted_at);
+        performance_->observe_counter(PerformanceOwner::Replica, PerformanceCounter::Submitted, 1, submitted_at);
+        if (slot.content_sequence > last_submitted_sequence_) {
+          performance_->observe_sample(PerformanceSample::IntakeToSubmit,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(submitted_at - slot.intake_observed_at), submitted_at);
+        }
+        else {
+          performance_->observe_counter(PerformanceOwner::Replica, PerformanceCounter::RetainedRedraws, 1, submitted_at);
+        }
+      }
       last_submitted_sequence_ = slot.content_sequence;
       if (gpu_submit) {
         ++gpu_interop_frames_submitted_;
@@ -3999,6 +4149,7 @@ namespace avb::render {
       return;
     }
 
+    observe_performance(PerformanceCounter::FencesCreated);
 #if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
     const VkSwapchainPresentFenceInfoKHR present_fence_khr{
       .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR,
@@ -4032,6 +4183,7 @@ namespace avb::render {
     }
     if (present_fence_info == nullptr) {
       vkDestroyFence(device_, present_fence, nullptr);
+      observe_performance(PerformanceCounter::FencesDestroyed);
       slot.phase = slot_phase_after_present(PresentOwnership::NotEnqueued);
       set_terminal(VK_ERROR_EXTENSION_NOT_PRESENT, result);
       schedule_poll(result, now);
@@ -4053,6 +4205,7 @@ namespace avb::render {
     slot.phase = slot_phase_after_present(present.ownership);
     if (present.ownership == PresentOwnership::NotEnqueued) {
       vkDestroyFence(device_, present_fence, nullptr);
+      observe_performance(PerformanceCounter::FencesDestroyed);
       set_terminal(present_result, result);
       schedule_poll(result, now);
       return;
@@ -4420,6 +4573,7 @@ namespace avb::render {
       if (framebuffer != framebuffer_) {
         resize(framebuffer);
       }
+      if (performance_) observe_performance_metadata(std::chrono::steady_clock::now());
       result.presentation_suspended = has_zero_dimension(framebuffer_);
       result.vulkan_device_lost = vulkan_device_lost_;
       result.d3_device_removed = d3_device_removed_;
@@ -4503,6 +4657,14 @@ namespace avb::render {
     result.dropped_frames = dropped_frames_;
     result.slots_in_flight = slots_in_flight();
     result.presentations_in_flight = presentations_in_flight();
+    if (performance_) {
+      // Retirement observers run while their records still occupy a container.
+      // Publish the final state as well, so a later measurement boundary uses
+      // the current occupancy after the last pending record has been erased.
+      performance_live_.slots = result.slots_in_flight;
+      performance_live_.presents = result.presentations_in_flight;
+      performance_->observe_high_water(PerformanceOwner::Replica, performance_live_, std::chrono::steady_clock::now());
+    }
     result.vulkan_device_lost = vulkan_device_lost_;
     result.d3_device_removed = d3_device_removed_;
     if (vulkan_device_lost_) {
@@ -4526,9 +4688,15 @@ namespace avb::render {
   WindowsRenderStack::WindowsRenderStack(
     platform::windows::OverlayWindow &overlay,
     const std::uint64_t resource_generation,
-    const WindowsBridgePreference bridge_preference)
+    const WindowsBridgePreference bridge_preference,
+    diagnostics::PerformanceReport *performance, const std::uint64_t observation_instance)
       : implementation_{std::make_unique<Impl>(
-          overlay.native_window(), resource_generation, overlay.framebuffer_extent(), bridge_preference)} {}
+          overlay.native_window(), resource_generation, overlay.framebuffer_extent(), bridge_preference, performance, observation_instance)} {}
+
+  void WindowsRenderStack::set_performance_fps(const core::FpsCap fps) noexcept
+  {
+    implementation_->set_performance_fps(fps);
+  }
 
   WindowsRenderStack::~WindowsRenderStack() noexcept = default;
 

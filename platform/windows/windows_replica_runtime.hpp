@@ -112,7 +112,8 @@ namespace avb::platform::windows {
     /// restricts who may establish the dependency and publication invariants.
     /// Unique owners transfer here together before native capture is started.
     WindowsReplicaRuntime(
-      ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive, core::ReplicaSettings settings, core::Extent allocation, core::CaptureExclusionStatus capture_exclusion, render::WindowsBridgePreference bridge_preference, std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop) noexcept;
+      ConstructionToken, std::unique_ptr<WindowsCaptureSource> source, std::unique_ptr<OverlayWindow> overlay, std::unique_ptr<Win32OverlayAdapter> adapter, std::unique_ptr<render::WindowsRenderStack> render_stack, std::unique_ptr<WgcCaptureJob> capture_job, std::unique_ptr<features::BrowserCaptureKeepAlive> browser_keep_alive, core::ReplicaSettings settings, core::Extent allocation, core::CaptureExclusionStatus capture_exclusion, render::WindowsBridgePreference bridge_preference, std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop,
+      diagnostics::PerformanceReport *performance = nullptr, std::uint64_t observation_instance = 0) noexcept;
 
   private:
     friend class WindowsRuntimeFactory;
@@ -174,6 +175,8 @@ namespace avb::platform::windows {
     const render::WindowsBridgePreference bridge_preference_;
     const std::uint32_t pool_buffer_count_;
     WakeMainLoop wake_main_loop_;
+    diagnostics::PerformanceReport *performance_{};
+    std::uint64_t observation_instance_{};
 
     std::optional<core::CaptureExclusionStatus> initial_capture_exclusion_;
     detail::RuntimeBridgeEventState bridge_event_state_;
