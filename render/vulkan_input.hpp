@@ -10,11 +10,34 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
 
 namespace avb::render {
+
+  /// @brief Synchronous device preferences consumed only during renderer startup.
+  /// The extension span and callable are borrowed for construction; the renderer
+  /// stores neither. Optional extensions are enabled as one complete group.
+  struct VulkanStartupRequest {
+    std::function<bool(VkPhysicalDevice)> prefer_candidate;
+    std::span<const char *const> optional_device_extension_group;
+    bool request_timeline_semaphore{};
+  };
+
+  /// @brief Renderer-owned device borrowed by a platform import owner.
+  /// Imported resources and all uses of them must retire and be released before
+  /// the renderer destroys this device. No queue or surface ownership is lent.
+  /// Enabled facts describe the created device, not just advertised support.
+  struct VulkanDeviceBorrow {
+    VkPhysicalDevice physical_device{VK_NULL_HANDLE};
+    VkDevice device{VK_NULL_HANDLE};
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    VkPhysicalDeviceLimits limits{};
+    bool optional_extension_group_enabled{};
+    bool timeline_semaphore_enabled{};
+  };
 
   /// @brief Identity of one slot in a particular renderer ring installation.
   ///

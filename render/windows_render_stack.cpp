@@ -13,17 +13,9 @@
 #include "render/render_math.hpp"
 #include "render/vulkan_input.hpp"
 
-#ifndef VK_USE_PLATFORM_WIN32_KHR
-#define VK_USE_PLATFORM_WIN32_KHR
-#endif
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 #include <GLFW/glfw3.h>
-
-#include <d3d11.h>
-#include <d3d11_4.h>
-#include <dxgi1_2.h>
-#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
@@ -47,7 +39,6 @@ namespace avb::render {
   using diagnostics::PerformanceSample;
   namespace {
 
-    using Microsoft::WRL::ComPtr;
     using namespace std::chrono_literals;
 
     constexpr std::size_t cpu_slot_count = 3;
@@ -66,46 +57,6 @@ namespace avb::render {
     };
     static_assert(sizeof(ReplicaPushConstants) == 64);
 
-    /// @brief Move-only owner of a temporary NT sharing handle; importing native APIs
-    /// retain their own resource references, so the handle can close afterward.
-    class UniqueWin32Handle final {
-    public:
-      UniqueWin32Handle() noexcept = default;
-      explicit UniqueWin32Handle(HANDLE handle) noexcept : handle_{handle} {}
-      ~UniqueWin32Handle() noexcept { reset(); }
-
-      UniqueWin32Handle(const UniqueWin32Handle &) = delete;
-      UniqueWin32Handle &operator=(const UniqueWin32Handle &) = delete;
-
-      UniqueWin32Handle(UniqueWin32Handle &&other) noexcept
-          : handle_{std::exchange(other.handle_, nullptr)} {}
-      UniqueWin32Handle &operator=(UniqueWin32Handle &&other) noexcept
-      {
-        if (this != &other) {
-          reset();
-          handle_ = std::exchange(other.handle_, nullptr);
-        }
-        return *this;
-      }
-
-      [[nodiscard]] HANDLE get() const noexcept { return handle_; }
-      [[nodiscard]] explicit operator bool() const noexcept
-      {
-        return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
-      }
-
-      // Clearing the wrapper makes repeated reset and moved-from destruction safe.
-      void reset() noexcept
-      {
-        if (*this) {
-          static_cast<void>(CloseHandle(handle_));
-        }
-        handle_ = nullptr;
-      }
-
-    private:
-      HANDLE handle_{};
-    };
 
 #if defined(VK_KHR_surface_maintenance1) && \
   defined(VK_KHR_swapchain_maintenance1) && \
@@ -133,12 +84,6 @@ namespace avb::render {
 
     [[nodiscard]] constexpr core::AppError
     vulkan_error(const core::AppErrorCode code, const VkResult result) noexcept
-    {
-      return graphics_error(code, static_cast<std::int64_t>(result));
-    }
-
-    [[nodiscard]] constexpr core::AppError d3_error(const core::AppErrorCode code,
-                                                    const HRESULT result) noexcept
     {
       return graphics_error(code, static_cast<std::int64_t>(result));
     }
@@ -259,17 +204,10 @@ namespace avb::render {
       std::uint32_t acquired_image_index{};
       bool acquired_image{};
 
-      // GPU transport shares a D3 destination allocation with Vulkan. Its source
-      // checkout is still released after the D3 copy, before Vulkan samples it.
-      ComPtr<ID3D11Texture2D> interop_texture;
-      UniqueWin32Handle interop_handle;
-      VkImage interop_image{VK_NULL_HANDLE};
-      VkDeviceMemory interop_memory{VK_NULL_HANDLE};
-      VkImageView interop_view{VK_NULL_HANDLE};
-      VkMemoryRequirements interop_memory_requirements{};
-      std::uint32_t interop_memory_type_index{};
-      bool interop_requires_dedicated{};
-      std::uint64_t d3_fence_target{};
+      // The bridge owns imported resources; the renderer keeps only registration
+      // and host-confirmed producer waits through submission and retained redraw.
+      ExternalSampledImageView external_image;
+      CompletedProducerWait producer_wait;
       bool gpu_copy{};
     };
 
@@ -394,18 +332,11 @@ namespace avb::render {
     void create_vulkan_instance();
     /// Create WSI against the borrowed overlay, whose window must outlive the stack.
     void create_surface();
-    /// Prefer the D3 adapter LUID, then require presentation/maintenance1 support.
-    /// A LUID mismatch may use CPU copy without bypassing the WSI safety floor.
-    void select_physical_device();
-    /// Create queues and resolve enabled maintenance/import procedures; optional
-    /// interop support must not weaken required presentation safety.
-    void create_vulkan_device();
-    /// Query real LUID, external-image, D3 interface and timeline-import facts;
-    /// per-slot NT-handle compatibility is established separately.
-    void collect_bridge_capabilities() noexcept;
-    /// Permanently import the shared D3 fence as a Vulkan timeline semaphore;
-    /// close the temporary NT handle after import while keeping both fence owners.
-    [[nodiscard]] bool create_interop_timeline() noexcept;
+    /// Prefer caller-ranked candidates, preserving the full WSI safety floor.
+    /// The request is consumed synchronously and never saved by the renderer.
+    void select_physical_device(const VulkanStartupRequest &request);
+    /// Enable the complete optional extension group and requested supported features.
+    void create_vulkan_device(const VulkanStartupRequest &request);
     /// Create device-scoped pools, layouts and sampler before any submission.
     void create_vulkan_common_resources();
     /// Build a compatible SDR replacement; retire active before using oldSwapchain.
@@ -424,20 +355,10 @@ namespace avb::render {
     [[nodiscard]] std::expected<void, core::AppError>
     start_source_ring(std::uint64_t generation, core::Extent allocation,
                       DXGI_FORMAT format) noexcept;
-    /// Create a shared D3 texture and query its NT handle's Vulkan memory-type
-    /// intersection; device-level capability alone does not prove a handle usable.
-    [[nodiscard]] std::expected<bool, core::AppError>
-    query_interop_slot(CaptureSlot &slot);
-    /// Import a proven-compatible handle and create its sampling resources;
-    /// this slot becomes the canonical owner of the imported Vulkan allocation.
-    [[nodiscard]] std::expected<void, core::AppError>
-    finish_interop_slot(CaptureSlot &slot);
     /// Create descriptor, command buffer and unsignaled synchronization for a
     /// slot's sampled view; this setup enqueues no GPU work.
     [[nodiscard]] std::expected<void, core::AppError>
     create_slot_presentation_resources(CaptureSlot &slot, VkImageView view, VkImageLayout layout);
-    /// Release Vulkan imports before the D3 texture, after native-use/loss proof.
-    void destroy_interop_slot(CaptureSlot &slot) noexcept;
     /// Close copy admission and latch fallback without destroying active users.
     void request_interop_fallback() noexcept;
     /// Observe complete interop copy/submission/present retirement, then replace
@@ -446,8 +367,12 @@ namespace avb::render {
 
     /// Release a proven-safe slot while preserving its reusable command buffer.
     void destroy_capture_slot(CaptureSlot &slot) noexcept;
-    /// Invalidate the borrowed redraw slot and release all safe slot allocations.
-    void destroy_capture_slots() noexcept;
+    /// Retire descriptor registrations before releasing safe borrowed images.
+    /// A descriptor-reset failure preserves all ring owners for later cleanup.
+    [[nodiscard]] std::expected<void, core::AppError>
+    destroy_capture_slots() noexcept;
+    /// Destroy all registrations at final teardown, after native-use proof.
+    void destroy_descriptor_pool() noexcept;
     /// Release present fences/semaphores only with retirement or Vulkan-loss
     /// proof; submission completion alone does not establish presentation safety.
     void destroy_present_records() noexcept;
@@ -580,9 +505,6 @@ namespace avb::render {
 
     // D3 source-copy owners are independent of Vulkan device-loss evidence.
     std::unique_ptr<platform::windows::WindowsFrameBridge> frame_bridge_;
-    ComPtr<ID3D11Device5> d3_device5_;
-    ComPtr<ID3D11DeviceContext4> d3_context4_;
-    ComPtr<ID3D11Fence> interop_fence_;
 
     // WSI and graphics ownership belongs only to this replica, not the controller.
     VkInstance instance_{VK_NULL_HANDLE};
@@ -596,15 +518,13 @@ namespace avb::render {
     VkQueue graphics_queue_{VK_NULL_HANDLE};
     VkQueue present_queue_{VK_NULL_HANDLE};
     MaintenanceVariant maintenance_variant_{MaintenanceVariant::None};
-    bool interop_device_extensions_supported_{};
+    bool optional_extension_group_enabled_{};
     bool timeline_semaphore_supported_{};
     bool khr_surface_maintenance_enabled_{};
     bool ext_surface_maintenance_enabled_{};
 #if defined(AVB0795_HAS_KHR_MAINTENANCE_VARIANT)
     PFN_vkReleaseSwapchainImagesKHR release_images_khr_{};
 #endif
-    PFN_vkGetMemoryWin32HandlePropertiesKHR get_memory_handle_properties_{};
-    PFN_vkImportSemaphoreWin32HandleKHR import_semaphore_handle_{};
 #if defined(AVB0795_HAS_EXT_MAINTENANCE_VARIANT)
     PFN_vkReleaseSwapchainImagesEXT release_images_ext_{};
 #endif
@@ -617,7 +537,6 @@ namespace avb::render {
     VkDescriptorPool descriptor_pool_{VK_NULL_HANDLE};
     VkCommandPool command_pool_{VK_NULL_HANDLE};
     VkSampler sampler_{VK_NULL_HANDLE};
-    VkSemaphore interop_timeline_{VK_NULL_HANDLE};
     // Stable addresses permit one borrowed retained_slot_ without another owner.
     std::array<CaptureSlot, cpu_slot_count> slots_{};
     std::uint64_t last_ring_serial_{};
@@ -645,12 +564,7 @@ namespace avb::render {
     std::optional<BridgeSelection> bridge_change_pending_;
     core::BridgeMode active_bridge_mode_{core::BridgeMode::CpuCopy};
     bool bridge_capabilities_collected_{};
-    bool interop_timeline_ready_{};
-    bool interop_dedicated_only_{};
     bool interop_fallback_pending_{};
-    std::uint64_t next_d3_fence_target_{1};
-    std::size_t interop_created_handle_count_{};
-    std::size_t interop_compatible_handle_count_{};
 
     // Admission, recovery, and completion are separate state. Closing admission
     // or recording a terminal error leaves native owners available to later ticks.
@@ -743,15 +657,35 @@ namespace avb::render {
       if (window_ == nullptr || generation_ == 0) {
         throw graphics_error(core::AppErrorCode::InvalidValue);
       }
-      frame_bridge_ = std::make_unique<platform::windows::WindowsFrameBridge>();
+      frame_bridge_ = std::make_unique<platform::windows::WindowsFrameBridge>(
+        platform::windows::BridgeResourceObserver{
+          .context = this,
+          .observe = [](void *context,
+                        const platform::windows::BridgeResourceEvent event) noexcept {
+            static_cast<Impl *>(context)->observe_performance(
+              event == platform::windows::BridgeResourceEvent::SemaphoreCreated
+                ? PerformanceCounter::SemaphoresCreated
+                : PerformanceCounter::SemaphoresDestroyed);
+          },
+        });
+      const auto startup = frame_bridge_->startup_request();
       create_vulkan_instance();
       create_surface();
-      select_physical_device();
+      select_physical_device(startup);
       if (performance_) {
         std::snprintf(performance_driver_.data(), performance_driver_.size(), "raw:%u", physical_properties_.driverVersion);
       }
-      create_vulkan_device();
-      collect_bridge_capabilities();
+      create_vulkan_device(startup);
+      frame_bridge_->attach_vulkan_device({
+        .physical_device = physical_device_,
+        .device = device_,
+        .memory_properties = memory_properties_,
+        .limits = physical_properties_.limits,
+        .optional_extension_group_enabled = optional_extension_group_enabled_,
+        .timeline_semaphore_enabled = timeline_semaphore_supported_,
+      });
+      bridge_facts_ = frame_bridge_->capability_facts();
+      bridge_capabilities_collected_ = true;
       create_vulkan_common_resources();
       if (!has_zero_dimension(framebuffer_)) {
         const auto created = create_swapchain(framebuffer_);
@@ -761,11 +695,13 @@ namespace avb::render {
       }
       fully_constructed_ = true;
     } catch (...) {
-      destroy_capture_slots();
+      destroy_descriptor_pool();
+      static_cast<void>(destroy_capture_slots());
       destroy_present_records();
       destroy_swapchain();
       destroy_retired_swapchains();
       destroy_vulkan_common_resources();
+      frame_bridge_.reset();
       if (device_ != VK_NULL_HANDLE) {
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
@@ -789,11 +725,13 @@ namespace avb::render {
     if (fully_constructed_ && has_unsafe_native_work()) {
       std::terminate();
     }
-    destroy_capture_slots();
+    destroy_descriptor_pool();
+    static_cast<void>(destroy_capture_slots());
     destroy_present_records();
     destroy_swapchain();
     destroy_retired_swapchains();
     destroy_vulkan_common_resources();
+    frame_bridge_.reset();
     if (device_ != VK_NULL_HANDLE) {
       vkDestroyDevice(device_, nullptr);
       device_ = VK_NULL_HANDLE;
@@ -924,7 +862,8 @@ namespace avb::render {
     }
   }
 
-  void WindowsRenderStack::Impl::select_physical_device()
+  void WindowsRenderStack::Impl::select_physical_device(
+    const VulkanStartupRequest &request)
   {
     std::uint32_t device_count{};
     auto result = vkEnumeratePhysicalDevices(instance_, &device_count, nullptr);
@@ -939,38 +878,14 @@ namespace avb::render {
       throw vulkan_error(core::AppErrorCode::UnsupportedGraphics, result);
     }
 
-    ComPtr<IDXGIDevice> dxgi_device;
-    ComPtr<IDXGIAdapter> d3_adapter;
-    DXGI_ADAPTER_DESC d3_adapter_description{};
-    const bool d3_luid_available =
-      SUCCEEDED(capture_device().QueryInterface(IID_PPV_ARGS(&dxgi_device))) &&
-      SUCCEEDED(dxgi_device->GetAdapter(d3_adapter.GetAddressOf())) &&
-      SUCCEEDED(d3_adapter->GetDesc(&d3_adapter_description));
-    const auto matches_d3_adapter =
-      [d3_luid_available, d3_luid = d3_adapter_description.AdapterLuid](
-        const VkPhysicalDevice device) noexcept {
-        if (!d3_luid_available) {
-          return false;
-        }
-        VkPhysicalDeviceIDProperties id{
-          .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
-          .pNext = nullptr,
-        };
-        VkPhysicalDeviceProperties2 properties{
-          .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-          .pNext = &id,
-        };
-        vkGetPhysicalDeviceProperties2(device, &properties);
-        return id.deviceLUIDValid == VK_TRUE &&
-               std::memcmp(&d3_luid, id.deviceLUID, VK_LUID_SIZE) == 0;
-      };
-    // Prefer a same-adapter candidate for sharing while preserving the original
-    // order of equally ranked devices; later checks still enforce the WSI floor.
-    std::ranges::stable_sort(
-      devices, [&matches_d3_adapter](const VkPhysicalDevice left,
-                                     const VkPhysicalDevice right) noexcept {
-        return matches_d3_adapter(left) && !matches_d3_adapter(right);
-      });
+    // Stable ranking preserves equally preferred candidates; every candidate
+    // still passes the complete Vulkan/WSI floor below.
+    if (request.prefer_candidate) {
+      std::ranges::stable_sort(
+        devices, [&request](const VkPhysicalDevice left, const VkPhysicalDevice right) {
+          return request.prefer_candidate(left) && !request.prefer_candidate(right);
+        });
+    }
 
     for (const auto candidate : devices) {
       VkPhysicalDeviceProperties properties{};
@@ -1088,11 +1003,12 @@ namespace avb::render {
       graphics_queue_family_ = *graphics_family;
       present_queue_family_ = *present_family;
       vkGetPhysicalDeviceMemoryProperties(candidate, &memory_properties_);
-      interop_device_extensions_supported_ =
-        extension_available(extensions,
-                            VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME) &&
-        extension_available(extensions,
-                            VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+      optional_extension_group_enabled_ =
+        !request.optional_device_extension_group.empty() &&
+        std::ranges::all_of(request.optional_device_extension_group,
+                            [&extensions](const char *name) noexcept {
+          return extension_available(extensions, name);
+        });
       VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
         .pNext = nullptr,
@@ -1104,13 +1020,15 @@ namespace avb::render {
       };
       vkGetPhysicalDeviceFeatures2(candidate, &optional_features);
       timeline_semaphore_supported_ =
+        request.request_timeline_semaphore &&
         timeline_features.timelineSemaphore == VK_TRUE;
       return;
     }
     throw graphics_error(core::AppErrorCode::UnsupportedGraphics);
   }
 
-  void WindowsRenderStack::Impl::create_vulkan_device()
+  void WindowsRenderStack::Impl::create_vulkan_device(
+    const VulkanStartupRequest &request)
   {
     constexpr float priority = 1.0F;
     std::array<VkDeviceQueueCreateInfo, 2> queue_infos{};
@@ -1195,9 +1113,9 @@ namespace avb::render {
     }
     std::vector<const char *> extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                          maintenance_extension};
-    if (interop_device_extensions_supported_) {
-      extensions.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
-      extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+    if (optional_extension_group_enabled_) {
+      extensions.insert(extensions.end(), request.optional_device_extension_group.begin(),
+                        request.optional_device_extension_group.end());
     }
     const VkDeviceCreateInfo create_info{
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -1242,191 +1160,9 @@ namespace avb::render {
     if (!release_function_loaded) {
       throw graphics_error(core::AppErrorCode::UnsupportedGraphics);
     }
-    if (interop_device_extensions_supported_) {
-      get_memory_handle_properties_ =
-        reinterpret_cast<PFN_vkGetMemoryWin32HandlePropertiesKHR>(
-          vkGetDeviceProcAddr(device_,
-                              "vkGetMemoryWin32HandlePropertiesKHR"));
-      import_semaphore_handle_ =
-        reinterpret_cast<PFN_vkImportSemaphoreWin32HandleKHR>(
-          vkGetDeviceProcAddr(device_, "vkImportSemaphoreWin32HandleKHR"));
-    }
   }
 
-  void WindowsRenderStack::Impl::collect_bridge_capabilities() noexcept
-  {
-    // These queries establish a device-level prefix. Memory compatibility stays
-    // unproven until slot creation queries the handles for the actual allocation.
-    bridge_capabilities_collected_ = false;
-    bridge_facts_ = {};
-    d3_device5_.Reset();
-    d3_context4_.Reset();
-    interop_fence_.Reset();
-    try {
-      ComPtr<IDXGIDevice> dxgi_device;
-      ComPtr<IDXGIAdapter> adapter;
-      DXGI_ADAPTER_DESC adapter_description{};
-      const auto has_d3_luid =
-        SUCCEEDED(capture_device().QueryInterface(IID_PPV_ARGS(&dxgi_device))) &&
-        SUCCEEDED(dxgi_device->GetAdapter(adapter.GetAddressOf())) &&
-        SUCCEEDED(adapter->GetDesc(&adapter_description));
 
-      VkPhysicalDeviceIDProperties id_properties{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
-        .pNext = nullptr,
-      };
-      VkPhysicalDeviceProperties2 properties{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-        .pNext = &id_properties,
-      };
-      vkGetPhysicalDeviceProperties2(physical_device_, &properties);
-      static_assert(sizeof(LUID) == VK_LUID_SIZE);
-      bridge_facts_.adapter_luid_matches =
-        has_d3_luid && id_properties.deviceLUIDValid == VK_TRUE &&
-        std::memcmp(&adapter_description.AdapterLuid, id_properties.deviceLUID,
-                    VK_LUID_SIZE) == 0;
-
-      const VkPhysicalDeviceExternalImageFormatInfo external_image{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
-        .pNext = nullptr,
-        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
-      };
-      const VkPhysicalDeviceImageFormatInfo2 image_info{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
-        .pNext = &external_image,
-        .format = VK_FORMAT_B8G8R8A8_UNORM,
-        .type = VK_IMAGE_TYPE_2D,
-        .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
-        .flags = 0,
-      };
-      VkExternalImageFormatProperties external_properties{
-        .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
-        .pNext = nullptr,
-      };
-      VkImageFormatProperties2 image_properties{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
-        .pNext = &external_properties,
-      };
-      const auto image_result = vkGetPhysicalDeviceImageFormatProperties2(
-        physical_device_, &image_info, &image_properties);
-      const auto &external_memory = external_properties.externalMemoryProperties;
-      bridge_facts_.external_image_supported =
-        image_result == VK_SUCCESS &&
-        (external_memory.externalMemoryFeatures &
-         VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
-        (external_memory.compatibleHandleTypes &
-         VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT) != 0;
-      interop_dedicated_only_ =
-        bridge_facts_.external_image_supported &&
-        (external_memory.externalMemoryFeatures &
-         VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
-
-      ComPtr<ID3D11DeviceContext> immediate_context;
-      capture_device().GetImmediateContext(immediate_context.GetAddressOf());
-      const auto has_interfaces =
-        SUCCEEDED(capture_device().QueryInterface(IID_PPV_ARGS(&d3_device5_))) &&
-        SUCCEEDED(immediate_context.As(&d3_context4_));
-      HRESULT fence_result = E_NOINTERFACE;
-      if (has_interfaces) {
-        fence_result = d3_device5_->CreateFence(0, D3D11_FENCE_FLAG_SHARED,
-                                                IID_PPV_ARGS(&interop_fence_));
-      }
-      bridge_facts_.required_d3d11_interfaces_available =
-        has_interfaces && SUCCEEDED(fence_result);
-      if (!bridge_facts_.required_d3d11_interfaces_available) {
-        interop_fence_.Reset();
-      }
-      bridge_facts_.shared_fence_or_timeline_semaphore_available =
-        interop_fence_ && timeline_semaphore_supported_;
-
-      const VkSemaphoreTypeCreateInfo semaphore_type{
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
-        .pNext = nullptr,
-        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
-        .initialValue = 0,
-      };
-      const VkPhysicalDeviceExternalSemaphoreInfo semaphore_info{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
-        .pNext = &semaphore_type,
-        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT,
-      };
-      VkExternalSemaphoreProperties semaphore_properties{
-        .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
-        .pNext = nullptr,
-      };
-      vkGetPhysicalDeviceExternalSemaphoreProperties(
-        physical_device_, &semaphore_info, &semaphore_properties);
-      bridge_facts_.timeline_fence_import_available =
-        (semaphore_properties.externalSemaphoreFeatures &
-         VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) != 0 &&
-        (semaphore_properties.compatibleHandleTypes &
-         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT) != 0;
-      bridge_facts_.win32_import_procedure_available =
-        interop_device_extensions_supported_ &&
-        get_memory_handle_properties_ != nullptr &&
-        import_semaphore_handle_ != nullptr;
-      bridge_capabilities_collected_ = true;
-    } catch (...) {
-      d3_device5_.Reset();
-      d3_context4_.Reset();
-      interop_fence_.Reset();
-      bridge_capabilities_collected_ = true;
-    }
-  }
-
-  bool WindowsRenderStack::Impl::create_interop_timeline() noexcept
-  {
-    if (!interop_fence_ || import_semaphore_handle_ == nullptr) {
-      return false;
-    }
-    const VkSemaphoreTypeCreateInfo timeline_info{
-      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
-      .pNext = nullptr,
-      .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
-      .initialValue = 0,
-    };
-    const VkSemaphoreCreateInfo semaphore_info{
-      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-      .pNext = &timeline_info,
-      .flags = 0,
-    };
-    VkSemaphore created_timeline{VK_NULL_HANDLE};
-    if (vkCreateSemaphore(device_, &semaphore_info, nullptr,
-                          &created_timeline) != VK_SUCCESS) {
-      return false;
-    }
-    interop_timeline_ = created_timeline;
-    observe_performance(PerformanceCounter::SemaphoresCreated);
-
-    HANDLE raw_handle{};
-    const auto shared = interop_fence_->CreateSharedHandle(nullptr, GENERIC_ALL,
-                                                           nullptr, &raw_handle);
-    UniqueWin32Handle handle{raw_handle};
-    if (FAILED(shared) || !handle) {
-      vkDestroySemaphore(device_, interop_timeline_, nullptr);
-      observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      interop_timeline_ = VK_NULL_HANDLE;
-      return false;
-    }
-    const VkImportSemaphoreWin32HandleInfoKHR import_info{
-      .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR,
-      .pNext = nullptr,
-      .semaphore = interop_timeline_,
-      .flags = 0,
-      .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT,
-      .handle = handle.get(),
-      .name = nullptr,
-    };
-    if (import_semaphore_handle_(device_, &import_info) != VK_SUCCESS) {
-      vkDestroySemaphore(device_, interop_timeline_, nullptr);
-      observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      interop_timeline_ = VK_NULL_HANDLE;
-      return false;
-    }
-    interop_timeline_ready_ = true;
-    return true;
-  }
 
   void WindowsRenderStack::Impl::create_vulkan_common_resources()
   {
@@ -1565,12 +1301,6 @@ namespace avb::render {
       vkDestroySampler(device_, sampler_, nullptr);
       sampler_ = VK_NULL_HANDLE;
     }
-    if (interop_timeline_ != VK_NULL_HANDLE) {
-      vkDestroySemaphore(device_, interop_timeline_, nullptr);
-      observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      interop_timeline_ = VK_NULL_HANDLE;
-      interop_timeline_ready_ = false;
-    }
     if (command_pool_ != VK_NULL_HANDLE) {
       vkDestroyCommandPool(device_, command_pool_, nullptr);
       observe_performance(PerformanceCounter::CommandBuffersDestroyed, performance_live_.command_buffers);
@@ -1579,10 +1309,7 @@ namespace avb::render {
         slot.command_buffer = VK_NULL_HANDLE;
       }
     }
-    if (descriptor_pool_ != VK_NULL_HANDLE) {
-      vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
-      descriptor_pool_ = VK_NULL_HANDLE;
-    }
+    destroy_descriptor_pool();
     if (pipeline_layout_ != VK_NULL_HANDLE) {
       vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
       pipeline_layout_ = VK_NULL_HANDLE;
@@ -2399,224 +2126,8 @@ namespace avb::render {
       slot, slot.sampled_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
   }
 
-  std::expected<bool, core::AppError>
-  WindowsRenderStack::Impl::query_interop_slot(CaptureSlot &slot)
-  {
-    const VkExternalMemoryImageCreateInfo external_info{
-      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-      .pNext = nullptr,
-      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
-    };
-    const VkImageCreateInfo image_info{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-      .pNext = &external_info,
-      .flags = 0,
-      .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_B8G8R8A8_UNORM,
-      .extent =
-        {
-          .width = capture_allocation_.width,
-          .height = capture_allocation_.height,
-          .depth = 1,
-        },
-      .mipLevels = 1,
-      .arrayLayers = 1,
-      .samples = VK_SAMPLE_COUNT_1_BIT,
-      .tiling = VK_IMAGE_TILING_OPTIMAL,
-      .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .queueFamilyIndexCount = 0,
-      .pQueueFamilyIndices = nullptr,
-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    };
-    VkImage created_interop_image{VK_NULL_HANDLE};
-    auto result =
-      vkCreateImage(device_, &image_info, nullptr, &created_interop_image);
-    if (result != VK_SUCCESS) {
-      return std::unexpected{
-        vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
-    }
-    slot.interop_image = created_interop_image;
 
-    VkMemoryDedicatedRequirements dedicated_requirements{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS,
-      .pNext = nullptr,
-    };
-    VkMemoryRequirements2 requirements{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
-      .pNext = &dedicated_requirements,
-    };
-    const VkImageMemoryRequirementsInfo2 requirements_info{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
-      .pNext = nullptr,
-      .image = slot.interop_image,
-    };
-    vkGetImageMemoryRequirements2(device_, &requirements_info, &requirements);
 
-    D3D11_TEXTURE2D_DESC texture_info{};
-    texture_info.Width = capture_allocation_.width;
-    texture_info.Height = capture_allocation_.height;
-    texture_info.MipLevels = 1;
-    texture_info.ArraySize = 1;
-    texture_info.Format = capture_format_;
-    texture_info.SampleDesc.Count = 1;
-    texture_info.Usage = D3D11_USAGE_DEFAULT;
-    texture_info.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    // NT handles select the handle type, not shared storage. Synchronization
-    // stays with the existing shared fence; this is not a keyed-mutex texture.
-    texture_info.MiscFlags =
-      D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-    auto d3_result = capture_device().CreateTexture2D(
-      &texture_info, nullptr, slot.interop_texture.GetAddressOf());
-    if (FAILED(d3_result)) {
-      return std::unexpected{
-        d3_error(core::AppErrorCode::RuntimeConstructionFailure, d3_result)};
-    }
-    if (auto created = frame_bridge_->create_query_slot(slot.key); !created) {
-      return std::unexpected{created.error()};
-    }
-
-    ComPtr<IDXGIResource1> shared_resource;
-    d3_result = slot.interop_texture.As(&shared_resource);
-    if (FAILED(d3_result)) {
-      return std::unexpected{
-        d3_error(core::AppErrorCode::RuntimeConstructionFailure, d3_result)};
-    }
-    HANDLE raw_handle{};
-    d3_result = shared_resource->CreateSharedHandle(
-      nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
-      &raw_handle);
-    UniqueWin32Handle handle{raw_handle};
-    if (FAILED(d3_result) || !handle) {
-      return std::unexpected{
-        d3_error(core::AppErrorCode::RuntimeConstructionFailure, d3_result)};
-    }
-    slot.interop_handle = std::move(handle);
-    ++interop_created_handle_count_;
-
-    VkMemoryWin32HandlePropertiesKHR handle_properties{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR,
-      .pNext = nullptr,
-    };
-    result = get_memory_handle_properties_(
-      device_, VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
-      slot.interop_handle.get(), &handle_properties);
-    if (result != VK_SUCCESS) {
-      return false;
-    }
-    // A format-level import capability cannot choose memory for this handle.
-    // Both the image requirements and the exported allocation must allow it.
-    const auto compatible_bits = requirements.memoryRequirements.memoryTypeBits &
-                                 handle_properties.memoryTypeBits;
-    const auto memory_index =
-      memory_type_index(memory_properties_, compatible_bits, 0,
-                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (!memory_index) {
-      return false;
-    }
-    ++interop_compatible_handle_count_;
-    slot.interop_memory_requirements = requirements.memoryRequirements;
-    slot.interop_memory_type_index = *memory_index;
-    slot.interop_requires_dedicated =
-      interop_dedicated_only_ ||
-      dedicated_requirements.requiresDedicatedAllocation == VK_TRUE;
-    return true;
-  }
-
-  std::expected<void, core::AppError>
-  WindowsRenderStack::Impl::finish_interop_slot(CaptureSlot &slot)
-  {
-    const VkMemoryDedicatedAllocateInfo dedicated_info{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
-      .pNext = nullptr,
-      .image = slot.interop_image,
-      .buffer = VK_NULL_HANDLE,
-    };
-    const VkImportMemoryWin32HandleInfoKHR import_info{
-      .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
-      .pNext = slot.interop_requires_dedicated ? &dedicated_info : nullptr,
-      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
-      .handle = slot.interop_handle.get(),
-      .name = nullptr,
-    };
-    const VkMemoryAllocateInfo allocation_info{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-      .pNext = &import_info,
-      .allocationSize = slot.interop_memory_requirements.size,
-      .memoryTypeIndex = slot.interop_memory_type_index,
-    };
-    VkDeviceMemory allocated_interop_memory{VK_NULL_HANDLE};
-    const auto result = vkAllocateMemory(device_, &allocation_info, nullptr,
-                                         &allocated_interop_memory);
-    // This import form leaves NT-handle ownership with us. The allocation keeps
-    // its own reference on success; either result ends this temporary handle use.
-    slot.interop_handle.reset();
-    if (result != VK_SUCCESS) {
-      return std::unexpected{
-        vulkan_error(core::AppErrorCode::RuntimeConstructionFailure, result)};
-    }
-    slot.interop_memory = allocated_interop_memory;
-    auto next_result =
-      vkBindImageMemory(device_, slot.interop_image, slot.interop_memory, 0);
-    if (next_result != VK_SUCCESS) {
-      return std::unexpected{vulkan_error(
-        core::AppErrorCode::RuntimeConstructionFailure, next_result)};
-    }
-    const VkImageViewCreateInfo view_info{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .pNext = nullptr,
-      .flags = 0,
-      .image = slot.interop_image,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = VK_FORMAT_B8G8R8A8_UNORM,
-      .components = {},
-      .subresourceRange =
-        {
-          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-          .baseMipLevel = 0,
-          .levelCount = 1,
-          .baseArrayLayer = 0,
-          .layerCount = 1,
-        },
-    };
-    VkImageView created_interop_view{VK_NULL_HANDLE};
-    next_result =
-      vkCreateImageView(device_, &view_info, nullptr, &created_interop_view);
-    if (next_result != VK_SUCCESS) {
-      return std::unexpected{vulkan_error(
-        core::AppErrorCode::RuntimeConstructionFailure, next_result)};
-    }
-    slot.interop_view = created_interop_view;
-    if (auto created = create_slot_presentation_resources(
-          slot, slot.interop_view, VK_IMAGE_LAYOUT_GENERAL);
-        !created) {
-      return std::unexpected{created.error()};
-    }
-    return {};
-  }
-
-  void WindowsRenderStack::Impl::destroy_interop_slot(
-    CaptureSlot &slot) noexcept
-  {
-    slot.interop_handle.reset();
-    if (device_ != VK_NULL_HANDLE) {
-      if (slot.interop_view != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, slot.interop_view, nullptr);
-      }
-      if (slot.interop_image != VK_NULL_HANDLE) {
-        vkDestroyImage(device_, slot.interop_image, nullptr);
-      }
-      if (slot.interop_memory != VK_NULL_HANDLE) {
-        vkFreeMemory(device_, slot.interop_memory, nullptr);
-      }
-    }
-    slot.interop_texture.Reset();
-    slot.interop_view = VK_NULL_HANDLE;
-    slot.interop_image = VK_NULL_HANDLE;
-    slot.interop_memory = VK_NULL_HANDLE;
-    slot.d3_fence_target = 0;
-    slot.gpu_copy = false;
-  }
 
   void WindowsRenderStack::Impl::destroy_capture_slot(
     CaptureSlot &slot) noexcept
@@ -2641,7 +2152,6 @@ namespace avb::render {
         vkDestroyFence(device_, slot.acquire_fence, nullptr);
         observe_performance(PerformanceCounter::FencesDestroyed);
       }
-      destroy_interop_slot(slot);
       if (slot.sampled_view != VK_NULL_HANDLE) {
         vkDestroyImageView(device_, slot.sampled_view, nullptr);
       }
@@ -2665,10 +2175,27 @@ namespace avb::render {
     slot.command_buffer = command_buffer;
   }
 
-  void WindowsRenderStack::Impl::destroy_capture_slots() noexcept
+  void WindowsRenderStack::Impl::destroy_descriptor_pool() noexcept
+  {
+    if (device_ != VK_NULL_HANDLE && descriptor_pool_ != VK_NULL_HANDLE) {
+      vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+      descriptor_pool_ = VK_NULL_HANDLE;
+    }
+  }
+
+  std::expected<void, core::AppError>
+  WindowsRenderStack::Impl::destroy_capture_slots() noexcept
   {
     if (frame_bridge_ && frame_bridge_->has_pending_inputs()) {
       std::terminate();
+    }
+    if (ring_serial_ != 0 && device_ != VK_NULL_HANDLE &&
+        descriptor_pool_ != VK_NULL_HANDLE) {
+      const auto reset = vkResetDescriptorPool(device_, descriptor_pool_, 0);
+      if (reset != VK_SUCCESS) {
+        return std::unexpected{vulkan_error(
+          core::AppErrorCode::RuntimeConstructionFailure, reset)};
+      }
     }
     retained_slot_ = nullptr;
     for (auto &slot : slots_) {
@@ -2684,6 +2211,7 @@ namespace avb::render {
     }
     capture_allocation_ = {};
     capture_format_ = DXGI_FORMAT_UNKNOWN;
+    return {};
   }
 
   std::expected<void, core::AppError>
@@ -2734,7 +2262,7 @@ namespace avb::render {
           slot.phase == SlotPhase::GpuReady) {
         slot.phase = SlotPhase::Empty;
         slot.gpu_copy = false;
-        slot.d3_fence_target = 0;
+        slot.producer_wait = {};
         ++dropped_frames_;
         observe_performance(PerformanceCounter::Dropped);
         progress_pending_ = true;
@@ -2742,17 +2270,21 @@ namespace avb::render {
     }
     // The old ring is discarded before constructing replacements. The caller's
     // capture barrier must remain closed on failure; there is no old-ring rollback.
-    destroy_capture_slots();
-    const auto reset_result = vkResetDescriptorPool(device_, descriptor_pool_, 0);
-    if (reset_result != VK_SUCCESS) {
-      return std::unexpected{vulkan_error(
-        core::AppErrorCode::RuntimeConstructionFailure, reset_result)};
+    if (auto detached = destroy_capture_slots(); !detached) {
+      return detached;
     }
     const auto create_cpu_ring = [this]() -> std::expected<void, core::AppError> {
       for (auto &slot : slots_) {
         if (auto created = create_capture_slot(slot); !created) {
           const auto error = created.error();
-          destroy_capture_slots();
+          if (auto detached = destroy_capture_slots(); !detached) {
+            // Loss already observed during allocation remains authoritative if
+            // the cleanup attempt reports a second, less specific failure.
+            if (error.native_detail == static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST)) {
+              return std::unexpected{error};
+            }
+            return detached;
+          }
           return std::unexpected{error};
         }
       }
@@ -2774,7 +2306,8 @@ namespace avb::render {
         interop_prefix_available()) {
       // CPU fallback releases generation-local D3 interop objects. Recreate
       // those capability objects before probing the next generation's handles.
-      collect_bridge_capabilities();
+      frame_bridge_->refresh_interop_capabilities();
+      bridge_facts_ = frame_bridge_->capability_facts();
     }
     const bool probe_interop = should_probe_interop_generation(
       interop_prefix_available(), bridge_selection_, generation_, generation);
@@ -2786,34 +2319,31 @@ namespace avb::render {
       if (auto started = start_source_ring(generation, allocation, format); !started) {
         return started;
       }
-      interop_created_handle_count_ = 0;
-      interop_compatible_handle_count_ = 0;
-      for (auto &slot : slots_) {
-        const auto queried = query_interop_slot(slot);
-        if (!queried) {
-          interop_operation_failed = true;
-          break;
-        }
-        if (!*queried) {
-          bridge_facts_.compatible_memory_type_available = false;
-          break;
-        }
+      const auto probed = frame_bridge_->probe_interop_ring(ring_serial_);
+      if (!probed) {
+        return std::unexpected{probed.error()};
       }
-      bridge_facts_.compatible_memory_type_available =
-        interop_created_handle_count_ != 0 &&
-        interop_created_handle_count_ == interop_compatible_handle_count_;
+      interop_operation_failed = probed->operation_failed;
+      bridge_facts_ = frame_bridge_->capability_facts();
       if (attempt_interop && bridge_facts_.compatible_memory_type_available &&
           !interop_operation_failed) {
         for (auto &slot : slots_) {
-          if (auto finished = finish_interop_slot(slot); !finished) {
+          const auto finished = frame_bridge_->finish_interop_slot(slot.key);
+          if (!finished) {
+            interop_operation_failed = true;
+            break;
+          }
+          slot.external_image = *finished;
+          if (auto registered = create_slot_presentation_resources(
+                slot, slot.external_image.view, slot.external_image.layout);
+              !registered) {
             interop_operation_failed = true;
             break;
           }
         }
       }
       if (attempt_interop && bridge_facts_.compatible_memory_type_available &&
-          !interop_operation_failed && !interop_timeline_ready_ &&
-          !create_interop_timeline()) {
+          !interop_operation_failed && !frame_bridge_->ensure_interop_timeline()) {
         interop_operation_failed = true;
       }
     }
@@ -2831,12 +2361,8 @@ namespace avb::render {
       bridge_selection_ = selected;
     }
     else {
-      destroy_capture_slots();
-      const auto descriptor_reset =
-        vkResetDescriptorPool(device_, descriptor_pool_, 0);
-      if (descriptor_reset != VK_SUCCESS) {
-        return std::unexpected{vulkan_error(
-          core::AppErrorCode::RuntimeConstructionFailure, descriptor_reset)};
+      if (auto detached = destroy_capture_slots(); !detached) {
+        return detached;
       }
       if (auto started = start_source_ring(generation, allocation, format); !started) {
         return started;
@@ -2844,15 +2370,7 @@ namespace avb::render {
       if (auto created = create_cpu_ring(); !created) {
         return created;
       }
-      if (interop_timeline_ != VK_NULL_HANDLE) {
-        vkDestroySemaphore(device_, interop_timeline_, nullptr);
-        observe_performance(PerformanceCounter::SemaphoresDestroyed);
-        interop_timeline_ = VK_NULL_HANDLE;
-      }
-      interop_timeline_ready_ = false;
-      interop_fence_.Reset();
-      d3_context4_.Reset();
-      d3_device5_.Reset();
+      frame_bridge_->release_interop_support();
       active_bridge_mode_ = core::BridgeMode::CpuCopy;
       if (bridge_preference_ == WindowsBridgePreference::Automatic &&
           (!bridge_selection_ ||
@@ -2929,14 +2447,8 @@ namespace avb::render {
 
     const FrameStamp stamp{captured_frames_ + 1, frame.capture_timestamp()};
     const bool gpu_copy = active_bridge_mode_ == core::BridgeMode::GpuInterop;
-    const platform::windows::ExternalCopyBorrow external{
-      .destination = slot->interop_texture.Get(),
-      .fence = interop_fence_.Get(),
-      .signal_context = d3_context4_.Get(),
-      .target = next_d3_fence_target_,
-    };
     const auto submitted = frame_bridge_->submit(
-      slot->key, std::move(frame), stamp, gpu_copy ? &external : nullptr);
+      slot->key, std::move(frame), stamp);
     if (!submitted) {
       if (submitted.error().code == core::AppErrorCode::InvalidValue) {
         ++dropped_frames_;
@@ -2953,9 +2465,6 @@ namespace avb::render {
     performance_content_ = content;
     if (submitted->d3_copy_bytes != 0) {
       observe_performance(PerformanceCounter::D3CopyBytes, submitted->d3_copy_bytes);
-      if (gpu_copy) {
-        slot->d3_fence_target = next_d3_fence_target_++;
-      }
     }
     if (submitted->count_as_dropped) {
       ++dropped_frames_;
@@ -2971,7 +2480,7 @@ namespace avb::render {
     if (submitted->disposition ==
         platform::windows::BridgeSubmitDisposition::SafeDiscard) {
       slot->gpu_copy = false;
-      slot->d3_fence_target = 0;
+      slot->producer_wait = {};
       return;
     }
     slot->gpu_copy = gpu_copy;
@@ -3146,7 +2655,7 @@ namespace avb::render {
       if (slot.phase == SlotPhase::GpuReady) {
         slot.phase = SlotPhase::Empty;
         slot.gpu_copy = false;
-        slot.d3_fence_target = 0;
+        slot.producer_wait = {};
         ++dropped_frames_;
         observe_performance(PerformanceCounter::Dropped);
         result.made_progress = true;
@@ -3165,11 +2674,12 @@ namespace avb::render {
     // the new CPU ring remains within the same resource generation.
     const auto allocation = capture_allocation_;
     const auto format = capture_format_;
-    destroy_capture_slots();
-    const auto reset_result = vkResetDescriptorPool(device_, descriptor_pool_, 0);
-    if (reset_result != VK_SUCCESS) {
+    if (auto detached = destroy_capture_slots(); !detached) {
       interop_fallback_pending_ = false;
-      throw vulkan_error(core::AppErrorCode::RuntimeStateLost, reset_result);
+      throw core::AppError{
+        .code = core::AppErrorCode::RuntimeStateLost,
+        .native_detail = detached.error().native_detail,
+      };
     }
     if (auto started = start_source_ring(generation_, allocation, format); !started) {
       interop_fallback_pending_ = false;
@@ -3177,10 +2687,16 @@ namespace avb::render {
     }
     for (auto &slot : slots_) {
       if (auto created = create_capture_slot(slot); !created) {
-        const auto failure = created.error();
-        destroy_capture_slots();
+        auto failure = created.error();
+        const bool allocation_lost_device =
+          failure.native_detail == static_cast<std::int64_t>(VK_ERROR_DEVICE_LOST);
+        if (auto detached = destroy_capture_slots(); !detached) {
+          if (!allocation_lost_device) {
+            failure = detached.error();
+          }
+        }
         interop_fallback_pending_ = false;
-        const bool d3_lost = FAILED(capture_device().GetDeviceRemovedReason());
+        const bool d3_lost = frame_bridge_->d3_device_removed();
         const bool vulkan_lost =
           failure.native_detail &&
           *failure.native_detail ==
@@ -3200,15 +2716,7 @@ namespace avb::render {
         };
       }
     }
-    if (interop_timeline_ != VK_NULL_HANDLE) {
-      vkDestroySemaphore(device_, interop_timeline_, nullptr);
-      observe_performance(PerformanceCounter::SemaphoresDestroyed);
-      interop_timeline_ = VK_NULL_HANDLE;
-    }
-    interop_timeline_ready_ = false;
-    interop_fence_.Reset();
-    d3_context4_.Reset();
-    d3_device5_.Reset();
+    frame_bridge_->release_interop_support();
     active_bridge_mode_ = core::BridgeMode::CpuCopy;
     if (!bridge_selection_ || *bridge_selection_ != *fallback) {
       bridge_change_pending_ = *fallback;
@@ -3446,7 +2954,7 @@ namespace avb::render {
       case BridgeCompletionKind::ExternalReady:
         slot->content = completion.content;
         slot->stamp = completion.stamp;
-        slot->d3_fence_target = completion.external_fence_target;
+        slot->producer_wait = completion.external_wait;
         slot->phase = SlotPhase::GpuReady;
         break;
       case BridgeCompletionKind::CpuConsumed:
@@ -3456,7 +2964,7 @@ namespace avb::render {
       case BridgeCompletionKind::CpuConsumerFailed:
         slot->phase = SlotPhase::Empty;
         slot->gpu_copy = false;
-        slot->d3_fence_target = 0;
+        slot->producer_wait = {};
         if (completion.count_as_dropped) {
           ++dropped_frames_;
           observe_performance(PerformanceCounter::Dropped);
@@ -3673,11 +3181,11 @@ namespace avb::render {
         .pNext = nullptr,
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+        .oldLayout = slot.external_image.layout,
+        .newLayout = slot.external_image.layout,
+        .srcQueueFamilyIndex = slot.external_image.external_queue_family,
         .dstQueueFamilyIndex = graphics_queue_family_,
-        .image = slot.interop_image,
+        .image = slot.external_image.image,
         .subresourceRange =
           {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -3770,11 +3278,11 @@ namespace avb::render {
         .pNext = nullptr,
         .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
         .dstAccessMask = 0,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .oldLayout = slot.external_image.layout,
+        .newLayout = slot.external_image.layout,
         .srcQueueFamilyIndex = graphics_queue_family_,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
-        .image = slot.interop_image,
+        .dstQueueFamilyIndex = slot.external_image.external_queue_family,
+        .image = slot.external_image.image,
         .subresourceRange =
           {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -4034,11 +3542,11 @@ namespace avb::render {
 
     // WSI availability gates attachment writes; shared D3 data gates sampling.
     // The CPU path uses only the acquire wait and has no imported timeline.
-    const std::array wait_semaphores{slot.acquire_semaphore, interop_timeline_};
+    const std::array wait_semaphores{slot.acquire_semaphore, slot.producer_wait.semaphore};
     const std::array<VkPipelineStageFlags, 2> wait_stages{
       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT};
-    const std::array<std::uint64_t, 2> wait_values{0, slot.d3_fence_target};
+    const std::array<std::uint64_t, 2> wait_values{0, slot.producer_wait.value};
     constexpr std::array<std::uint64_t, 1> signal_values{0};
     const VkTimelineSemaphoreSubmitInfo timeline_submit{
       .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,

@@ -10,7 +10,7 @@ flowchart LR
   Q --> C[CPU Map / CpuRowsView]
   C -->|同步 consumer| U[renderer upload<br/>row copy / flush]
   U -->|返回| M[RAII Unmap]
-  Q --> G[ExternalReady<br/>completed fence target]
+  Q --> G[ExternalReady<br/>CompletedProducerWait]
   M --> E[BridgeProgress<br/>最多三筆 keyed completion]
   G --> E
   E -->|驗證 key 與 phase| F
@@ -19,16 +19,48 @@ flowchart LR
   S --> T[presentation retirement]
 ```
 
-為了讓來源擷取與 Vulkan 顯示各自維持明確的資源生命週期，系統需要分別保存 D3 copy、Vulkan submission 與 presentation 的完成證據。`WindowsFrameBridge` 管理 D3 device、immediate context、三個 producer slots，以及已接收的 WGC checkout；`WindowsRenderStack` 管理影格接納、canonical slot phase、Vulkan upload 與顯示資源。
+為了讓來源擷取與 Vulkan 顯示各自維持明確的資源生命週期，系統需要分別保存 D3 copy、Vulkan submission 與 presentation 的完成證據。`WindowsFrameBridge` 管理 D3 device、immediate context、三個 producer slots、已接收的 WGC checkout，以及 D3 shared texture／fence 與對應的 Vulkan imported image／memory／view／timeline；`WindowsRenderStack` 管理影格接納、canonical slot phase、Vulkan device、CPU upload 與顯示資源。
 
-本文件描述目前 producer ownership 遷移階段。D3 shared texture、shared fence、Vulkan imported image 與 timeline semaphore 目前由 Windows render facade 持有；bridge 透過 `ExternalCopyBorrow` 接收單次呼叫所需的介面，並為進行中的 copy 保存 destination 與 fence 的 COM reference。後續 import owner 遷移會將這組互通資源集中到 bridge。
+本文件描述目前 producer／import ownership 遷移階段。Renderer-role caller 以 `ExternalSampledImageView` 保存 image registration，以 `CompletedProducerWait` 保存已完成的 producer wait。Bridge 保存對應的原生 owner；caller 負責退休 Vulkan 使用者並撤銷 registration。後續 shared renderer 拆分會將 device／WSI／draw 集中成獨立的共用 Vulkan 元件。
 
 主要檔案：
 
 - [`windows_frame_bridge.hpp`](../../platform/windows/windows_frame_bridge.hpp)：主執行緒 API、借用期間、submit 結果與 completion batch。
-- [`windows_frame_bridge.cpp`](../../platform/windows/windows_frame_bridge.cpp)：D3 資源建立、來源驗證、copy proof、Map/Unmap 與 checkout 歸還。
+- [`windows_frame_bridge.cpp`](../../platform/windows/windows_frame_bridge.cpp)：D3 資源、Windows adapter／extension 偏好、逐 handle 相容性探測、Vulkan import、copy proof、Map/Unmap 與 checkout 歸還。
 - [`windows_render_stack.cpp`](../../render/windows_render_stack.cpp)：呼叫 bridge、驗證 canonical slot、搬移 CPU rows，以及 Vulkan submission／presentation。
 - [`vulkan_input.hpp`](../../render/vulkan_input.hpp)：`SlotKey`、`FrameStamp`、`CpuRowsView` 等跨 owner 資料契約。
+
+## Device bootstrap 與 external import
+
+```mermaid
+flowchart TD
+  D[bridge 建立 D3 device] --> R[VulkanStartupRequest<br/>adapter preference / optional extension group]
+  R --> V[renderer 選擇 WSI-capable device<br/>建立 logical device]
+  V --> B[VulkanDeviceBorrow<br/>handles / memory facts / enabled features]
+  B --> A[bridge attach<br/>解析 Win32 procedures / capability prefix]
+  A --> P[實際 allocation 的逐 slot probe<br/>VkImage / D3 texture / NT handle]
+  P --> M[image requirements bits<br/>與 handle memory bits 取交集]
+  M --> I[import memory / bind / image view]
+  I --> G[borrowed image registration<br/>renderer descriptor]
+  G --> T[shared fence → timeline import]
+  T --> E[開放 frame admission]
+  M --> C[ForceCpuBaseline<br/>釋放 probe ring / 建立 CPU ring]
+```
+
+為了選擇與擷取裝置相容的 Vulkan device，renderer 需要平台提供 adapter 偏好與可選 feature 要求。`VulkanStartupRequest` 提供短命的 candidate callable、extension 名稱群組與 timeline request；renderer 在建構期間消費這些值，完成完整 WSI 條件檢查，並以 `VulkanDeviceBorrow` 回傳實際啟用結果。Bridge 在 Windows implementation 內執行 LUID 比對與 Win32 procedure resolution。
+
+為了確認實際來源 allocation 的互通能力，每個 slot 都會建立 VkImage、D3 shared texture、query 與 NT handle，再計算可用 memory types：
+
+```text
+compatible_types = image_requirements.memoryTypeBits & handle_properties.memoryTypeBits
+dedicated = external_format_requires_dedicated || image_requires_dedicated
+```
+
+Memory selection 優先使用 device-local type，並容許符合必要 flags 的其他 type。`ForceCpuBaseline` 也執行真實 handle probes；其後選擇 CPU ring。自動模式接續 import／bind／view 與 timeline 建立，完成 renderer registration 後開放接納。
+
+GPU ring replacement 保留 shared fence、timeline 與遞增 target；`release_ring` 管理 allocation-local resources，`release_interop_support` 管理跨 ring 的互通支援資源。CPU fallback 先退休相關使用者，再釋放 support。Capability facts 保存探測結果，支援新 generation 的重新評估。
+
+`BridgeResourceObserver` 以兩種 noexcept 事件回報 timeline semaphore 的 create／destroy，aggregate 將它們加入既有 counters 與 live high-water。即使後續 import 失敗，同一次呼叫內成功 create 與隨後 destroy 的兩個事件仍各自記錄。
 
 ## Ring identity 與接納
 
@@ -107,7 +139,9 @@ flowchart TD
 1. 關閉 frame admission，持續推進 producer、submission 與 presentation 的完成證據。
 2. 消費 keyed completion，歸還對應的 canonical reservation。
 3. 退休 renderer 的 image users、retained reference 與 descriptor 相關資源。
-4. 以目前的 serial 呼叫 `release_ring`，釋放 staging 與 query。
-5. 在 aggregate 清理階段釋放 D3 device。
+4. 以目前的 serial 呼叫 `release_ring`，依序釋放 imported view／image／memory 與 D3 texture，再回收 staging／query。
+5. 在 aggregate 清理階段釋放 bridge 的 timeline、D3 owners，接著釋放 renderer 的 Vulkan device。
+
+一般 ring detach 先 reset descriptor pool；reset 失敗時保存 ring owners 並回報錯誤。最終 teardown 在取得退休證據後直接銷毀 descriptor pool，清除 ring references，釋放 bridge，最後銷毀 Vulkan device。若 allocation 與 cleanup 先後回報錯誤，已觀察到的 Vulkan device loss 維持其 recovery 優先權。
 
 `has_pending_inputs()` 同時涵蓋 copy-pending 與 Map-pending records。析構保留 fail-closed invariant：仍有 producer obligation 時會終止程序，以維持 checkout 與原生資源的安全生命週期。
