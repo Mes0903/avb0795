@@ -4,6 +4,7 @@
 #include "render/detail/vulkan_renderer_impl.hpp"
 #include "avb/diagnostics/performance_report.hpp"
 
+#include "render/cpu_row_copy.hpp"
 #include "render/graphics_retry_policy.hpp"
 #include "render/render_math.hpp"
 #include "render/vulkan_input.hpp"
@@ -16,7 +17,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <expected>
 #include <limits>
 #include <memory>
@@ -1054,10 +1054,8 @@ namespace avb::render {
   {
     auto *const matched = find_slot(key, SlotPhase::ProducerPending);
     const auto byte_count = checked_pixel_bytes(capture_allocation_);
-    if (matched == nullptr || !ring_ready_ || !byte_count || !checked_pixel_bytes(rows.content) ||
+    if (matched == nullptr || !ring_ready_ || !byte_count ||
         rows.allocation != capture_allocation_ ||
-        rows.content.width > rows.allocation.width ||
-        rows.content.height > rows.allocation.height ||
         matched->external_image.image != VK_NULL_HANDLE ||
         matched->upload_buffer == VK_NULL_HANDLE ||
         matched->upload_memory == VK_NULL_HANDLE ||
@@ -1069,30 +1067,17 @@ namespace avb::render {
       return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
     }
     auto &slot = *matched;
-    const auto row_bytes = static_cast<std::size_t>(rows.content.width) * bytes_per_pixel;
-    const auto last_row = static_cast<std::size_t>(rows.content.height - 1);
-    constexpr auto maximum = (std::numeric_limits<std::size_t>::max)();
-    if (rows.bytes.data() == nullptr || rows.row_pitch < row_bytes ||
-        (last_row != 0 && rows.row_pitch > (maximum - row_bytes) / last_row) ||
-        rows.bytes.size() < last_row * rows.row_pitch + row_bytes) {
+    // Define the full upload allocation with one content copy and padding-only
+    // clearing. The synchronous helper borrows both mappings; Vulkan flush and
+    // reservation publication remain owned by this input-completion operation.
+    const auto packed = copy_bgra_rows(
+      rows, {static_cast<std::byte *>(slot.mapped_upload),
+             static_cast<std::size_t>(*byte_count)});
+    if (!packed) {
       return std::unexpected{graphics_error(core::AppErrorCode::RuntimeStateLost)};
     }
-    // Upload commands copy the entire allocation, but capture only defines the
-    // content rectangle. Clear the remaining bytes and translate producer's row pitch
-    // into the tightly packed allocation stride expected by Vulkan's buffer copy.
-    std::memset(slot.mapped_upload, 0, static_cast<std::size_t>(*byte_count));
-    observe_performance(PerformanceCounter::CpuClearBytes, *byte_count);
-    auto *const destination = static_cast<std::byte *>(slot.mapped_upload);
-    const auto *const source = rows.bytes.data();
-    const auto destination_pitch =
-      static_cast<std::size_t>(capture_allocation_.width) * bytes_per_pixel;
-    for (std::uint32_t row = 0; row < rows.content.height; ++row) {
-      std::memcpy(destination + static_cast<std::size_t>(row) * destination_pitch,
-                  source + static_cast<std::size_t>(row) * rows.row_pitch,
-                  row_bytes);
-    }
-
-    observe_performance(PerformanceCounter::CpuCopyBytes, static_cast<std::uint64_t>(row_bytes) * rows.content.height);
+    observe_performance(PerformanceCounter::CpuCopyBytes, packed->copied_bytes);
+    observe_performance(PerformanceCounter::CpuClearBytes, packed->cleared_bytes);
 
     if (!slot.upload_coherent) {
       // Flush whole noncoherent atoms. If rounding would overflow or extend past

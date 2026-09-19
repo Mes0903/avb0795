@@ -61,7 +61,7 @@ Controller 與 replica 的 counters、metadata、high-water marks 各自分組�
 
 Bytes 指標描述 API 請求範圍與 CPU 寫入量；硬體實際 memory traffic 需要 GPU profiler 的計數。Intake timestamp 描述本程式接收事件；present retirement 描述 host 可見的完成證據。來源產生影像至螢幕發光的端到端時間屬另一種量測邊界。
 
-目前 CPU 路徑每幀清除完整 allocation。令 `A = allocation.width × allocation.height × 4`，`C = content.width × content.height × 4`，本階段應觀察 copy=`C`、clear=`A`、upload=`A`。後續 padding 最佳化的驗收目標是 clear=`A-C`。Crop 維持來源內容座標與 shader UV 取樣，因此 crop 案例仍呈現完整 transport 成本。
+目前 CPU 路徑逐列複製 content，並清除右側與下方 padding。令 `A = allocation.width × allocation.height × 4`，`C = content.width × content.height × 4`，應觀察 copy=`C`、clear=`A-C`、upload=`A`。完整尺寸的 content 具有 `C=A`，該幀 CPU clear 為 0；來源縮小時，新增 padding 沿本幀尺寸清零。Byte 數學與 owner 接線見 [CPU rows](../architecture/shared-vulkan-renderer.md#cpu-rows內容複製與-padding-定義)。Crop 維持來源內容座標與 shader UV 取樣，因此 crop 案例仍呈現完整 transport 成本。
 
 ## 固定比較集合
 
@@ -127,4 +127,4 @@ ImGui 的 scalar widget patch 將 temporary text export 綁定至當次 active e
 
 ## 本階段驗證範圍
 
-Task 1 建立觀測工具與基線；Task 2 接入 UI cadence 與 input continuity。同步物件重用與 CPU padding 精簡依後續 task 推進。效能比較的結論以對應的實測報告與 manifest 為依據；程式建置、純政策測試、互動驗收、硬體擷取測試與 benchmark 分別記錄。
+Task 1 建立觀測工具與基線；Task 2 接入 UI cadence 與 input continuity；Task 3 整理 shared renderer 邊界；Tasks 4–5 重用 replica 與 controller 同步物件；Task 6 依 content 與 allocation 的差集清除 CPU padding。效能比較的結論以對應的實測報告與 manifest 為依據；程式建置、純政策測試、互動驗收、硬體擷取測試與 benchmark 分別記錄。

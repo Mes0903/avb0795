@@ -85,6 +85,7 @@ if(WIN32)
   # configuration enables graphics on Windows; the renderer itself has a separate
   # source/link boundary from native capture and the Windows composition facade.
   add_library(avb0795_vulkan_renderer
+    ${PROJECT_SOURCE_DIR}/render/cpu_row_copy.cpp
     ${PROJECT_SOURCE_DIR}/render/graphics_retry_policy.cpp
     ${PROJECT_SOURCE_DIR}/render/render_math.cpp
     ${PROJECT_SOURCE_DIR}/render/vulkan_device.cpp

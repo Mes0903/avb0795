@@ -99,6 +99,44 @@ sequenceDiagram
 
 Vulkan result 保存 renderer 本身的錯誤與 loss facts；facade 保存 producer 錯誤與獨立 loss facts。Windows 的合併結果同時保存 Vulkan loss 與 D3 removal，device recovery event 使用既有 Vulkan 優先順序。Deadline 取兩個 owners 的最早時間，供主迴圈持續推進待處理工作。
 
+## CPU rows：內容複製與 padding 定義
+
+```mermaid
+flowchart LR
+  Map[Bridge Map scope<br/>source bytes / row pitch] --> Rows[CpuRowsView<br/>content + allocation]
+  Rows --> Check[copy_bgra_rows<br/>extent / arithmetic / pitch / span]
+  Check --> Content[逐列複製 content pixels]
+  Content --> Padding[清除每列右側與下方 allocation rows]
+  Padding --> Stats[RowCopyStats<br/>copied C / cleared A-C]
+  Padding --> Flush[Renderer noncoherent flush]
+  Flush --> Ready[CpuReady publication]
+  Ready --> Upload[Vulkan allocation-sized upload A]
+```
+
+為了讓整張 upload allocation 都有明確像素，CPU transport 需要同時保存本幀 content 與 allocation 的尺寸。Content 描述來源本次提供的有效矩形；allocation 描述 image 與 upload buffer 的容量。來源縮小時，右側與下方 padding 需重新填為零，讓後續 sampling 得到本幀定義的內容。
+
+[`copy_bgra_rows`](../../render/cpu_row_copy.hpp) 接收 producer 在 Map scope 內借出的 `CpuRowsView`，以及 renderer 自有的 tight upload span。BGRA8 每 pixel 為 4 bytes。若 content 為 `w × h`、allocation 為 `W × H`、source row pitch 為 `p`，則：
+
+- Content bytes：`C = 4wh`。
+- Allocation bytes：`A = 4WH`，destination pitch 為 `4W`。
+- Source 最小有效 span：`(h - 1)p + 4w`；最後一列的像素後方可接任意 producer padding。
+- 此次寫入量：copy `C`、clear `A - C`，Vulkan upload 保持 `A`。
+
+為了使 layout error 保留 destination 原值，helper 先驗證正尺寸、content containment、每個乘加的 `size_t` 可表示性、pitch 與兩個 span 的範圍，再進入寫入階段。目的端 span 精確對應 `A`；兩份 storage 由各自 owner 維持存活與獨立。核心操作為：
+
+```cpp
+// Arithmetic and span validation precede this loop.
+for (std::size_t y = 0; y < content_height; ++y) {
+  auto* row = destination.data() + y * destination_pitch;
+  std::memcpy(row, source.bytes.data() + y * source.row_pitch, row_bytes);
+  // Clear right-hand padding, followed by rows below the content rectangle.
+}
+```
+
+例如 2×1 content 放入 3×2 allocation，copy 為 8 bytes，clear 為 16 bytes；兩者合計覆蓋 24-byte allocation。Full-size content 的 `C = A`，清除量為 0。相同 allocation 內的來源縮小仍會覆蓋全部 padding。
+
+Helper 的責任是同步 packing 與 byte accounting。Bridge 的局部 Map owner 維持來源借用；renderer 保存 upload mapping，接續執行 atom-aligned noncoherent flush，成功後發布 `CpuReady`。Flush error 沿既有 typed error 與 reservation discard 路徑處理。Retained redraw 使用已上傳 image，沿用該 source content 的既有生命週期。
+
 ## Submission、presentation 與 retained redraw
 
 ```mermaid
