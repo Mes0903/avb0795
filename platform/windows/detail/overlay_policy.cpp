@@ -5,6 +5,7 @@
 #include "platform/windows/detail/overlay_policy.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -248,6 +249,67 @@ namespace avb::platform::windows::detail {
             .top = vertical.first,
             .right = horizontal.last,
             .bottom = vertical.last};
+  }
+
+  std::optional<NativeRect> wheel_resized_rect(
+    const NativeRect client_screen, const core::Extent source, const FrameInsets insets,
+    const NativeRect work_area, const std::uint32_t dpi, const int notches,
+    const int step_percent) noexcept
+  {
+    constexpr auto maximum_dimension = (std::numeric_limits<int>::max)();
+    const auto client_width = static_cast<std::int64_t>(client_screen.right) - client_screen.left;
+    const auto client_height = static_cast<std::int64_t>(client_screen.bottom) - client_screen.top;
+    const auto work_width = static_cast<std::int64_t>(work_area.right) - work_area.left;
+    const auto work_height = static_cast<std::int64_t>(work_area.bottom) - work_area.top;
+    const auto horizontal_frame = static_cast<std::int64_t>(insets.left) + insets.right;
+    const auto vertical_frame = static_cast<std::int64_t>(insets.top) + insets.bottom;
+    if (source.width == 0 || source.height == 0 || dpi == 0 ||
+        !core::valid_wheel_zoom_percent(step_percent) ||
+        insets.left < 0 || insets.top < 0 || insets.right < 0 || insets.bottom < 0 ||
+        client_width <= 0 || client_height <= 0 || work_width <= 0 || work_height <= 0 ||
+        client_width + horizontal_frame > maximum_dimension ||
+        client_height + vertical_frame > maximum_dimension ||
+        work_width > maximum_dimension || work_height > maximum_dimension ||
+        horizontal_frame >= work_width || vertical_frame >= work_height) {
+      return std::nullopt;
+    }
+
+    const auto available_width = work_width - horizontal_frame;
+    const auto available_height = work_height - vertical_frame;
+    const double ratio = static_cast<double>(source.width) / source.height;
+    const double upper_width = (std::min)(static_cast<double>(available_width),
+                                         available_height * ratio);
+    constexpr double default_dpi{96.0};
+    const double lower_width = (std::min)(upper_width,
+      (std::max)(160.0 * dpi / default_dpi, 90.0 * dpi / default_dpi * ratio));
+    const double factor = std::pow(1.0 + step_percent / 100.0, notches);
+    // Positive overflow and negative underflow have the same bounded direction
+    // as a finite scale. Clamp before converting any floating-point dimensions.
+    const double width = std::isfinite(factor)
+      ? (std::clamp)(client_width * factor, lower_width, upper_width)
+      : upper_width;
+    const auto rounded_width = static_cast<std::int64_t>((std::clamp)(
+      std::round(width), 1.0, static_cast<double>(available_width)));
+    const auto rounded_height = static_cast<std::int64_t>((std::clamp)(
+      std::round(width / ratio), 1.0, static_cast<double>(available_height)));
+    const auto outer_width = rounded_width + horizontal_frame;
+    const auto outer_height = rounded_height + vertical_frame;
+
+    // Widen both the center and placement arithmetic: valid screen coordinates
+    // can straddle zero or sit at either signed native-coordinate limit.
+    const double center_x = (static_cast<std::int64_t>(client_screen.left) + client_screen.right) / 2.0;
+    const double center_y = (static_cast<std::int64_t>(client_screen.top) + client_screen.bottom) / 2.0;
+    const auto left = (std::clamp)(
+      static_cast<std::int64_t>(std::llround(center_x - rounded_width / 2.0 - insets.left)),
+      static_cast<std::int64_t>(work_area.left),
+      static_cast<std::int64_t>(work_area.right) - outer_width);
+    const auto top = (std::clamp)(
+      static_cast<std::int64_t>(std::llround(center_y - rounded_height / 2.0 - insets.top)),
+      static_cast<std::int64_t>(work_area.top),
+      static_cast<std::int64_t>(work_area.bottom) - outer_height);
+    return NativeRect{static_cast<std::int32_t>(left), static_cast<std::int32_t>(top),
+                      static_cast<std::int32_t>(left + outer_width),
+                      static_cast<std::int32_t>(top + outer_height)};
   }
 
 }    // namespace avb::platform::windows::detail

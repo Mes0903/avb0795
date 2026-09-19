@@ -8,6 +8,7 @@
 #include "avb/core/types.hpp"
 
 #include <cstdint>
+#include <optional>
 
 namespace avb::platform::windows::detail {
 
@@ -122,6 +123,13 @@ namespace avb::platform::windows::detail {
   /// Keep restored border geometry within the selected monitor's work area.
   [[nodiscard]] NativeRect
   clamp_outer_rect_to_work_area(NativeRect outer, NativeRect work_area) noexcept;
+
+  /// @brief Resize around the client center, preserving the effective source aspect.
+  /// The DPI-scaled minimum yields to work-area capacity; invalid native inputs
+  /// return no proposal. The result includes frame insets and fits SetWindowPos.
+  [[nodiscard]] std::optional<NativeRect> wheel_resized_rect(
+    NativeRect client_screen, core::Extent source, FrameInsets insets,
+    NativeRect work_area, std::uint32_t dpi, int notches, int step_percent) noexcept;
 
 }    // namespace avb::platform::windows::detail
 

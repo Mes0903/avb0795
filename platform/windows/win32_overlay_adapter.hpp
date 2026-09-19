@@ -148,6 +148,8 @@ namespace avb::platform::windows {
     [[nodiscard]] core::BorderPreference border_preference() const noexcept;
     /// Update the aspect constraint from the runtime's effective presentation extent.
     void update_source_extent(core::Extent source_extent) noexcept;
+    /// Install an accepted 1..25 percent wheel step, clearing partial input on change.
+    void set_wheel_zoom_percent(int percent) noexcept;
 
   private:
     static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM word_parameter, LPARAM long_parameter) noexcept;
@@ -167,6 +169,8 @@ namespace avb::platform::windows {
     WNDPROC saved_window_proc_{};
     core::OverlayMode mode_{core::OverlayMode::Editable};
     int opacity_percent_{100};
+    int wheel_zoom_percent_{core::default_wheel_zoom_percent};
+    int wheel_remainder_{};
     core::BorderPreference border_{core::BorderPreference::Bordered};
     core::Extent source_extent_{};
     std::uint32_t dpi_{96};

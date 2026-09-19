@@ -257,6 +257,7 @@ namespace avb::platform::windows {
     enum class Kind { Result,
                       Sizing,
                       Dpi,
+                      Wheel,
                       RegionBegin,
                       RegionMove,
                       RegionEnd,
@@ -272,6 +273,8 @@ namespace avb::platform::windows {
     std::uint32_t dpi{};
     detail::NativePoint point;
     HCURSOR cursor{};
+    int wheel_remainder{};
+    bool wheel_resize{};
   };
 
   struct Win32OverlayAdapter::CallbackOperations final {
@@ -538,9 +541,20 @@ namespace avb::platform::windows {
     if (!changed) {
       return std::unexpected{changed.error()};
     }
+    if (mode_ != mode) {
+      wheel_remainder_ = 0;
+    }
     mode_ = mode;
     opacity_percent_ = opacity_percent;
     return {};
+  }
+
+  void Win32OverlayAdapter::set_wheel_zoom_percent(const int percent) noexcept
+  {
+    if (core::valid_wheel_zoom_percent(percent) && percent != wheel_zoom_percent_) {
+      wheel_zoom_percent_ = percent;
+      wheel_remainder_ = 0;
+    }
   }
 
   core::OverlayMode Win32OverlayAdapter::mode() const noexcept { return mode_; }
@@ -686,6 +700,9 @@ namespace avb::platform::windows {
       cancel_region_selection();
       return;
     }
+    if (!region_selection_active_) {
+      wheel_remainder_ = 0;
+    }
     region_selection_active_ = true;
     region_content_rect_ = content_rect;
   }
@@ -741,6 +758,39 @@ namespace avb::platform::windows {
                                        const LPARAM long_parameter)
   {
     using Kind = PreparedWindowMessage::Kind;
+    if (message == WM_MOUSEWHEEL && mode_ == core::OverlayMode::Editable &&
+        !region_selection_active_) {
+      const auto geometry = snapshot_client_geometry();
+      if (!geometry) {
+        return std::nullopt;
+      }
+      const auto client = geometry->client_screen_rect;
+      const detail::NativePoint cursor{GET_X_LPARAM(long_parameter), GET_Y_LPARAM(long_parameter)};
+      if (cursor.x < client.left || cursor.x >= client.right ||
+          cursor.y < client.top || cursor.y >= client.bottom) {
+        return std::nullopt;
+      }
+      const auto insets = frame_insets(window_, dpi_);
+      const auto work_area = nearest_work_area(window_);
+      if (!insets || !work_area) {
+        return std::nullopt;
+      }
+      // The cached remainder is smaller than WHEEL_DELTA and the message delta
+      // is signed 16-bit, so accumulation cannot overflow int.
+      const int total = wheel_remainder_ + GET_WHEEL_DELTA_WPARAM(word_parameter);
+      const int notches = total / WHEEL_DELTA;
+      const int remainder = total % WHEEL_DELTA;
+      if (notches == 0) {
+        return PreparedWindowMessage{.kind = Kind::Wheel, .wheel_remainder = remainder};
+      }
+      const auto resized = detail::wheel_resized_rect(client, source_extent_, *insets,
+        *work_area, dpi_, notches, wheel_zoom_percent_);
+      if (!resized) {
+        return std::nullopt;
+      }
+      return PreparedWindowMessage{.kind = Kind::Wheel, .rect = *resized,
+                                    .wheel_remainder = remainder, .wheel_resize = true};
+    }
     if (region_selection_active_) {
       if (message == WM_SETFOCUS) {
         return PreparedWindowMessage{.kind = Kind::RegionFocus};
@@ -830,6 +880,15 @@ namespace avb::platform::windows {
     const PreparedWindowMessage &message) noexcept
   {
     switch (message.kind) {
+    case PreparedWindowMessage::Kind::Wheel:
+      if (message.wheel_resize &&
+          SetWindowPos(window_, nullptr, message.rect.left, message.rect.top,
+            message.rect.right - message.rect.left, message.rect.bottom - message.rect.top,
+            SWP_NOACTIVATE | SWP_NOZORDER) == FALSE) {
+        return std::nullopt;
+      }
+      wheel_remainder_ = message.wheel_remainder;
+      return 0;
     case PreparedWindowMessage::Kind::RegionBegin:
       region_gesture_ = OverlayRegionGesture{message.point, message.point};
       static_cast<void>(SetCapture(window_));

@@ -95,7 +95,7 @@ namespace avb::platform::windows {
                                 const core::ReplicaSettings &settings)
   {
     try {
-      if (settings.selecting_region) {
+      if (settings.selecting_region || !core::valid_wheel_zoom_percent(settings.wheel_zoom_percent)) {
         return std::unexpected{core::AppError{.code = core::AppErrorCode::InvalidValue}};
       }
       const auto overlay_extent = initial_overlay_extent(source.extent);
@@ -130,6 +130,7 @@ namespace avb::platform::windows {
       if (!adapter) {
         return std::unexpected{factory_error(adapter.error())};
       }
+      (*adapter)->set_wheel_zoom_percent(settings.wheel_zoom_percent);
 
       std::unique_ptr<WindowsReplicaRuntime> runtime;
       AttachmentCleanupOperations cleanup{.overlay = overlay->get(),

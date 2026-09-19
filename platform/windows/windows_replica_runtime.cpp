@@ -249,6 +249,7 @@ namespace avb::platform::windows {
     // FPS scheduling/in-memory settings change only after native settings have verified.
     void commit_scheduler() noexcept
     {
+      owner.adapter_->set_wheel_zoom_percent(requested.wheel_zoom_percent);
       if (requested.fps_cap != owner.settings_.fps_cap) {
         owner.scheduler_ = core::FrameScheduler{requested.fps_cap, now};
       }
@@ -344,7 +345,8 @@ namespace avb::platform::windows {
   std::expected<void, core::AppError>
   WindowsReplicaRuntime::apply(const core::ReplicaSettings &settings) noexcept
   {
-    if (settings.opacity_percent < 0 || settings.opacity_percent > 100) {
+    if (settings.opacity_percent < 0 || settings.opacity_percent > 100 ||
+        !core::valid_wheel_zoom_percent(settings.wheel_zoom_percent)) {
       return std::unexpected{core::AppError{.code = core::AppErrorCode::InvalidValue}};
     }
     if (stop_requested_ || stopped_ || !overlay_ || !adapter_) {
