@@ -67,6 +67,19 @@ namespace avb::i18n {
        "ドラッグで調整するか、ダブルクリック／Ctrl＋クリックで割合を入力します。"
        "0% は非表示、100% は完全に不透明です。枠とタイトルバーを含むレプリカ"
        "ウィンドウ全体に適用し、編集の終了時に保存します。"},
+      {TextId::WheelZoom, "Wheel zoom step", "滾輪縮放步幅", "ホイール拡大率"},
+      {TextId::WheelZoomHelp,
+       "Drag to adjust, or Ctrl+click to enter a percentage from 1% to 25%. "
+       "The default is 5% per notch. In Editable mode, the wheel resizes the "
+       "replica around its center; downward scrolling reverses the scale. "
+       "Region selection keeps the current size. Saved when editing ends.",
+       "拖曳調整，或 Ctrl＋點擊輸入 1%～25% 的百分比。預設每格 5%。"
+       "可編輯模式下，滾輪以複本中心縮放視窗；向下滾動使用反向倍率。"
+       "框選期間維持目前尺寸。編輯結束時儲存。",
+       "ドラッグで調整するか、Ctrl＋クリックで 1%～25% の割合を入力します。"
+       "既定値は 1 目盛りあたり 5% です。編集可能モードでは、ホイールで"
+       "レプリカの中心を基準に拡大・縮小します。下方向は逆の倍率を使います。"
+       "範囲選択中は現在のサイズを保ち、編集の終了時に保存します。"},
       {TextId::SourceRegion, "Source region", "來源選區", "ソース範囲"},
       {TextId::SourceContentSize, "Source pixels", "來源像素尺寸", "ソースのピクセルサイズ"},
       {TextId::SelectRegion, "Select region", "框選範圍", "範囲を選択"},

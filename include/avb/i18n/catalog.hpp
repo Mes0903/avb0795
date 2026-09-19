@@ -45,6 +45,8 @@ namespace avb::i18n {
     PassThrough,
     Opacity,
     OpacityHelp,
+    WheelZoom,
+    WheelZoomHelp,
     SourceRegion,
     SourceContentSize,
     SelectRegion,

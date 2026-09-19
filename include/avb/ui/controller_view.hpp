@@ -61,12 +61,13 @@ namespace avb::ui {
     void cancel_hotkey_recording() noexcept;
 
     /// @brief Report an ongoing local gesture that benefits from interactive cadence.
-    /// Recorder release barriers and opacity drafts persist between frames. This
+    /// Recorder release barriers and numeric drafts persist between frames. This
     /// context-free observation lets the host retain responsive frame timing while
     /// the view continues to own those transient interaction values.
     [[nodiscard]] bool has_active_interaction() const noexcept
     {
-      return hotkey_recording_.has_value() || opacity_editing_.has_value();
+      return hotkey_recording_.has_value() || opacity_editing_.has_value() ||
+             wheel_zoom_editing_.has_value();
     }
 
   private:
@@ -76,6 +77,12 @@ namespace avb::ui {
                                 const CommandSink &command_sink);
     void render_region(const app::ControllerViewState &state,
                        const CommandSink &command_sink);
+    /// @brief Collect one wheel-step gesture and submit its completed value.
+    /// The UI owns the temporary percentage; the orchestrator owns admission,
+    /// runtime application and preference persistence. Widget identity includes
+    /// the session and availability so replacement snapshots retire old input.
+    void render_wheel_zoom(const app::ControllerViewState &state,
+                           const CommandSink &command_sink);
     /// Short-lived UI state tied to the snapshot that opened the modal.
     struct HotkeyRecording {
       core::SessionId session_id;
@@ -93,6 +100,17 @@ namespace avb::ui {
       bool preview_emitted{};
     };
     std::optional<OpacityEditing> opacity_editing_;
+    /// @brief Retain a wheel-step edit through visible and hidden input frames.
+    /// The originating token binds the draft to one session. `changed` records
+    /// the pending delivery obligation across hidden frames that consume ImGui's
+    /// deactivation notification. Release submits one value command; session or
+    /// availability changes discard the draft before the next widget is rendered.
+    struct WheelZoomEditing {
+      core::SessionId session_id;
+      int percent{core::default_wheel_zoom_percent};
+      bool changed{};
+    };
+    std::optional<WheelZoomEditing> wheel_zoom_editing_;
     /// Owned coordinate draft, discarded when any source/presentation identity changes.
     struct RegionDraft {
       core::SessionId session_id;

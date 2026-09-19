@@ -168,6 +168,11 @@ namespace avb::ui {
          !state.controls.replace_hotkey.enabled)) {
       cancel_hotkey_recording();
     }
+    if (wheel_zoom_editing_ &&
+        (wheel_zoom_editing_->session_id != state.session_id ||
+         !state.controls.wheel_zoom.enabled)) {
+      wheel_zoom_editing_.reset();
+    }
     const auto language = state.effective_language;
     const auto window_label = widget_label(
       i18n::TextId::ControllerTitle, "avb0795 Controller", language);
@@ -287,7 +292,8 @@ namespace avb::ui {
     // occupies independent columns. Native diagnostics remain presentation values;
     // the emitted command retains the opaque catalog ID and session generation.
     constexpr auto table_flags = ImGuiTableFlags_RowBg |
-      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersH;
+      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersH |
+      ImGuiTableFlags_Resizable;
     if (ImGui::BeginTable("sources_table", 3, table_flags)) {
       ImGui::TableSetupColumn(i18n::text(i18n::TextId::SourceType, language).data(),
                               ImGuiTableColumnFlags_WidthFixed);
@@ -416,6 +422,8 @@ namespace avb::ui {
     }
     disabled_explanation(state.controls.opacity);
 
+    render_wheel_zoom(state, command_sink);
+
     render_region(state, command_sink);
 
     ImGui::SeparatorText(
@@ -506,6 +514,56 @@ namespace avb::ui {
                                                 : i18n::TextId::Unconfirmed,
                  language));
 
+  }
+
+  void ControllerView::render_wheel_zoom(const app::ControllerViewState &state,
+                                        const CommandSink &command_sink)
+  {
+    const auto &control = state.controls.wheel_zoom;
+    // Session and admission form this editor's identity. A replacement session
+    // or disabled control gives ImGui a fresh item, retiring the old text buffer
+    // together with the discarded draft. Language changes retain the same ID.
+    const auto identity = "wheel_zoom_" + std::to_string(state.session_id.value) +
+      (control.enabled ? "_enabled" : "_disabled");
+    int percent = wheel_zoom_editing_ ? wheel_zoom_editing_->percent
+                                     : state.settings.wheel_zoom_percent;
+    ImGui::BeginDisabled(!control.enabled);
+    ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true);
+    const bool changed = ImGui::SliderInt(
+      widget_label(i18n::TextId::WheelZoom, identity.c_str(),
+                   state.effective_language).c_str(),
+      &percent, 1, 25, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::PopItemFlag();
+    const bool active = ImGui::IsItemActive();
+    if (control.enabled && !wheel_zoom_editing_ &&
+        (ImGui::IsItemActivated() || changed)) {
+      wheel_zoom_editing_ = WheelZoomEditing{
+        .session_id = state.session_id, .percent = percent};
+    }
+    ImGui::EndDisabled();
+    if (wheel_zoom_editing_) {
+      wheel_zoom_editing_->percent = percent;
+      wheel_zoom_editing_->changed |= changed;
+      // Hidden synchronization may consume the single-frame deactivation edge.
+      // The stored obligation survives until this editor is rendered inactive,
+      // preserving one command per gesture through any number of hidden frames.
+      if (!active) {
+        emit_if(wheel_zoom_editing_->changed, command_sink,
+                app::SetWheelZoomPercent{wheel_zoom_editing_->session_id, percent});
+        wheel_zoom_editing_.reset();
+      }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort |
+                             ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::BeginTooltip();
+      ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0F);
+      literal_text(i18n::text(i18n::TextId::WheelZoomHelp, state.effective_language));
+      ImGui::PopTextWrapPos();
+      ImGui::EndTooltip();
+    }
+    disabled_explanation(control);
   }
 
   void ControllerView::render_region(const app::ControllerViewState &state,
