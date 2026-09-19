@@ -59,12 +59,12 @@ namespace avb::i18n {
       {TextId::PassThrough, "Pass-through", "穿透", "パススルー"},
       {TextId::Opacity, "Opacity", "不透明度", "不透明度"},
       {TextId::OpacityHelp,
-       "Drag to adjust, or double-click / Ctrl+click to enter a percentage. "
+       "Drag to adjust, or Ctrl+click to enter a percentage. "
        "0% is invisible; 100% is fully opaque. Applies to the entire replica "
        "window, including its border and title bar. Saved when editing ends.",
-       "拖曳調整，或按兩下／Ctrl＋點擊輸入百分比。0% 完全不可見，100% 完全不透明。"
+       "拖曳調整，或 Ctrl＋點擊輸入百分比。0% 完全不可見，100% 完全不透明。"
        "套用至整個複本視窗，包含邊框與標題列；編輯結束時儲存。",
-       "ドラッグで調整するか、ダブルクリック／Ctrl＋クリックで割合を入力します。"
+       "ドラッグで調整するか、Ctrl＋クリックで割合を入力します。"
        "0% は非表示、100% は完全に不透明です。枠とタイトルバーを含むレプリカ"
        "ウィンドウ全体に適用し、編集の終了時に保存します。"},
       {TextId::WheelZoom, "Wheel zoom step", "滾輪縮放步幅", "ホイール拡大率"},
@@ -84,23 +84,16 @@ namespace avb::i18n {
       {TextId::SourceContentSize, "Source pixels", "來源像素尺寸", "ソースのピクセルサイズ"},
       {TextId::SelectRegion, "Select region", "框選範圍", "範囲を選択"},
       {TextId::CancelRegion, "Cancel selection", "取消框選", "範囲選択をキャンセル"},
-      {TextId::ApplyRegion, "Apply region", "套用範圍", "範囲を適用"},
       {TextId::ResetRegion, "Restore full source", "還原全畫面", "全体表示に戻す"},
-      {TextId::RegionX, "X", "X", "X"},
-      {TextId::RegionY, "Y", "Y", "Y"},
-      {TextId::RegionWidth, "Width", "寬度", "幅"},
-      {TextId::RegionHeight, "Height", "高度", "高さ"},
       {TextId::RegionHelp,
-       "Drag on the replica to select a region. Esc or Cancel restores the previous region. "
-       "Coordinates use source pixels from the top-left corner; apply all four values together.",
-       "在複本上拖曳框選範圍；Esc 或取消會恢復前次選區。座標以來源左上角為原點，"
-       "單位為來源像素；四個數值一起套用。",
-       "レプリカ上でドラッグして範囲を選択します。Esc またはキャンセルで前の範囲に戻ります。"
-       "座標はソース左上からのピクセル値です。4 つの値をまとめて適用します。"},
+       "Choose Select region, then drag on the replica to select a region. "
+       "Esc or Cancel restores the previous region. Restore full source shows the entire source.",
+       "按下「框選範圍」，再於複本上拖曳選取範圍。Esc 或「取消框選」會恢復前次選區；"
+       "「還原全畫面」會顯示完整來源。",
+       "「範囲を選択」を押してから、レプリカ上でドラッグして範囲を選択します。"
+       "Esc またはキャンセルで前の範囲に戻ります。「全体表示に戻す」でソース全体を表示します。"},
       {TextId::RegionAwaitingContent, "Available after the source is presented",
        "來源畫面顯示後即可操作", "ソースの表示後に操作できます"},
-      {TextId::RegionInvalid, "Enter a positive region within the source bounds",
-       "請輸入來源範圍內、寬高大於零的選區", "ソース内で幅と高さが正の範囲を入力してください"},
       {TextId::FrameRate, "Frame rate", "畫面更新率", "フレームレート"},
       {TextId::Fps30, "30 FPS", "30 FPS", "30 FPS"},
       {TextId::Fps60, "60 FPS", "60 FPS", "60 FPS"},

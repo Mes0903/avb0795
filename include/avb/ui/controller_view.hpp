@@ -7,9 +7,7 @@
 #include "avb/app/controller_view_state.hpp"
 
 #include <functional>
-#include <array>
 #include <optional>
-#include <string>
 
 namespace avb::ui {
 
@@ -111,16 +109,6 @@ namespace avb::ui {
       bool changed{};
     };
     std::optional<WheelZoomEditing> wheel_zoom_editing_;
-    /// Owned coordinate draft, discarded when any source/presentation identity changes.
-    struct RegionDraft {
-      core::SessionId session_id;
-      core::SourceId source_id;
-      core::Extent extent;
-      std::optional<core::PixelRegion> accepted_region;
-      std::array<int, 4> coordinates{};
-      std::string widget_scope;
-    };
-    std::optional<RegionDraft> region_draft_;
   };
 
 }    // namespace avb::ui

@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -383,9 +382,9 @@ namespace avb::ui {
     // typing keeps that value across arbitrarily many hidden input-only frames;
     // the gesture-ending command remains the persistence boundary.
     ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true);
-    const bool opacity_changed = ImGui::DragInt(
+    const bool opacity_changed = ImGui::SliderInt(
       widget_label(i18n::TextId::Opacity, "opacity", language).c_str(),
-      &opacity, 1.0F, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+      &opacity, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
     ImGui::PopItemFlag();
     const bool opacity_active = ImGui::IsItemActive();
     const bool opacity_finished = ImGui::IsItemDeactivatedAfterEdit();
@@ -572,7 +571,6 @@ namespace avb::ui {
     const auto language = state.effective_language;
     ImGui::SeparatorText(i18n::text(i18n::TextId::SourceRegion, language).data());
     if (!state.selected_source_id || !state.content_extent) {
-      region_draft_.reset();
       literal_text(i18n::text(i18n::TextId::RegionAwaitingContent, language));
       if (state.selected_source_id) {
         emit_if(button(widget_label(i18n::TextId::CancelRegion, "cancel_region", language).c_str(),
@@ -584,28 +582,11 @@ namespace avb::ui {
 
     const auto extent = *state.content_extent;
     const auto &source = *state.selected_source_id;
-    constexpr auto max_coordinate = static_cast<std::uint32_t>(std::numeric_limits<int>::max());
-    if (!region_draft_ || region_draft_->session_id != state.session_id ||
-        region_draft_->source_id != source || region_draft_->extent != extent ||
-        region_draft_->accepted_region != state.settings.region) {
-      const auto region = state.settings.region.value_or(core::PixelRegion{0, 0, extent.width, extent.height});
-      region_draft_ = RegionDraft{
-        .session_id = state.session_id,
-        .source_id = source,
-        .extent = extent,
-        .accepted_region = state.settings.region,
-        .coordinates = {static_cast<int>(std::min(region.x, max_coordinate)),
-                        static_cast<int>(std::min(region.y, max_coordinate)),
-                        static_cast<int>(std::min(region.width, max_coordinate)),
-                        static_cast<int>(std::min(region.height, max_coordinate))},
-        .widget_scope = std::to_string(state.session_id.value) + ":" + source.value + ":" +
-          std::to_string(extent.width) + "x" + std::to_string(extent.height),
-      };
-    }
-    auto &draft = *region_draft_;
-    // Scope changes detach any active ImGui text buffer from the old source.
-    // Language changes keep the same IDs and preserve the current editing gesture.
-    ImGui::PushID(draft.widget_scope.c_str());
+    const auto widget_scope = std::to_string(state.session_id.value) + ":" + source.value + ":" +
+      std::to_string(extent.width) + "x" + std::to_string(extent.height);
+    // Source/presentation changes retire stale actions. Localized captions keep
+    // stable IDs while the same session, source and extent remain selected.
+    ImGui::PushID(widget_scope.c_str());
     ImGui::Text("%s: %u x %u", i18n::text(i18n::TextId::SourceContentSize, language).data(),
                 extent.width, extent.height);
     emit_if(button(widget_label(i18n::TextId::SelectRegion, "select_region", language).c_str(),
@@ -620,39 +601,6 @@ namespace avb::ui {
     literal_text(i18n::text(i18n::TextId::RegionHelp, language));
     ImGui::PopTextWrapPos();
 
-    const bool numeric_enabled = state.controls.region.enabled &&
-      extent.width <= max_coordinate && extent.height <= max_coordinate;
-    ImGui::BeginDisabled(!numeric_enabled);
-    constexpr std::array labels{i18n::TextId::RegionX, i18n::TextId::RegionY,
-                               i18n::TextId::RegionWidth, i18n::TextId::RegionHeight};
-    constexpr std::array ids{"region_x", "region_y", "region_width", "region_height"};
-    // Keep parsed coordinates in the existing source-scoped draft while typing.
-    // The Apply action below remains the command boundary for the whole tuple.
-    ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true);
-    for (std::size_t index = 0; index < draft.coordinates.size(); ++index) {
-      ImGui::DragInt(widget_label(labels[index], ids[index], language).c_str(),
-                     &draft.coordinates[index], 1.0F, 0, std::numeric_limits<int>::max(),
-                     "%d", ImGuiSliderFlags_AlwaysClamp);
-    }
-    ImGui::PopItemFlag();
-    ImGui::EndDisabled();
-    std::optional<core::PixelRegion> candidate;
-    const auto &values = draft.coordinates;
-    if (numeric_enabled && values[0] >= 0 && values[1] >= 0 && values[2] > 0 && values[3] > 0) {
-      const core::PixelRegion region{static_cast<std::uint32_t>(values[0]),
-                                     static_cast<std::uint32_t>(values[1]),
-                                     static_cast<std::uint32_t>(values[2]),
-                                     static_cast<std::uint32_t>(values[3])};
-      if (core::valid_region(region, extent)) {
-        candidate = region;
-      }
-    }
-    const app::ControlState apply_control{
-      .enabled = candidate.has_value(),
-      .explanation = candidate ? std::string_view{} : i18n::text(i18n::TextId::RegionInvalid, language),
-    };
-    emit_if(button(widget_label(i18n::TextId::ApplyRegion, "apply_region", language).c_str(),
-                   apply_control), command_sink, app::SetRegion{state.session_id, source, candidate});
     emit_if(button(widget_label(i18n::TextId::ResetRegion, "reset_region", language).c_str(),
                    state.controls.region), command_sink,
             app::SetRegion{state.session_id, source, std::nullopt});
