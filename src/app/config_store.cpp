@@ -125,6 +125,7 @@ namespace avb::app {
         4U + (document.contains("extensions") ? 1U : 0U) +
         (document.contains("language") ? 1U : 0U) +
         (document.contains("opacity_percent") ? 1U : 0U) +
+        (document.contains("wheel_zoom_percent") ? 1U : 0U) +
         (document.contains("mode") ? 1U : 0U) +
         (document.contains("auto_refresh_enabled") ? 1U : 0U);
       return document.size() == expected_size &&
@@ -168,6 +169,34 @@ namespace avb::app {
         return percent >= 0 && percent <= 100 ? static_cast<int>(percent) : 100;
       }
       return 100;
+    }
+
+    [[nodiscard]] int parse_wheel_zoom_percent(const nlohmann::json &document)
+    {
+      const auto wheel_zoom = document.find("wheel_zoom_percent");
+      if (wheel_zoom == document.end()) {
+        return core::default_wheel_zoom_percent;
+      }
+      // Validate the JSON type and full integer width before conversion. A bad
+      // optional wheel preference never discards independently valid settings.
+      int percent{};
+      if (wheel_zoom->is_number_unsigned()) {
+        const auto value = wheel_zoom->get<std::uint64_t>();
+        if (!std::in_range<int>(value)) {
+          return core::default_wheel_zoom_percent;
+        }
+        percent = static_cast<int>(value);
+      } else if (wheel_zoom->is_number_integer()) {
+        const auto value = wheel_zoom->get<std::int64_t>();
+        if (!std::in_range<int>(value)) {
+          return core::default_wheel_zoom_percent;
+        }
+        percent = static_cast<int>(value);
+      } else {
+        return core::default_wheel_zoom_percent;
+      }
+      return core::valid_wheel_zoom_percent(percent)
+               ? percent : core::default_wheel_zoom_percent;
     }
 
     [[nodiscard]] std::optional<UserConfig>
@@ -229,6 +258,7 @@ namespace avb::app {
                         .extensions = *extensions,
                         .language = language,
                         .opacity_percent = parse_opacity(document),
+                        .wheel_zoom_percent = parse_wheel_zoom_percent(document),
                         .mode = mode,
                         .auto_refresh_enabled = auto_refresh_enabled};
     }
@@ -245,6 +275,7 @@ namespace avb::app {
                             {"language",
                              i18n::language_preference_token(config.language)},
                             {"opacity_percent", config.opacity_percent},
+                            {"wheel_zoom_percent", config.wheel_zoom_percent},
                             {"mode", serialize_mode(config.mode)},
                             {"auto_refresh_enabled", config.auto_refresh_enabled}};
     }
@@ -327,6 +358,7 @@ namespace avb::app {
   {
     if (config.version != config_version ||
         config.opacity_percent < 0 || config.opacity_percent > 100 ||
+        !core::valid_wheel_zoom_percent(config.wheel_zoom_percent) ||
         serialize_mode(config.mode).empty() ||
         i18n::language_preference_token(config.language).empty()) {
       return std::unexpected{core::AppError{core::AppErrorCode::InvalidValue}};

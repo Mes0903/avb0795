@@ -72,6 +72,7 @@ namespace avb::app {
     ControlState pass_through;
     ControlState fps;
     ControlState opacity;
+    ControlState wheel_zoom;
     ControlState region;
     ControlState cancel_region_selection;
     ControlState bordered;

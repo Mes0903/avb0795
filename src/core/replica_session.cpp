@@ -61,6 +61,11 @@ namespace avb::core {
     settings_.region = region;
   }
 
+  void ReplicaSession::set_wheel_zoom_percent(int percent) noexcept
+  {
+    settings_.wheel_zoom_percent = percent;
+  }
+
   void ReplicaSession::set_region_selection(bool active) noexcept
   {
     settings_.selecting_region = active;

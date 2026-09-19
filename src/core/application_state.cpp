@@ -110,6 +110,17 @@ namespace avb::core {
   }
 
   std::expected<void, AppError>
+  ApplicationState::set_wheel_zoom_percent(SessionId session_id, int percent) noexcept
+  {
+    if (auto result = validate_session(session_id); !result) {
+      return result;
+    }
+
+    current_session_.set_wheel_zoom_percent(percent);
+    return {};
+  }
+
+  std::expected<void, AppError>
   ApplicationState::set_region(SessionId session_id,
                                std::optional<PixelRegion> region) noexcept
   {

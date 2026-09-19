@@ -53,6 +53,9 @@ namespace avb::core {
     /// Commit an accepted opacity percentage after validating its generation.
     [[nodiscard]] std::expected<void, AppError>
     set_opacity(SessionId session_id, int percent) noexcept;
+    /// Commit an accepted wheel increment after generation validation; no native I/O.
+    [[nodiscard]] std::expected<void, AppError>
+    set_wheel_zoom_percent(SessionId session_id, int percent) noexcept;
     /// Commit an accepted source-pixel crop after validating its generation.
     [[nodiscard]] std::expected<void, AppError>
     set_region(SessionId session_id, std::optional<PixelRegion> region) noexcept;

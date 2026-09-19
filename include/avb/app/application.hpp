@@ -149,6 +149,7 @@ namespace avb::app {
     void handle(const SetOpacity &command,
                 std::chrono::steady_clock::time_point now);
     void handle(const SetRegion &command, Clock::time_point now);
+    void handle(const SetWheelZoomPercent &command, Clock::time_point now);
     void handle(const SetRegionSelection &command, Clock::time_point now);
     void handle(const ReplaceHotkey &command,
                 std::chrono::steady_clock::time_point now);

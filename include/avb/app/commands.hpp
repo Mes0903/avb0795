@@ -57,6 +57,12 @@ namespace avb::app {
     bool commit{};
   };
 
+  /// Request a wheel zoom increment transaction and persist the accepted percentage.
+  struct SetWheelZoomPercent {
+    core::SessionId session_id;
+    int percent{core::default_wheel_zoom_percent};
+  };
+
   /// @brief Apply one complete source-pixel rectangle, or reset to full view.
   /// Application validates both identities, Capturing and current presented bounds
   /// before applying the whole candidate. A successful change also ends selection.
@@ -106,7 +112,7 @@ namespace avb::app {
   /// lifecycle and capability admission. Global commands resolve against current
   /// state without a token. No alternative carries a callback or mutable domain reference.
   using AppCommand =
-    std::variant<RefreshSources, SelectSource, Start, Stop, SetMode, SetBorder, SetFps, SetExtensions, ReplaceHotkey, RestoreActiveReplicaEditable, Quit, SetLanguage, SetAutoRefresh, SetOpacity, SetRegion, SetRegionSelection>;
+    std::variant<RefreshSources, SelectSource, Start, Stop, SetMode, SetBorder, SetFps, SetExtensions, ReplaceHotkey, RestoreActiveReplicaEditable, Quit, SetLanguage, SetAutoRefresh, SetOpacity, SetRegion, SetRegionSelection, SetWheelZoomPercent>;
 
 }    // namespace avb::app
 

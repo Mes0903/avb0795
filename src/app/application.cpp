@@ -50,6 +50,7 @@ namespace avb::app {
     (void) state_.set_border(session_id, config_.border);
     (void) state_.set_extensions(session_id, config_.extensions);
     (void) state_.set_opacity(session_id, config_.opacity_percent);
+    (void) state_.set_wheel_zoom_percent(session_id, config_.wheel_zoom_percent);
 
     refresh_sources();
 
@@ -425,6 +426,42 @@ namespace avb::app {
     config_.opacity_percent = command.percent;
     config_dirty_ = true;
     clear_notice(NoticeOperation::Command);
+  }
+
+  void Application::handle(const SetWheelZoomPercent &command, Clock::time_point now)
+  {
+    if (!validate_session(command.session_id) || !settings_allowed()) {
+      reject();
+      return;
+    }
+    if (!core::valid_wheel_zoom_percent(command.percent)) {
+      reject(core::AppError{core::AppErrorCode::InvalidValue});
+      return;
+    }
+
+    auto candidate = state_.current_session().settings();
+    if (candidate.wheel_zoom_percent == command.percent) {
+      clear_notice(NoticeOperation::Command);
+      if (config_dirty_) {
+        persist_config();
+      }
+      return;
+    }
+    candidate.wheel_zoom_percent = command.percent;
+    if (!apply_settings(candidate, now)) {
+      return;
+    }
+    // Commit only after runtime acceptance; a later save failure keeps accepted
+    // state and the dirty bit available for retrying this same preference.
+    const auto updated = state_.set_wheel_zoom_percent(command.session_id, command.percent);
+    if (!updated) {
+      reject(updated.error());
+      return;
+    }
+    config_.wheel_zoom_percent = command.percent;
+    config_dirty_ = true;
+    clear_notice(NoticeOperation::Command);
+    persist_config();
   }
 
   void Application::handle(const SetRegion &command, Clock::time_point now)
@@ -969,6 +1006,7 @@ namespace avb::app {
       replacement.set_fps(pending.settings.fps_cap);
       replacement.set_extensions(pending.settings.extensions);
       replacement.set_opacity(pending.settings.opacity_percent);
+      replacement.set_wheel_zoom_percent(pending.settings.wheel_zoom_percent);
       // Generation replacement invalidates commands queued from the old view.
       const auto replaced = state_.replace_session(std::move(replacement));
       if (!replaced) {

@@ -27,6 +27,8 @@ namespace avb::app {
     core::ExtensionSettings extensions{};
     i18n::LanguagePreference language{i18n::LanguagePreference::System};
     int opacity_percent{100};
+    /// Accepted wheel increment; native replica dimensions are never persisted.
+    int wheel_zoom_percent{core::default_wheel_zoom_percent};
     core::OverlayMode mode{core::OverlayMode::Editable};
     bool auto_refresh_enabled{};
 
@@ -57,6 +59,7 @@ namespace avb::app {
     /// defaults; a missing extensions field uses disabled extensions, but a malformed
     /// one invalidates the whole config. Missing or invalid language alone recovers
     /// locally to System; missing or invalid opacity alone recovers to 100.
+    /// Missing, noninteger or out-of-range wheel_zoom_percent locally recovers to 5.
     /// Missing or invalid mode and auto_refresh_enabled independently recover to
     /// Editable and false. A nonempty borrowed legacy_path is read only when path
     /// is confirmed missing; an existing malformed/unreadable primary never falls
@@ -69,7 +72,8 @@ namespace avb::app {
          const std::filesystem::path &legacy_path = {}) const;
 
     /// @brief Serialize the config, then write/flush/close a sibling before committing it.
-    /// Unsupported version, language, mode, or opacity outside 0..100 returns
+    /// Unsupported version, language, mode, opacity outside 0..100, or wheel zoom
+    /// outside 1..25 returns
     /// InvalidValue before I/O. The destination is always the explicit path, even
     /// when the caller obtained config from a legacy fallback.
     /// Other typed fields must contain supported values; save is not a general enum

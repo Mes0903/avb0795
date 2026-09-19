@@ -176,6 +176,7 @@ namespace avb::app {
         control(context, settings_allowed, capabilities.pass_through),
       .fps = control(context, settings_allowed),
       .opacity = control(context, settings_allowed),
+      .wheel_zoom = control(context, settings_allowed),
       .region = control(context, region_active && view.content_extent.has_value()),
       .cancel_region_selection = control(context, active && session.settings().selecting_region),
       .bordered = control(context, settings_allowed),

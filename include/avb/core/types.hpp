@@ -221,9 +221,18 @@ namespace avb::core {
                            const ExtensionSettings &) = default;
   };
 
+  /// Initial wheel zoom increment and local recovery value for malformed preferences.
+  inline constexpr int default_wheel_zoom_percent = 5;
+
+  /// Check the portable integer percentage before any runtime settings transaction.
+  [[nodiscard]] constexpr bool valid_wheel_zoom_percent(int value) noexcept
+  {
+    return value >= 1 && value <= 25;
+  }
+
   /// @brief Portable candidate or accepted settings, applied as a whole to a runtime.
   /// The value itself performs no validation or persistence. Application may persist
-  /// accepted mode, border, cap, opacity and extension preferences; crop and region
+  /// accepted mode, border, cap, opacity, wheel zoom and extension preferences; crop and region
   /// selection remain session state, with temporary native overrides kept separate.
   struct ReplicaSettings {
     OverlayMode mode{OverlayMode::Editable};
@@ -231,6 +240,8 @@ namespace avb::core {
     FpsCap fps_cap{FpsCap::Fps60};
     ExtensionSettings extensions{};
     int opacity_percent{100};
+    /// Accepted percent increase per positive wheel notch; native geometry is session-only.
+    int wheel_zoom_percent{default_wheel_zoom_percent};
     /// Session-only crop in source content pixels; nullopt presents the full frame.
     std::optional<PixelRegion> region{};
     /// Transient full-source selection request; persisted preferences remain unchanged.

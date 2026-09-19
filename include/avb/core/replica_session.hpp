@@ -40,6 +40,8 @@ namespace avb::core {
     void set_fps(FpsCap fps_cap) noexcept;
     /// Store an accepted opacity percentage; command validation belongs to Application.
     void set_opacity(int percent) noexcept;
+    /// Store an accepted wheel increment; Application validates and applies it first.
+    void set_wheel_zoom_percent(int percent) noexcept;
     /// Store an accepted session-only source crop; nullopt restores the full source.
     void set_region(std::optional<PixelRegion> region) noexcept;
     /// Store transient selection intent after the runtime transaction succeeds.
