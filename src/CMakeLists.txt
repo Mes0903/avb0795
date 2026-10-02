@@ -80,10 +80,9 @@ target_compile_features(avb0795_ui PUBLIC cxx_std_23)
 # Native capture/system adapters are separate from the replica graphics aggregate.
 # Only the latter needs both capture and presentation dependencies; a frontend
 # target must not inherit these dependencies as a shortcut to native operations.
-if(WIN32)
-  # This owner consumes Vulkan/GLFW and neutral frame values. Current dependency
-  # configuration enables graphics on Windows; the renderer itself has a separate
-  # source/link boundary from native capture and the Windows composition facade.
+if(AVB0795_BUILD_GRAPHICS)
+  # The shared renderer owns graphics transport and retirement independently
+  # of native capture and each platform composition facade.
   add_library(avb0795_vulkan_renderer
     ${PROJECT_SOURCE_DIR}/render/cpu_row_copy.cpp
     ${PROJECT_SOURCE_DIR}/render/graphics_retry_policy.cpp
@@ -114,6 +113,37 @@ if(WIN32)
   )
   target_compile_features(avb0795_vulkan_renderer PUBLIC cxx_std_23)
 
+  # The controller has its own backend/device lifetime. Compiling these backend
+  # sources here does not make the replica renderer their owner or consumer.
+  add_library(avb0795_desktop
+    desktop/desktop_host.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+  )
+
+  target_include_directories(avb0795_desktop
+    PUBLIC
+      $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${imgui_SOURCE_DIR}/backends
+  )
+
+  target_link_libraries(avb0795_desktop
+    PRIVATE
+      avb0795_app
+      avb0795_ui
+      avb0795_diagnostics
+      avb0795_vulkan_renderer
+      glfw
+      Vulkan::Vulkan
+      imgui
+  )
+
+  target_compile_features(avb0795_desktop PUBLIC cxx_std_23)
+endif()
+
+if(WIN32)
   add_library(avb0795_windows
     ${PROJECT_SOURCE_DIR}/platform/windows/capture_exclusion.cpp
     ${PROJECT_SOURCE_DIR}/platform/windows/controller_font.cpp
@@ -157,94 +187,67 @@ if(WIN32)
 
   target_compile_features(avb0795_windows PUBLIC cxx_std_23)
 
-  add_library(avb0795_windows_graphics
-    ${PROJECT_SOURCE_DIR}/platform/windows/detail/bridge_policy.cpp
-    ${PROJECT_SOURCE_DIR}/platform/windows/windows_frame_bridge.cpp
-    ${PROJECT_SOURCE_DIR}/platform/windows/windows_render_stack.cpp
-    ${PROJECT_SOURCE_DIR}/platform/windows/detail/overlay_policy.cpp
-    ${PROJECT_SOURCE_DIR}/platform/windows/overlay_window.cpp
-    ${PROJECT_SOURCE_DIR}/platform/windows/win32_overlay_adapter.cpp
-    ${PROJECT_SOURCE_DIR}/platform/windows/windows_replica_runtime.cpp
-    ${PROJECT_SOURCE_DIR}/platform/windows/windows_runtime_factory.cpp
-  )
+  if(AVB0795_BUILD_GRAPHICS)
+    add_library(avb0795_windows_graphics
+      ${PROJECT_SOURCE_DIR}/platform/windows/detail/bridge_policy.cpp
+      ${PROJECT_SOURCE_DIR}/platform/windows/windows_frame_bridge.cpp
+      ${PROJECT_SOURCE_DIR}/platform/windows/windows_render_stack.cpp
+      ${PROJECT_SOURCE_DIR}/platform/windows/detail/overlay_policy.cpp
+      ${PROJECT_SOURCE_DIR}/platform/windows/overlay_window.cpp
+      ${PROJECT_SOURCE_DIR}/platform/windows/win32_overlay_adapter.cpp
+      ${PROJECT_SOURCE_DIR}/platform/windows/windows_replica_runtime.cpp
+      ${PROJECT_SOURCE_DIR}/platform/windows/windows_runtime_factory.cpp
+    )
 
-  target_include_directories(avb0795_windows_graphics
-    PUBLIC
-      ${PROJECT_SOURCE_DIR}
-      ${PROJECT_SOURCE_DIR}/include
-  )
+    target_include_directories(avb0795_windows_graphics
+      PUBLIC
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/include
+    )
 
-  target_link_libraries(avb0795_windows_graphics
-    PRIVATE
-      avb0795_core
-      avb0795_app
-      avb0795_windows
-      avb0795_vulkan_renderer
-      avb0795_diagnostics
-      glfw
-      Vulkan::Vulkan
-      d3d11
-      dxgi
-      user32
-  )
+    target_link_libraries(avb0795_windows_graphics
+      PRIVATE
+        avb0795_core
+        avb0795_app
+        avb0795_windows
+        avb0795_vulkan_renderer
+        avb0795_diagnostics
+        glfw
+        Vulkan::Vulkan
+        d3d11
+        dxgi
+        user32
+    )
 
-  target_compile_definitions(avb0795_windows_graphics
-    PRIVATE
-      NOMINMAX
-      WIN32_LEAN_AND_MEAN
-  )
+    target_compile_definitions(avb0795_windows_graphics
+      PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+    )
 
-  target_compile_features(avb0795_windows_graphics PUBLIC cxx_std_23)
+    target_compile_features(avb0795_windows_graphics PUBLIC cxx_std_23)
 
-  # The controller has its own backend/device lifetime. Compiling these backend
-  # sources here does not make the replica renderer their owner or consumer.
-  add_library(avb0795_desktop
-    desktop/desktop_host.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
-  )
+    add_executable(avb0795
+      ${PROJECT_SOURCE_DIR}/main.cpp
+    )
 
-  target_include_directories(avb0795_desktop
-    PUBLIC
-      $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-    PRIVATE
-      ${PROJECT_SOURCE_DIR}
-      ${imgui_SOURCE_DIR}/backends
-  )
+    target_link_libraries(avb0795
+      PRIVATE
+        avb0795_app
+        avb0795_desktop
+        avb0795_windows
+        avb0795_windows_graphics
+        avb0795_diagnostics
+        glfw
+        windowsapp
+    )
 
-  target_link_libraries(avb0795_desktop
-    PRIVATE
-      avb0795_app
-      avb0795_ui
-      avb0795_diagnostics
-      avb0795_vulkan_renderer
-      glfw
-      Vulkan::Vulkan
-      imgui
-  )
+    target_compile_definitions(avb0795
+      PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+    )
 
-  target_compile_features(avb0795_desktop PUBLIC cxx_std_23)
-
-  add_executable(avb0795
-    ${PROJECT_SOURCE_DIR}/main.cpp
-  )
-
-  target_link_libraries(avb0795
-    PRIVATE
-      avb0795_app
-      avb0795_desktop
-      avb0795_windows
-      avb0795_windows_graphics
-      avb0795_diagnostics
-      glfw
-      windowsapp
-  )
-
-  target_compile_definitions(avb0795
-    PRIVATE
-      NOMINMAX
-      WIN32_LEAN_AND_MEAN
-  )
-
-  target_compile_features(avb0795 PRIVATE cxx_std_23)
+    target_compile_features(avb0795 PRIVATE cxx_std_23)
+  endif()
 endif()

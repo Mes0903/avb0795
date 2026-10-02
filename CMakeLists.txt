@@ -6,6 +6,10 @@ cmake_minimum_required(VERSION 3.28)
 
 project(avb0795 VERSION 1.0.0 LANGUAGES CXX)
 
+option(AVB0795_BUILD_GRAPHICS "Build shared Vulkan graphics and desktop targets" ${WIN32})
+option(AVB0795_BUILD_LINUX_TESTS "Build Linux policy tests" OFF)
+option(AVB0795_ENABLE_LINUX_INTEGRATION "Enable Linux hardware integration tests" OFF)
+
 option(AVB0795_BUILD_TESTS "Build avb0795 tests" ON)
 option(AVB0795_ENABLE_WINDOWS_INTEGRATION "Enable Windows integration" OFF)
 
@@ -16,13 +20,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(cmake/Dependencies.cmake)
 include(cmake/VerifySourceBoundaries.cmake)
 
-if(WIN32)
+if(AVB0795_BUILD_GRAPHICS)
   add_subdirectory(shaders)
 endif()
 
 add_subdirectory(src)
 
-if(WIN32)
+if(WIN32 AND AVB0795_BUILD_GRAPHICS)
   include(cmake/Packaging.cmake)
 endif()
 
@@ -31,7 +35,9 @@ endif()
 avb0795_assert_target_boundaries()
 avb0795_add_source_boundary_target()
 
-if(AVB0795_BUILD_TESTS)
+if(AVB0795_BUILD_TESTS OR
+   (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+    (AVB0795_BUILD_LINUX_TESTS OR AVB0795_ENABLE_LINUX_INTEGRATION)))
   enable_testing()
   add_subdirectory(tests)
 endif()

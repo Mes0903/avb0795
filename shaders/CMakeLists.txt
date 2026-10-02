@@ -1,4 +1,4 @@
-# Compile GLSL first, then embed its exact SPIR-V words into generated C++.
+# Shared graphics builds on either host compile GLSL first, then embed its exact SPIR-V words into generated C++.
 # Explicit outputs/dependencies let an ordinary build (or the IDE's shader target)
 # establish declarations without loading shader files from the runtime CWD.
 # All generated output stays in the build tree, never beside first-party source.

@@ -25,6 +25,48 @@
         "AVB0795_BUILD_TESTS": false,
         "AVB0795_ENABLE_WINDOWS_INTEGRATION": true
       }
+    },
+    {
+      "name": "linux-portable",
+      "displayName": "Linux portable libraries and tests",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-portable",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AVB0795_BUILD_GRAPHICS": false,
+        "AVB0795_BUILD_TESTS": true,
+        "AVB0795_BUILD_LINUX_TESTS": false,
+        "AVB0795_ENABLE_LINUX_INTEGRATION": false
+      }
+    },
+    {
+      "name": "linux-desktop",
+      "displayName": "Linux shared graphics and policy tests",
+      "inherits": "linux-portable",
+      "binaryDir": "${sourceDir}/build/linux-desktop",
+      "cacheVariables": {
+        "AVB0795_BUILD_GRAPHICS": true,
+        "AVB0795_BUILD_LINUX_TESTS": true
+      }
+    },
+    {
+      "name": "linux-clangd",
+      "displayName": "Linux clangd compilation database",
+      "description": "Run with a C++23 compiler, Ninja and the Vulkan SDK available. Production targets only.",
+      "inherits": "linux-desktop",
+      "binaryDir": "${sourceDir}/build/clangd",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "CMAKE_CXX_SCAN_FOR_MODULES": false,
+        "AVB0795_BUILD_TESTS": false,
+        "AVB0795_BUILD_LINUX_TESTS": false,
+        "AVB0795_ENABLE_LINUX_INTEGRATION": false
+      }
     }
   ],
   "buildPresets": [
@@ -33,6 +75,22 @@
       "displayName": "Generate shader declarations for clangd",
       "configurePreset": "windows-clangd",
       "targets": ["avb0795_replica_shaders"]
+    },
+    {
+      "name": "linux-portable",
+      "configurePreset": "linux-portable"
+    },
+    {
+      "name": "linux-desktop",
+      "configurePreset": "linux-desktop"
+    },
+    {
+      "name": "linux-clangd-generated",
+      "displayName": "Generate Linux shader declarations for clangd",
+      "configurePreset": "linux-clangd",
+      "targets": [
+        "avb0795_replica_shaders"
+      ]
     }
   ]
 }

@@ -1,5 +1,5 @@
 # Populate pinned dependency sources and expose only the targets used below.
-# Archive hashes constrain downloaded inputs; Windows patch verification also
+# Archive hashes constrain downloaded inputs; patch verification also
 # checks the populated sources, including local source overrides that can bypass
 # FetchContent's download/patch step. This is build setup, not runtime updating.
 include(FetchContent)
@@ -15,8 +15,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 # Scalar text and subsequent drag gestures share an ID. The common widgets patch
-# ties text export to the active editor on every UI platform. Windows additionally
-# uses the Vulkan backend patch to preserve ownership after native failures.
+# ties text export to the active editor on every UI platform. Graphics builds
+# also use the Vulkan backend patch to preserve ownership after native failures.
 find_package(Git REQUIRED)
 # FetchContent archives are source trees rather than Git worktrees. Bound Git's
 # discovery above each archive so an enclosing checkout cannot filter patches by
@@ -24,7 +24,7 @@ find_package(Git REQUIRED)
 # of the developer's global Git line-ending configuration.
 set(imgui_patch_files
   "${PROJECT_SOURCE_DIR}/third_party/patches/imgui-1.92.9-active-temp-input.patch")
-if(WIN32)
+if(AVB0795_BUILD_GRAPHICS)
   list(APPEND imgui_patch_files
     "${PROJECT_SOURCE_DIR}/third_party/patches/imgui-1.92.9-vulkan-safe-failure.patch")
 endif()
@@ -64,7 +64,7 @@ target_include_directories(imgui
     $<BUILD_INTERFACE:${imgui_SOURCE_DIR}>
 )
 
-if(WIN32)
+if(AVB0795_BUILD_GRAPHICS)
   # Do not infer patch presence from a successful dependency population step.
   # The expected post-patch file hash also rejects drift in an offline override.
   file(SHA256
@@ -90,27 +90,42 @@ if(WIN32)
   set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
   set(GLFW_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The Linux window owner implements X11/XWayland semantics only.
+    set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+  endif()
+
+  set(glfw_patch_command)
+  if(WIN32)
+    set(glfw_patch_command PATCH_COMMAND
+      "${CMAKE_COMMAND}" -E env "GIT_CEILING_DIRECTORIES=<SOURCE_DIR>/.."
+      "${GIT_EXECUTABLE}" -c core.autocrlf=false -c core.eol=lf
+      -C "<SOURCE_DIR>" apply --verbose
+      "${PROJECT_SOURCE_DIR}/third_party/patches/glfw-3.4-win32-no-own-dc.patch")
+  endif()
   FetchContent_Declare(
     glfw
     URL https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip
     URL_HASH SHA256=b5ec004b2712fd08e8861dc271428f048775200a2df719ccf575143ba749a3e9
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    PATCH_COMMAND
-      "${CMAKE_COMMAND}" -E env "GIT_CEILING_DIRECTORIES=<SOURCE_DIR>/.."
-      "${GIT_EXECUTABLE}" -c core.autocrlf=false -c core.eol=lf
-      -C "<SOURCE_DIR>" apply --verbose
-      "${PROJECT_SOURCE_DIR}/third_party/patches/glfw-3.4-win32-no-own-dc.patch"
+    ${glfw_patch_command}
     EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(glfw)
+  unset(glfw_patch_command)
 
-  include(${PROJECT_SOURCE_DIR}/cmake/VerifyGlfwPatch.cmake)
-  avb0795_verify_glfw_patch("${glfw_SOURCE_DIR}")
+  if(WIN32)
+    include(${PROJECT_SOURCE_DIR}/cmake/VerifyGlfwPatch.cmake)
+    avb0795_verify_glfw_patch("${glfw_SOURCE_DIR}")
+  endif()
 endif()
 
 # Test-only dependencies are absent when tests are disabled. Lua inventory
 # validation remains a separately invoked developer utility, not a build input.
-if(AVB0795_BUILD_TESTS)
+if(AVB0795_BUILD_TESTS OR
+   (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+    (AVB0795_BUILD_LINUX_TESTS OR AVB0795_ENABLE_LINUX_INTEGRATION)))
   set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "" FORCE)
   set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(

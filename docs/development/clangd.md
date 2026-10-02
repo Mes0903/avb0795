@@ -6,7 +6,7 @@ Repo 根目錄的 [.clangd](../../.clangd) 使用 `build/clangd/compile_commands
 
 ## 1. 第一次設定
 
-準備 LLVM（`clangd`、`clang-cl`）、Visual Studio C++ x64 build tools／Windows SDK、CMake 3.28 以上、Ninja、Git，以及含 `glslc` 的 Vulkan SDK。Git 必須在 PATH 上，供 dependency patch gate 使用。開啟 **x64 VS Developer PowerShell／Command Prompt**，切到 repo 根目錄後執行：
+Windows：準備 LLVM（`clangd`、`clang-cl`）、Visual Studio C++ x64 build tools／Windows SDK、CMake 3.28 以上、Ninja、Git，以及含 `glslc` 的 Vulkan SDK。Git 必須在 PATH 上，供 dependency patch gate 使用。開啟 **x64 VS Developer PowerShell／Command Prompt**，切到 repo 根目錄後執行：
 
 ```powershell
 clangd --version
@@ -37,6 +37,29 @@ cmake --build --preset clangd-generated
 
 `AVB0795_ENABLE_WINDOWS_INTEGRATION=ON` 在啟用本機 tests 時也提供 native integration tests 的 compile commands。這不會執行測試，也不代表獲准進行 capture／GPU 操作。重新執行沒有 `-D` override 的 preset 會回到 production-only 設定
 
+### Linux
+
+Linux 需要能編譯專案 C++23 標準函式庫介面的 compiler、clangd、CMake 3.28 以上、Ninja、Git，以及 Vulkan 1.3 與 `glslc`。 X11 開發檔須包含 XKB、Xrandr、Xinerama、Xcursor、Xi、Xfixes 與 Xext（Shape）。 GLFW 固定建置 X11 backend，Wayland session 的視窗呈現使用 XWayland
+
+```bash
+c++ --version
+clangd --version
+cmake --preset linux-clangd
+cmake --build --preset linux-clangd-generated
+test -f build/clangd/compile_commands.json
+test -f build/clangd/generated/avb/render/replica_shaders.hpp
+```
+
+`linux-clangd` 繼承 `linux-desktop` 的 graphics 設定，將一般 tests、Linux policy tests 與 Linux integration 全部關閉，產生獨立的 production compilation database。 兩個一般建置目錄為 `build/linux-portable` 與 `build/linux-desktop`，分別由同名 preset 產生。 切換 host 時要重新 configure `build/clangd`
+
+專案目前使用一般 translation units，`linux-clangd` 將 `CMAKE_CXX_SCAN_FOR_MODULES` 關閉，避免 GCC 的 module-scanning flags 進入 clangd 21 的命令。 此設定只用於 tooling preset
+
+SDK 路徑、compiler 選擇與必要的本機 flags 放在環境變數、命令列或未提交的 `CMakeUserPresets.json`。 檢查 database 中實際使用的 compiler 與標準函式庫 include paths
+
+若 clangd 無法取得 GCC 的 system headers，僅對該 compiler 的可信精確絕對路徑設定 `--query-driver`。 例如 database 使用 `/usr/bin/c++` 時，參數為 `--query-driver=/usr/bin/c++`
+
+保留 `.clangd` 的 background index 與 include diagnostics 設定，檢查 server log 是否出現 unknown key 或 YAML 診斷。 Doxygen hover 使用來源註解，不加入 clangd 21 不支援的 `Documentation.CommentFormat` 設定。 Shader build 與 clangd 導覽都不會執行 GPU capability probe
+
 ## 2. 編輯器連線
 
 以 **repo 根目錄**開啟 workspace，使用支援 clangd 的 LSP client。VS Code 可使用官方 clangd extension；若 PATH 找不到 server，可在自己的 editor settings 指定 `clangd.path`。不要讓另一套 C++ language server 同時提供重複診斷。這次沒有變更你的全域 editor settings 或安裝 extension。[clangd 官方安裝與 editor 指引](https://clangd.llvm.org/installation)
@@ -53,9 +76,9 @@ cmake --build --preset clangd-generated
 
 ```mermaid
 flowchart LR
-    Preset["windows-clangd preset"] --> CMake["CMake target graph"]
+    Preset["host clangd preset"] --> CMake["CMake target graph"]
     CMake --> DB["build/clangd/compile_commands.json"]
-    Shader["clangd-generated build"] --> Generated["generated shader declarations"]
+    Shader["host generated-shader build"] --> Generated["generated shader declarations"]
     Config[".clangd"] --> Server["local clangd server"]
     DB --> Server
     Generated --> Server
@@ -102,10 +125,10 @@ flowchart LR
 | 現象 | 先檢查 |
 |---|---|
 | `file not found`、C++23 型別不認得 | database 是否存在／更新、server log 是否真的載入該檔，而非 fallback command |
-| 只有 generated shader header 找不到 | 重跑 `cmake --build --preset clangd-generated` |
+| 只有 generated shader header 找不到 | 重跑該 host 的 generated-shader build preset |
 | WinRT／MSVC STL 找不到 | VS C++ tools／Windows SDK 是否安裝完整；重開 x64 developer shell 產生 database，不要手動補一大串版本路徑 |
 | 同一處出現兩套診斷 | editor 是否同時啟用兩個 C++ language servers |
 | `.clangd` 無效但 check exit code 是 0 | 檢查 server log 的 YAML／unknown-key config 訊息，不只看 exit code |
 | `clangd --check` 出現 `ExtractFunction`／`SwapBinaryOperands` 等訊息 | 該模式也會跑 refactoring self-check；區分它與真正的 LSP `publishDiagnostics`，不要用 blanket suppression 掩蓋 |
 
-Windows SDK 的偵測與編譯環境問題，先依照 [clangd system headers 指引](https://clangd.llvm.org/guides/system-headers) 查明原因。不要透過對不可信 compiler 開放廣泛 `--query-driver` 規則來繞過問題
+Windows SDK 或 Linux compiler／標準函式庫的偵測與編譯環境問題，先依照 [clangd system headers 指引](https://clangd.llvm.org/guides/system-headers) 查明原因。不要透過對不可信 compiler 開放廣泛 `--query-driver` 規則來繞過問題

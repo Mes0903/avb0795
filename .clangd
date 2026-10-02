@@ -1,4 +1,5 @@
-# Configure with `cmake --preset windows-clangd` before starting clangd.
+# Configure with `cmake --preset windows-clangd` on Windows or
+# `cmake --preset linux-clangd` on Linux before starting clangd.
 # This database preserves each target's SDK paths, defines and C++23 mode.
 CompileFlags:
   CompilationDatabase: build/clangd
