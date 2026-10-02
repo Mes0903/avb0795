@@ -128,6 +128,7 @@ function(_avb0795_assert_known_production_targets)
       avb0795_vulkan_renderer
       avb0795_windows
       avb0795_linux
+      avb0795_linux_graphics
       avb0795_windows_graphics
       avb0795_desktop
       avb0795
@@ -189,9 +190,17 @@ function(avb0795_assert_target_boundaries)
       "platform/linux/linux_ui_language.cpp"
       "platform/linux/controller_font.cpp"
       "platform/linux/detail/acquisition_policy.cpp"
-      "platform/linux/portal_screencast.cpp")
+      "platform/linux/portal_screencast.cpp"
+      "platform/linux/pipewire_capture.cpp"
+      "platform/linux/linux_captured_frame.cpp"
+      "platform/linux/detail/pipewire_buffer_policy.cpp")
     _avb0795_assert_links(avb0795_linux
-      avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO)
+      avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO PkgConfig::AVB0795_PIPEWIRE)
+  endif()
+
+  if(TARGET avb0795_linux_graphics)
+    _avb0795_assert_sources(avb0795_linux_graphics "platform/linux/linux_cpu_frame_bridge.cpp")
+    _avb0795_assert_links(avb0795_linux_graphics avb0795_vulkan_renderer avb0795_linux)
   endif()
 
   if(TARGET avb0795_windows)
@@ -516,7 +525,11 @@ function(_avb0795_scan_files category)
       endif()
       _avb0795_assert_app_includes("${file}" "${contents}" ${allowed_linux_app_headers})
       _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
-      _avb0795_assert_layer_includes("${file}" "${contents}" "render")
+      set(allowed_linux_render_headers)
+      if(linux_relative MATCHES "^platform/linux/linux_cpu_frame_bridge\\.(hpp|cpp)$")
+        list(APPEND allowed_linux_render_headers render/vulkan_input.hpp render/vulkan_renderer.hpp)
+      endif()
+      _avb0795_assert_layer_includes("${file}" "${contents}" "render" ${allowed_linux_render_headers})
       _avb0795_assert_layer_includes("${file}" "${contents}" "platform/windows")
       set(allowed_linux_i18n_headers)
       set(allowed_linux_desktop_headers)
