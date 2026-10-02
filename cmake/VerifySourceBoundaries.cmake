@@ -190,6 +190,8 @@ function(avb0795_assert_target_boundaries)
       "platform/linux/linux_ui_language.cpp"
       "platform/linux/controller_font.cpp"
       "platform/linux/detail/acquisition_policy.cpp"
+      "platform/linux/linux_source_registry.cpp"
+      "platform/linux/linux_source_acquisition.cpp"
       "platform/linux/portal_screencast.cpp"
       "platform/linux/pipewire_capture.cpp"
       "platform/linux/linux_captured_frame.cpp"
@@ -528,10 +530,10 @@ function(_avb0795_scan_files category)
     elseif(category STREQUAL "linux")
       file(RELATIVE_PATH linux_relative "${AVB0795_SOURCE_ROOT}" "${file}")
       set(allowed_linux_app_headers)
-      if(linux_relative MATCHES "^platform/linux/(portal_screencast|detail/acquisition_policy)\\.(hpp|cpp)$")
+      if(linux_relative MATCHES "^platform/linux/(portal_screencast|linux_source_acquisition|detail/acquisition_policy)\\.(hpp|cpp)$")
         list(APPEND allowed_linux_app_headers avb/app/source_acquisition.hpp)
       endif()
-      if(linux_relative MATCHES "^platform/linux/linux_(disabled_hotkey|unavailable_services)\\.hpp$")
+      if(linux_relative MATCHES "^platform/linux/linux_(disabled_hotkey|unavailable_services|source_registry)\\.hpp$")
         list(APPEND allowed_linux_app_headers avb/app/ports.hpp)
       endif()
       _avb0795_assert_app_includes("${file}" "${contents}" ${allowed_linux_app_headers})

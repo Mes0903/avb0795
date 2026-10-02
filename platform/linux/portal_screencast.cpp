@@ -81,7 +81,7 @@ namespace detail {
 /// Native subscriptions and cleanup commands are deliberately stored in the worker,
 /// not here. Atomic terminalization permits lease observations on the main thread.
 struct PortalSessionState {
-  std::atomic<bool> live{true}, started{false};
+  std::atomic<bool> live{true}, started{false}, retired{false};
   std::string path;
 };
 /// @brief One private context owns all GIO calls and native bookkeeping.
@@ -124,9 +124,10 @@ class PortalWorker final : public std::enable_shared_from_this<PortalWorker> {
     ~Operation() { g_object_unref(cancellable); }
   };
   /// @brief Worker-only native session obligations, separate from consumer shared facts.
-  /// Closed signals or Close replies retire subscriptions; transport retirement is
-  /// the fallback when Close cannot be acknowledged. The last published acquisition
-  /// binds idle failure reporting to this session: retained predecessors may close
+  /// Confirmed closure, the Close callback and subscription destroy acknowledgment
+  /// jointly retire a session. Uncertain Close or owner/transport loss additionally
+  /// requires actual GIO transport closure while this record remains owned. The last
+  /// published acquisition binds idle failure reporting to this session: retained predecessors may close
   /// during another acquisition without contaminating its result. Consumers never
   /// own this record.
   struct Session {
@@ -134,7 +135,7 @@ class PortalWorker final : public std::enable_shared_from_this<PortalWorker> {
     std::optional<app::AcquisitionId> last_result_id;
     guint subscription{};
     unsigned subscription_borrows{};
-    bool known{}, closing{}, close_done{}, close_pending{};
+    bool known{}, closing{}, close_done{}, close_pending{}, transport_required{};
   };
   enum class CommandKind { Begin, Consumed, Cancel, Shutdown, Close };
   struct Command {
@@ -253,7 +254,7 @@ private:
   PortalProgress facts_;
   bool active_{}, cancelled_main_{}, shutdown_requested_{}, finished_{};
   std::optional<app::AcquisitionId> consumed_id_;
-  bool stopping_{}, transport_closing_{}, transport_closed_{}, connecting_{};
+  bool stopping_{}, transport_failed_{}, transport_closing_{}, transport_closed_{}, connecting_{};
   unsigned calls_{}, subscriptions_{};
   std::optional<PortalCapabilities> capabilities_;
   std::shared_ptr<Operation> operation_;
@@ -371,7 +372,8 @@ private:
   void transport_lost()
   {
     if(transport_closing_) return;
-    stopping_=true;
+    stopping_ = true;
+    transport_failed_ = true;
     {
       std::lock_guard lock{mutex_};
       shutdown_requested_=true; cancelled_main_=true;
@@ -384,8 +386,15 @@ private:
         if(!active_) { facts_.error=error(core::AppErrorCode::SourceUnavailable); facts_.phase=app::AcquisitionPhase::Idle; }
       }
     }
+    // Loss revokes use, but cannot manufacture confirmed Session closure. Retain
+    // each native record until the actual transport and its own borrows retire.
+    for (auto &session : sessions_) {
+      session.state->live = false;
+      session.state->started = false;
+      session.transport_required = true;
+      unsubscribe(session.subscription);
+    }
     if(operation_ && !transferred(operation_)) fail(operation_,error(core::AppErrorCode::SourceUnavailable));
-    for(auto &session:sessions_) { session.state->live=false; session.state->started=false; session.close_done=true; unsubscribe(session.subscription); }
     unsubscribe(owner_subscription_);
   }
   Session *find_session(const std::shared_ptr<PortalSessionState> &state)
@@ -439,21 +448,39 @@ private:
       }
       acknowledge();
     }
+    // Uncertain session cleanup needs transport proof. Initiate it while native
+    // records/calls are retained; waiting for their retirement first is circular.
+    if (transport_failed_) close_transport();
+    std::erase_if(sessions_, [this](const auto &session) {
+      if (session.transport_required && !transport_closed_) return false;
+      if ((!session.close_done && !session.transport_required) || session.close_pending || session.subscription_borrows) return false;
+      // Pump runs after callback/destroy scopes return. Invalidity only revokes use;
+      // this monotonic fact acknowledges the session's completed native obligations.
+      session.state->retired = true;
+      acknowledge();
+      return true;
+    });
     retire_operation();
-    // Closed facts may outlive this service, but subscriptions and transport may not.
-    std::erase_if(sessions_,[](const auto &session){return session.close_done && !session.close_pending && !session.subscription_borrows;});
     if(!stopping_ || operation_ || calls_ || subscriptions_ || !sessions_.empty()) return;
     { std::lock_guard lock{mutex_}; if(!commands_.empty()) return; }
-    if(connection_ && !transport_closed_) {
-      if(!transport_closing_) {
-        transport_closing_=true;
-        if(connection_closed_handler_) g_signal_handler_disconnect(connection_,std::exchange(connection_closed_handler_,0));
-        g_dbus_connection_close(connection_,nullptr,callback,call(CallKind::TransportClose));
-      }
+    if (connection_ && !transport_closed_) {
+      close_transport();
       return;
     }
     if(connection_) { g_object_unref(connection_); connection_=nullptr; }
     g_main_loop_quit(loop_);
+  }
+  /// @brief Start asynchronous transport cleanup without releasing borrowed records.
+  /// Loss calls this before session/operation retirement; ordinary shutdown calls it
+  /// after their independent cleanup. Completion proves actual GIO closure, while
+  /// pending method callbacks and subscription destroys remain separately counted.
+  /// Only the private worker context calls this; submission is one-shot, never proof.
+  void close_transport()
+  {
+    if (!connection_ || transport_closing_ || transport_closed_) return;
+    transport_closing_ = true;
+    if (connection_closed_handler_) g_signal_handler_disconnect(connection_, std::exchange(connection_closed_handler_, 0));
+    g_dbus_connection_close(connection_, nullptr, callback, call(CallKind::TransportClose));
   }
   void connect()
   {
@@ -524,7 +551,7 @@ private:
   {
     auto *session=find_session(state); if(!session) return;
     session->closing=true; state->live=false; state->started=false;
-    if(!session->known || session->close_done || session->close_pending) return;
+    if (!session->known || session->close_done || session->close_pending || session->transport_required) return;
     session->close_pending=true;
     g_dbus_connection_call(connection_,portal_name,state->path.c_str(),session_iface,"Close",nullptr,G_VARIANT_TYPE_UNIT,G_DBUS_CALL_FLAGS_NO_AUTO_START,method_timeout_ms,nullptr,callback,call(CallKind::SessionClose,{}, {},state));
   }
@@ -638,8 +665,8 @@ private:
       if(op->step==Step::Create) if(auto *session=find_session(op->session)) session->known=true;
       if(!reply) {
         close_request(req,req->predicted); detach_request(req); fail(op,native_error(native));
-        // A method timeout cannot prove rollback. Close the client transport after
-        // draining, so sessions created after an obsolete method are invalidated.
+        // A method timeout cannot prove rollback. Start transport close with native
+        // records retained, then drain callbacks so late side effects stay accounted.
         if(native && (g_error_matches(native,G_IO_ERROR,G_IO_ERROR_TIMED_OUT) || g_error_matches(native,G_DBUS_ERROR,G_DBUS_ERROR_NO_REPLY))) transport_lost();
         break;
       }
@@ -679,9 +706,10 @@ private:
     case CallKind::SessionClose:
       if(auto *session=find_session(invocation.session)) {
         session->close_pending=false;
-        if(reply || (native && (g_error_matches(native,G_DBUS_ERROR,G_DBUS_ERROR_UNKNOWN_OBJECT) || g_error_matches(native,G_DBUS_ERROR,G_DBUS_ERROR_SERVICE_UNKNOWN)))) {
+        if (reply || (native && g_error_matches(native, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_OBJECT))) {
           session->close_done=true; session->state->live=false; session->state->started=false; unsubscribe(session->subscription);
-        } else {
+        }
+        else {
           // Failure to acknowledge Close cannot be reinterpreted as retirement;
           // retiring the client connection supplies the remaining authority.
           transport_lost();
@@ -699,8 +727,7 @@ private:
     auto op=operation_;
     if(!op || !op->terminal || op->calls || op->request_borrows || op->request) return;
     if(op->fresh && !op->success && op->session) {
-      auto *session=find_session(op->session);
-      if(session && (!session->close_done || session->close_pending || session->subscription_borrows)) return;
+      if (!op->session->retired) return;
     }
     if(op->success) {
       bool revoked{}, lost{}, published{};
@@ -741,6 +768,7 @@ private:
 };
 }
 bool PortalSessionLease::valid() const noexcept { return state_ && state_->live && state_->started; }
+bool PortalSessionLease::retired() const noexcept { return !state_ || state_->retired; }
 PortalSessionCloseAuthority::PortalSessionCloseAuthority(std::weak_ptr<detail::PortalWorker> worker,std::shared_ptr<detail::PortalSessionState> session)
     : worker_{std::move(worker)},session_{std::move(session)} {}
 void PortalSessionCloseAuthority::request_close() noexcept

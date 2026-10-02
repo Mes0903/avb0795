@@ -266,6 +266,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
     ${PROJECT_SOURCE_DIR}/platform/linux/linux_ui_language.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/controller_font.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/detail/acquisition_policy.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/linux_source_registry.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/linux_source_acquisition.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/portal_screencast.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/pipewire_capture.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/linux_captured_frame.cpp

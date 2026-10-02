@@ -33,6 +33,16 @@ namespace avb::linux_platform {
   public:
     PortalSessionLease() = default;
     [[nodiscard]] bool valid() const noexcept;
+    /// @brief Observe acknowledged session cleanup without retaining its native owner.
+    /// Invalidity alone only forbids use: Close submission invalidates immediately.
+    /// Retirement requires confirmed session closure, its Close callback and Closed
+    /// subscription destroy acknowledgment. Uncertain Close or owner/transport loss
+    /// additionally waits for actual GIO transport closure and those same borrows.
+    /// Empty leases are retired; healthy retained sessions are not. True is monotonic.
+    /// This atomic observation is safe on either thread and grants no Close authority;
+    /// operation/capture retirement and service quiescence remain separate obligations.
+    [[nodiscard]] bool retired() const noexcept;
+
   private:
     explicit PortalSessionLease(std::shared_ptr<detail::PortalSessionState> state) : state_{std::move(state)} {}
     std::shared_ptr<detail::PortalSessionState> state_;
