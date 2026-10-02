@@ -240,7 +240,8 @@ namespace avb::desktop {
 
     /// Adopt the controller window and font storage, then build private Vulkan
     /// and ImGui owners without submitting startup work.
-    Impl(GLFWwindow *window, CommandSink command_sink, ControllerWindowSetup setup, std::vector<std::byte> font_data,
+    Impl(GLFWwindow *window, CommandSink command_sink, ControllerWindowSetup setup, ControllerFontData font_data,
+         std::string_view operating_system,
          diagnostics::PerformanceReport *performance);
     /// Require a drained controller; destruction is not a blocking drain path.
     ~Impl() noexcept;
@@ -471,8 +472,10 @@ namespace avb::desktop {
     GLFWwindowrefreshfun previous_refresh_callback_{};
     GLFWwindowiconifyfun previous_iconify_callback_{};
     bool display_callbacks_installed_{};
-    // The atlas borrows these bytes; context destruction precedes vector release.
-    std::vector<std::byte> font_data_;
+    // The atlas borrows these bytes; context destruction precedes payload release.
+    ControllerFontData font_data_;
+    // Metadata observation happens long after composition returns; own its text.
+    std::string operating_system_;
 
     VkInstance instance_{VK_NULL_HANDLE};
     VkSurfaceKHR surface_{VK_NULL_HANDLE};
@@ -556,7 +559,7 @@ namespace avb::desktop {
     performance_->observe_metadata(PerformanceOwner::Controller, {
       .gpu = performance_device_.deviceName,
       .driver = performance_driver_.data(),
-      .os = "Windows",
+      .os = operating_system_,
       .bridge = "controller",
       .present_mode = "FIFO",
       .ui_policy = "active 16.667ms; idle 100ms; grace 500ms; hidden input-driven; graphics poll 2ms",
@@ -567,14 +570,16 @@ namespace avb::desktop {
   }
 
   DesktopHost::Impl::Impl(
-    GLFWwindow *const window, CommandSink command_sink, ControllerWindowSetup setup, std::vector<std::byte> font_data,
+    GLFWwindow *const window, CommandSink command_sink, ControllerWindowSetup setup, ControllerFontData font_data,
+    std::string_view operating_system,
     diagnostics::PerformanceReport *performance)
       : window_{window},
         performance_{performance},
         command_sink_{std::move(command_sink)},
         controller_exclusion_{setup.exclusion},
         window_interaction_{std::move(setup.interaction)},
-        font_data_{std::move(font_data)}
+        font_data_{std::move(font_data)},
+        operating_system_{operating_system}
   {
     try {
       if (window_ == nullptr || !command_sink_ || !window_interaction_) {
@@ -1542,7 +1547,7 @@ namespace avb::desktop {
     // Application owns persisted preferences; controller geometry is session-only.
     // Disable both the implicit CWD/imgui.ini read and automatic writes.
     ImGui::GetIO().IniFilename = nullptr;
-    if (const auto configured = configure_controller_font(*ImGui::GetIO().Fonts, font_data_); !configured) {
+    if (const auto configured = configure_controller_font(*ImGui::GetIO().Fonts, font_data_.bytes, font_data_.face_index); !configured) {
       throw configured.error();
     }
     ImGui::StyleColorsDark();
@@ -3302,7 +3307,8 @@ namespace avb::desktop {
   DesktopHost &DesktopHost::operator=(DesktopHost &&) noexcept = default;
 
   std::expected<DesktopHost, core::AppError> DesktopHost::create(
-    CommandSink command_sink, ControllerWindowCreated window_created, std::vector<std::byte> font_data,
+    CommandSink command_sink, ControllerWindowCreated window_created, ControllerFontData font_data,
+    std::string_view operating_system,
     diagnostics::PerformanceReport *performance)
   {
     if (!command_sink || !window_created) {
@@ -3334,7 +3340,7 @@ namespace avb::desktop {
         return std::unexpected{setup.error()};
       }
       auto impl =
-        std::make_unique<Impl>(window, std::move(command_sink), std::move(*setup), std::move(font_data), performance);
+        std::make_unique<Impl>(window, std::move(command_sink), std::move(*setup), std::move(font_data), operating_system, performance);
       glfwShowWindow(window);
       return DesktopHost{std::move(impl)};
     } catch (const BackendVulkanFailure &failure) {

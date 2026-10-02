@@ -127,6 +127,7 @@ function(_avb0795_assert_known_production_targets)
       avb0795_ui
       avb0795_vulkan_renderer
       avb0795_windows
+      avb0795_linux_services
       avb0795_windows_graphics
       avb0795_desktop
       avb0795
@@ -179,6 +180,16 @@ function(avb0795_assert_target_boundaries)
     _avb0795_assert_sources(avb0795_ui "src/ui")
     _avb0795_assert_links(
       avb0795_ui avb0795_core avb0795_i18n imgui)
+  endif()
+
+  if(TARGET avb0795_linux_services)
+    _avb0795_assert_sources(avb0795_linux_services
+      "platform/linux/linux_preferences.cpp"
+      "platform/linux/linux_atomic_replace.cpp"
+      "platform/linux/linux_ui_language.cpp"
+      "platform/linux/controller_font.cpp")
+    _avb0795_assert_links(avb0795_linux_services
+      avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG)
   endif()
 
   if(TARGET avb0795_windows)
@@ -360,11 +371,11 @@ endfunction()
 function(_avb0795_scan_files category)
   set(files ${ARGN})
   set(portable_native_include
-      "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h[>\"]|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|unknwn\\.h|objbase\\.h|objidl[^>\"]*\\.h|vulkan/|glfw/|imgui_impl_(glfw|vulkan)\\.h|platform/windows/)")
+      "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h[>\"]|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|unknwn\\.h|objbase\\.h|objidl[^>\"]*\\.h|vulkan/|glfw/|imgui_impl_(glfw|vulkan)\\.h|platform/(windows|linux)/)")
   set(portable_native_symbol
       "(^|[^A-Za-z0-9_])(HANDLE|HDC|HINSTANCE|HMONITOR|HWND|IUnknown|IInspectable|ID3D[A-Za-z0-9_]*|IDXGI[A-Za-z0-9_]*|Vk[A-Z][A-Za-z0-9_]*)([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])winrt::")
   set(desktop_forbidden_include
-      "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h[>\"]|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|platform/windows/)")
+      "#[ \t]*include[ \t]*[<\"][^>\"]*(windows([./]|\\.h)|win[a-z0-9_]*\\.h[>\"]|winrt/|wrl/|d3d[^>\"]*\\.h|dxgi[^>\"]*\\.h|dxcore\\.h|dwmapi\\.h|shellapi\\.h|shobjidl[^>\"]*\\.h|combaseapi\\.h|roapi\\.h|platform/(windows|linux)/)")
 
   foreach(file IN LISTS files)
     file(READ "${file}" contents)
@@ -391,6 +402,18 @@ function(_avb0795_scan_files category)
       _avb0795_assert_no_match(
         "${file}" "${symbol_contents}" "${portable_native_symbol}"
         "portable source mentions a native graphics/platform type")
+    endif()
+
+    if(category STREQUAL "diagnostics" OR category STREQUAL "i18n" OR
+       category STREQUAL "core" OR category STREQUAL "app" OR
+       category STREQUAL "ui" OR category STREQUAL "desktop" OR category STREQUAL "render")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "platform/linux")
+      _avb0795_assert_no_match("${file}" "${normalized_lower_contents}"
+        "#[ \t]*include[ \t]*[<\"](fontconfig/|gio/|glib[^>\"]*|pipewire/|spa/|x11/|sys/(file|stat)\\.h|unistd\\.h|fcntl\\.h)"
+        "shared source includes a Linux native header")
+      _avb0795_assert_no_match("${file}" "${contents}"
+        "(^|[^A-Za-z0-9_])(FcConfig|FcPattern|FcCharSet|XEvent|GDBusConnection|pw_stream|spa_buffer)([^A-Za-z0-9_]|$)"
+        "shared source mentions a Linux native contract")
     endif()
 
     if(category STREQUAL "diagnostics" OR category STREQUAL "i18n" OR category STREQUAL "core" OR
@@ -483,6 +506,25 @@ function(_avb0795_scan_files category)
         "${contents}"
         "(^|[^A-Za-z0-9_])(ISourceCatalog|IReplicaRuntimeFactory|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack|WindowsFrameBridge|VulkanRenderer|WgcCaptureJob|WindowsCaptureSource|WindowsCapturedFrame)([^A-Za-z0-9_]|$)"
         "desktop shell reaches a port, replica runtime, config store, or native replica owner")
+    elseif(category STREQUAL "linux")
+      _avb0795_assert_app_includes("${file}" "${contents}")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "render")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "platform/windows")
+      file(RELATIVE_PATH linux_relative "${AVB0795_SOURCE_ROOT}" "${file}")
+      set(allowed_linux_i18n_headers)
+      set(allowed_linux_desktop_headers)
+      if(linux_relative MATCHES "^platform/linux/linux_ui_language\\.(hpp|cpp)$")
+        list(APPEND allowed_linux_i18n_headers i18n/language.hpp)
+      elseif(linux_relative MATCHES "^platform/linux/controller_font\\.(hpp|cpp)$")
+        list(APPEND allowed_linux_i18n_headers i18n/catalog.hpp)
+        list(APPEND allowed_linux_desktop_headers desktop/controller_font_data.hpp)
+      endif()
+      _avb0795_assert_layer_includes("${file}" "${contents}" "i18n" ${allowed_linux_i18n_headers})
+      _avb0795_assert_layer_includes("${file}" "${contents}" "desktop" ${allowed_linux_desktop_headers})
+      _avb0795_assert_no_match("${file}" "${contents}"
+        "(avb/)?core/(application_state|replica_session)|(avb/)?ui/|(^|[^A-Za-z0-9_])(Application|ApplicationState|ReplicaSession|ControllerView|DesktopHost)([^A-Za-z0-9_]|$)"
+        "Linux adapter reaches an owner outside its boundary")
     elseif(category STREQUAL "windows")
       get_filename_component(file_name "${file}" NAME)
       set(allowed_windows_app_headers avb/app/ports.hpp)
@@ -599,6 +641,9 @@ function(_avb0795_run_source_boundary_scan)
   _avb0795_collect_sources(windows_files "platform/windows")
   _avb0795_scan_files(windows ${windows_files})
 
+  _avb0795_collect_sources(linux_files "platform/linux")
+  _avb0795_scan_files(linux ${linux_files})
+
   _avb0795_collect_sources(render_files "render")
   _avb0795_scan_files(render ${render_files})
 
@@ -620,6 +665,7 @@ function(_avb0795_run_source_boundary_scan)
       ${ui_files}
       ${desktop_files}
       ${windows_files}
+      ${linux_files}
       ${render_files}
       ${main_files})
   foreach(file IN LISTS all_files)

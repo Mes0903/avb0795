@@ -37,7 +37,7 @@
         "rhs": "Linux"
       },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_BUILD_TYPE": "Debug",
         "AVB0795_BUILD_GRAPHICS": false,
         "AVB0795_BUILD_TESTS": true,
         "AVB0795_BUILD_LINUX_TESTS": false,

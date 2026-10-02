@@ -207,7 +207,7 @@ namespace {
         }
         return desktop::ControllerWindowSetup{*exclusion, std::move(*interaction)};
       },
-      std::move(*font_data), performance.get());
+      desktop::ControllerFontData{std::move(*font_data), 0}, "Windows", performance.get());
     if (!host_result) {
       report_error("controller startup", host_result.error());
       return 5;

@@ -24,18 +24,19 @@ namespace avb::desktop {
   /// One fixed range set serves every supported UI language, avoiding atlas
   /// replacement and new texture-upload lifetimes during a language switch.
   ///
-  /// Empty/unrepresentable storage and failed font registration return a typed
-  /// startup failure. Success means registration only: glyphs still depend on the
+  /// Negative collection indices, empty/unrepresentable storage and failed font
+  /// registration return a typed startup failure. Success means registration only: glyphs still depend on the
   /// supplied font, and baking/upload belongs to the host's fenced startup path.
   /// @pre The atlas is being configured during startup, not concurrently in use.
   [[nodiscard]] inline std::expected<void, core::AppError>
-  configure_controller_font(ImFontAtlas &atlas, std::span<std::byte> data)
+  configure_controller_font(ImFontAtlas &atlas, std::span<std::byte> data, int face_index = 0)
   {
-    if (data.empty() || data.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+    if (face_index < 0 || data.empty() || data.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
       return std::unexpected{core::AppError{core::AppErrorCode::RuntimeConstructionFailure}};
     }
     ImFontConfig config;
     config.FontDataOwnedByAtlas = false;
+    config.FontNo = static_cast<ImU32>(face_index);
     config.OversampleH = 1;
     config.OversampleV = 1;
     // Latin, punctuation, kana, bopomofo, BMP CJK (including Extension A),

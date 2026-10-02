@@ -251,3 +251,23 @@ if(WIN32)
     target_compile_features(avb0795 PRIVATE cxx_std_23)
   endif()
 endif()
+
+# Linux platform services are independent of application persistence policy and
+# presentation resources. Portable builds do not discover native font libraries.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(AVB0795_FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
+  add_library(avb0795_linux_services
+    ${PROJECT_SOURCE_DIR}/platform/linux/linux_preferences.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/linux_atomic_replace.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/linux_ui_language.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/controller_font.cpp
+  )
+  target_include_directories(avb0795_linux_services
+    PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include
+  )
+  target_compile_features(avb0795_linux_services PUBLIC cxx_std_23)
+  target_link_libraries(avb0795_linux_services
+    PRIVATE avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG
+  )
+endif()

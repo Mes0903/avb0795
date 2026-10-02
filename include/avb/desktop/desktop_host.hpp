@@ -11,12 +11,13 @@
 #include "avb/app/commands.hpp"
 #include "avb/app/controller_view_state.hpp"
 #include "avb/desktop/controller_window_interaction.hpp"
+#include "avb/desktop/controller_font_data.hpp"
 
 #include <expected>
 #include <cstddef>
 #include <functional>
 #include <memory>
-#include <vector>
+#include <string_view>
 
 struct GLFWwindow;
 
@@ -71,7 +72,8 @@ namespace avb::desktop {
     /// @brief Construct a controller without submitting graphics work during startup.
     ///
     /// Take ownership of the font bytes for the atlas lifetime and retain the
-    /// command sink. Invoke window_created once before UI setup; its error cancels
+    /// command sink. Copy the composition-supplied OS text for later diagnostics.
+    /// Invoke window_created once before UI setup; its error cancels
     /// construction, while its status is retained for later presentation.
     /// Startup failures release partial, never-submitted resources, so the caller
     /// receives either a complete movable host or a typed construction error.
@@ -79,7 +81,8 @@ namespace avb::desktop {
     /// and destruction; composition must keep that collector alive throughout.
     /// @pre GLFW is initialized and this is its main thread; both callables exist.
     [[nodiscard]] static std::expected<DesktopHost, core::AppError>
-    create(CommandSink command_sink, ControllerWindowCreated window_created, std::vector<std::byte> font_data,
+    create(CommandSink command_sink, ControllerWindowCreated window_created, ControllerFontData font_data,
+           std::string_view operating_system,
            diagnostics::PerformanceReport *performance = nullptr);
 
     /// Destroy before run or after a non-abandon result; never wait for the GPU.
