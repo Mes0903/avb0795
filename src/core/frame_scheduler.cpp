@@ -1,4 +1,5 @@
-/// @file Demand-latched FPS policy driven by externally supplied steady-clock time.
+/// @file
+/// @brief Demand-latched FPS policy driven by externally supplied steady-clock time.
 #include "avb/core/frame_scheduler.hpp"
 
 #include <cstdint>

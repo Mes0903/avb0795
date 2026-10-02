@@ -1,5 +1,5 @@
 /// @file
-/// Bounded recovery and no-progress timing; concrete owners perform all actions.
+/// @brief Bounded recovery and no-progress timing; concrete owners perform all actions.
 #include "render/graphics_retry_policy.hpp"
 
 #include <algorithm>
@@ -17,7 +17,7 @@ namespace avb::render {
     constexpr auto ownership_poll_interval = 50ms;
     constexpr auto stalled_threshold = 10s;
 
-    /// Only completed ownership facts restart the drain clock; retries/polls do not.
+    // Only completed ownership facts restart the drain clock; retries/polls do not.
     [[nodiscard]] constexpr bool
     is_drain_progress(const DrainProgress progress) noexcept
     {

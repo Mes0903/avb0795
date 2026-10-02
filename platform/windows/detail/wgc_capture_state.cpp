@@ -119,7 +119,9 @@ namespace avb::platform::windows::detail {
         final_quiescence_wake_claimed_ = false;
       }
     }
-    // Never clear here: callback set/recheck and opener store/read cover both races.
+    // Never clear here: if the callback sees closed intake it sets pending and
+    // rechecks open, while the opener stores open and reads pending. Their
+    // sequentially consistent ordering prevents both sides missing the wake.
     if (arrival_pending()) {
       wake_noexcept();
     }

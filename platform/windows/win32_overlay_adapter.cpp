@@ -600,7 +600,7 @@ namespace avb::platform::windows {
 
   std::expected<void, core::AppError>
   Win32OverlayAdapter::restore_client_geometry(
-    const OverlayClientGeometry &snapshot) noexcept
+    const OverlayClientGeometry &snapshot, const GeometryRestoreBounds bounds) noexcept
   {
     if (window_ == nullptr) {
       return std::unexpected{
@@ -619,14 +619,21 @@ namespace avb::platform::windows {
     if (!insets) {
       return std::unexpected{insets.error()};
     }
-    const auto work_area = nearest_work_area(window_);
-    if (!work_area) {
-      return std::unexpected{work_area.error()};
-    }
     const auto requested_outer =
       detail::content_to_outer_rect(snapshot.client_screen_rect, *insets);
-    const auto outer =
-      detail::clamp_outer_rect_to_work_area(requested_outer, *work_area);
+    auto outer = requested_outer;
+    if (bounds == GeometryRestoreBounds::WorkArea) {
+      const auto work_area = nearest_work_area(window_);
+      if (!work_area) {
+        return std::unexpected{work_area.error()};
+      }
+      outer = detail::clamp_outer_rect_to_work_area(requested_outer, *work_area);
+    }
+    else if (detail::outer_to_content_rect(requested_outer, *insets) !=
+             snapshot.client_screen_rect) {
+      // Saturated native coordinates cannot represent an exact original snapshot.
+      return std::unexpected{adapter_error(core::AppErrorCode::InvalidValue)};
+    }
     const auto outer_width = static_cast<std::int64_t>(outer.right) - outer.left;
     const auto outer_height = static_cast<std::int64_t>(outer.bottom) - outer.top;
     if (outer_width <= 0 || outer_height <= 0 ||
@@ -637,7 +644,7 @@ namespace avb::platform::windows {
     if (SetWindowPos(window_, nullptr, outer.left, outer.top,
                      static_cast<int>(outer_width),
                      static_cast<int>(outer_height),
-                     SWP_NOACTIVATE | SWP_NOZORDER) == FALSE) {
+                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING) == FALSE) {
       return std::unexpected{last_platform_error()};
     }
     const OverlayClientGeometry expected{
@@ -647,6 +654,42 @@ namespace avb::platform::windows {
         adapter_error(core::AppErrorCode::PlatformOperationFailure)};
     }
     return {};
+  }
+
+  std::expected<OverlayClientGeometry, core::AppError>
+  Win32OverlayAdapter::fit_client_geometry(
+    const OverlayClientGeometry &baseline, const core::Extent source) noexcept
+  {
+    if (window_ == nullptr) {
+      return std::unexpected{adapter_error(core::AppErrorCode::PlatformOperationFailure)};
+    }
+    const auto insets = frame_insets(window_, dpi_);
+    if (!insets) {
+      return std::unexpected{insets.error()};
+    }
+    const auto work_area = nearest_work_area(window_);
+    if (!work_area) {
+      return std::unexpected{work_area.error()};
+    }
+    const auto outer = detail::fit_content_rect(baseline.client_screen_rect, source,
+      *insets, *work_area);
+    if (!outer) {
+      return std::unexpected{adapter_error(core::AppErrorCode::InvalidValue)};
+    }
+    // The policy validates positive dimensions fitting the signed native API.
+    // Bypass WM_WINDOWPOSCHANGING's default tracking minimum: a validated fit
+    // can be narrower than interactive chrome, and exact readback remains required.
+    if (SetWindowPos(window_, nullptr, outer->left, outer->top,
+        outer->right - outer->left, outer->bottom - outer->top,
+        SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING) == FALSE) {
+      return std::unexpected{last_platform_error()};
+    }
+    const OverlayClientGeometry target{
+      .client_screen_rect = detail::outer_to_content_rect(*outer, *insets)};
+    if (!client_geometry_matches(target)) {
+      return std::unexpected{adapter_error(core::AppErrorCode::PlatformOperationFailure)};
+    }
+    return target;
   }
 
   bool Win32OverlayAdapter::client_geometry_matches(

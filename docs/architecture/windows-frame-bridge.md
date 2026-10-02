@@ -2,22 +2,25 @@
 
 ```mermaid
 flowchart LR
-  WGC[WGC checkout<br/>WindowsCapturedFrame] -->|submit：移交影格| B[WindowsFrameBridge]
-  F[WindowsRenderStack<br/>接納 / transport / aggregate facts] -->|SlotKey / FrameStamp| B
-  B --> P[D3 CopySubresourceRegion]
-  P --> Q[query / shared fence<br/>producer completion proof]
-  Q -->|完成證據| R[歸還 WGC checkout]
-  Q --> C[CPU Map / CpuRowsView]
-  C -->|同步 consumer| U[renderer upload<br/>row copy / flush]
-  U -->|返回| M[RAII Unmap]
-  Q --> G[ExternalReady<br/>CompletedProducerWait]
-  M --> E[BridgeProgress<br/>最多三筆 keyed completion]
-  G --> E
-  E --> F
-  F -->|typed handoff| VR[VulkanRenderer<br/>canonical slot phase / image users]
-  VR --> V[Vulkan submission]
-  V --> S[submission retirement]
-  S --> T[presentation retirement]
+  WGC[WGC checkout<br/>WindowsCapturedFrame] -->|資料：submit 移交影格| B[WindowsFrameBridge]
+  F[WindowsRenderStack<br/>接納 / transport / aggregate facts] -->|擁有；資料：SlotKey / FrameStamp| B
+  B -->|擁有| Imports[D3 textures / fences<br/>Vulkan imports]
+  B -->|控制：發起 copy| P[D3 CopySubresourceRegion]
+  P -->|證據：producer completion| Q[query / shared fence]
+  Q -->|證據：copy 完成| R[歸還 WGC checkout]
+  Q -->|控制：CPU delivery| C[CPU Map / CpuRowsView]
+  C -.->|借用：同步 consumer| U[renderer upload<br/>row copy / flush]
+  U -->|控制：返回| M[RAII Unmap]
+  Q -->|資料：completed wait| G[ExternalReady]
+  M -->|資料：CpuConsumed| E[BridgeProgress<br/>最多三筆 keyed completion]
+  G -->|資料：keyed completion| E
+  E -->|資料：completion batch| F
+  F -->|擁有；資料：typed completion| VR[VulkanRenderer<br/>canonical slot phase / image users]
+  VR -.->|借用：registered image / completed wait| Imports
+  VR -->|控制：submit| V[Vulkan submission]
+  V -->|證據：submission fence| S[submission retirement]
+  VR -->|控制：present enqueue| Present[獨立 PresentRecord]
+  Present -->|證據：present fence| T[presentation retirement]
 ```
 
 為了讓來源擷取與 Vulkan 顯示各自維持明確的資源生命週期，系統需要分別保存 D3 copy、Vulkan submission 與 presentation 的完成證據。`WindowsFrameBridge` 管理 D3 device、immediate context、三個 producer slots、已接收的 WGC checkout，以及 D3 shared texture／fence 與對應的 Vulkan imported image／memory／view／timeline。`VulkanRenderer` 管理 canonical slot phase、Vulkan device、CPU upload 與顯示資源；`WindowsRenderStack` 協調影格接納、bridge selection、ring transaction 與兩個 owners 的進度。
@@ -135,7 +138,7 @@ row_bytes = content.width × 4
 source_span_bytes = (content.height − 1) × row_pitch + row_bytes
 ```
 
-bridge 與 renderer 都會檢查尺寸、pitch 與位址計算的可表示範圍。renderer 在 consumer 返回前完成 row copy 與必要的 noncoherent flush，bridge 的 RAII guard 隨後執行 Unmap。目前 upload 先清除完整 allocation，再逐列複製有效內容；padding 最佳化屬於後續 CPU row packing 階段。
+bridge 與 renderer 都會檢查尺寸、pitch 與位址計算的可表示範圍。renderer 在 consumer 返回前，透過 `copy_bgra_rows` 逐列複製 content，清除右側與下方 padding，再執行必要的 noncoherent flush；bridge 的 RAII guard 隨後執行 Unmap。令 allocation bytes 為 `A`、content bytes 為 `C`，每幀 copy=`C`、clear=`A-C`，Vulkan upload 維持 `A`。完整 content 的 clear 為 0，來源縮小時新增 padding 依本幀尺寸清零；詳細契約見 [CPU rows](shared-vulkan-renderer.md#cpu-rows內容複製與-padding-定義)。
 
 consumer 的借用期間涵蓋一次 `progress` 呼叫。這段期間維持 bridge、slot 與 owning aggregate 的穩定生命週期，可讓 mapped address、context 與 texture 共同保持有效。
 
@@ -143,31 +146,29 @@ consumer 的借用期間涵蓋一次 `progress` 呼叫。這段期間維持 brid
 
 ```mermaid
 flowchart TD
-  P[progress 掃描三個 producer slots] --> B[固定容量 BridgeProgress]
-  B --> E[ExternalReady → GpuReady]
-  B --> C[CpuConsumed → 確認 CpuReady]
-  B --> D[SafeDiscard / CpuConsumerFailed<br/>歸還 canonical reservation]
-  X[drain / Vulkan loss / fallback] --> K[已完成 copy：discard<br/>進行中 copy：持續取得 proof]
-  K --> P
-  L[已確認 D3 removal] --> P
-  D --> R[renderer refs 與 image users 退休]
-  R --> S[釋放 ring resources]
-  S --> T[釋放 bridge device]
+  P[progress 掃描三個 producer slots] -->|資料：keyed completions| B[固定容量 BridgeProgress]
+  B -->|資料：ExternalReady| E[GpuReady]
+  B -->|資料：CpuConsumed| C[確認 CpuReady]
+  B -->|資料：SafeDiscard / CpuConsumerFailed| D[歸還 canonical reservation]
+  X[drain / Vulkan loss / fallback] -->|控制：關閉接納| K[已完成 copy：discard<br/>進行中 copy：持續取得 proof]
+  K -->|控制：持續 progress| P
+  L[已確認 D3 removal] -->|證據：producer obligation| P
+  D -->|證據：producer 完成| R[Ring allocation idle<br/>含 renderer image-user proof]
+  R -->|控制：detach_ring serial| Refs[撤銷 descriptor / retained refs]
+  Refs -->|控制：release_ring| S[釋放 bridge imports 與 ring resources]
+  S -->|控制：release_ring_resources| Keep[釋放 renderer ring<br/>devices 與獨立 presents 持續存活]
+  X -->|證據：全部 producer / Vulkan / present work 完成| All[Final detach_for_shutdown]
+  All -->|控制：撤銷 renderer refs| FinalRefs[釋放 bridge imports / timeline / D3 owners]
+  FinalRefs -->|控制：最後釋放| Device[Renderer Vulkan device]
 ```
 
 為了保持錯誤來源清楚，`BridgeProgress::terminal_error` 承接 native producer failure，`CpuConsumerFailed` 承接 renderer upload failure。renderer 依照這個來源判斷 Vulkan device loss，D3 completion 則持續使用自己的證據。
 
 每次 progress 最多產生三筆完成事件。consumer 失敗後，同批剩餘 slots 轉入 proof／discard 流程。健康 D3 device 回報 query error 時，bridge 保存 checkout 與 terminal error，並提供後續 poll deadline，讓關閉流程持續嘗試取得完成證據。
 
-釋放採用以下順序：
+為了讓來源 allocation 更換時保留獨立呈現工作，ring detach 使用 allocation-local proof：bridge 的 copy／Map records 已完成，renderer 的 image users 已退休。Aggregate 消費 keyed completion、歸還 canonical reservation，接著 `detach_ring` 驗證 installation serial 與每個 slot identity，reset descriptor pool 並撤銷 retained／image references；reset 失敗時保存 ring owners 並回報錯誤。Facade 以相同 serial 呼叫 bridge `release_ring`，釋放 imported view／image／memory、D3 texture、staging／query，再釋放 renderer ring resources。Devices 與獨立 present records 依各自生命週期持續存活。
 
-1. 關閉 frame admission，持續推進 producer、submission 與 presentation 的完成證據。
-2. 消費 keyed completion，歸還對應的 canonical reservation。
-3. 退休 renderer 的 image users、retained reference 與 descriptor 相關資源。
-4. 以目前的 serial 呼叫 `release_ring`，依序釋放 imported view／image／memory 與 D3 texture，再回收 staging／query。
-5. 在 aggregate 清理階段釋放 bridge 的 timeline、D3 owners，接著釋放 renderer 的 Vulkan device。
-
-一般 ring detach 先驗證 installation serial、每個 slot identity 與 image-user proof，再 reset descriptor pool；reset 失敗時保存 ring owners 並回報錯誤。最終 teardown 在取得退休證據後直接銷毀 descriptor pool，清除 ring references，釋放 bridge，最後銷毀 Vulkan device。
+最終 aggregate teardown 需要全部 producer 與 Vulkan native work 的完成證據，包含獨立 presentation。`detach_for_shutdown` 直接銷毀 descriptor pool、清除 ring references，接著釋放 bridge imports、timeline 與 D3 owners，最後釋放 renderer 的 Vulkan device。D3 proof、acquire／submission proof 與 present proof 各自支持對應的 obligation；Vulkan loss 也保留 producer 完成檢查。
 
 `has_pending_inputs()` 同時涵蓋 copy-pending 與 Map-pending records。析構保留 fail-closed invariant：仍有 producer obligation 時會終止程序，以維持 checkout 與原生資源的安全生命週期。
 

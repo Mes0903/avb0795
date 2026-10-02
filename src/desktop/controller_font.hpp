@@ -1,5 +1,7 @@
 /// @file
-/// Startup-only font-atlas configuration; native font loading is platform-owned.
+/// @brief Startup-only atlas configuration over caller-owned font bytes.
+/// Native file discovery/loading stays outside this helper. Registering a font
+/// here neither bakes the atlas nor submits a graphics upload.
 #ifndef AVB0795_DESKTOP_CONTROLLER_FONT_HPP
 #define AVB0795_DESKTOP_CONTROLLER_FONT_HPP
 
@@ -14,9 +16,18 @@
 
 namespace avb::desktop {
 
-  /// Register the supplied system font and fixed Latin/CJK glyph coverage.
-  /// The caller retains the bytes until the atlas is destroyed. Baking/upload
-  /// stays on the host's startup/fence path instead of dynamic backend uploads.
+  /// @brief Register fixed Latin/CJK coverage without transferring font-byte ownership.
+  ///
+  /// The atlas borrows data because the host already owns its storage. Keep the
+  /// bytes valid and unchanged until the atlas is destroyed; keeping them only
+  /// until this function returns would leave deferred font processing dangling.
+  /// One fixed range set serves every supported UI language, avoiding atlas
+  /// replacement and new texture-upload lifetimes during a language switch.
+  ///
+  /// Empty/unrepresentable storage and failed font registration return a typed
+  /// startup failure. Success means registration only: glyphs still depend on the
+  /// supplied font, and baking/upload belongs to the host's fenced startup path.
+  /// @pre The atlas is being configured during startup, not concurrently in use.
   [[nodiscard]] inline std::expected<void, core::AppError>
   configure_controller_font(ImFontAtlas &atlas, std::span<std::byte> data)
   {

@@ -1,3 +1,7 @@
+# Compile GLSL first, then embed its exact SPIR-V words into generated C++.
+# Explicit outputs/dependencies let an ordinary build (or the IDE's shader target)
+# establish declarations without loading shader files from the runtime CWD.
+# All generated output stays in the build tree, never beside first-party source.
 set(avb0795_spirv_directory
   "${PROJECT_BINARY_DIR}/generated/spirv")
 set(avb0795_generated_render_directory
@@ -60,6 +64,8 @@ add_custom_command(
   VERBATIM
 )
 
+# A named dependency boundary for consumers of both the generated declaration and
+# definition. It performs no capture, graphics initialization, or application run.
 add_custom_target(avb0795_replica_shaders
   DEPENDS
     "${avb0795_replica_shader_header}"

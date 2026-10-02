@@ -1,4 +1,5 @@
-/// @file Allocation-free chord validation and canonical owned text formatting.
+/// @file
+/// @brief Allocation-free chord validation and canonical owned text formatting.
 #include "avb/core/hotkey.hpp"
 
 #include <cstddef>

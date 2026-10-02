@@ -1,4 +1,5 @@
-/// @file Clock-driven frame admission without sleeps or catch-up rendering.
+/// @file
+/// @brief Clock-driven frame admission without sleeps or catch-up rendering.
 #ifndef AVB0795_CORE_FRAME_SCHEDULER_HPP
 #define AVB0795_CORE_FRAME_SCHEDULER_HPP
 
@@ -9,23 +10,33 @@
 
 namespace avb::core {
 
-  /// One polling decision; next_wake is present only for deferred pending work.
+  /// @brief One admission decision, not evidence that a frame was rendered or presented.
+  /// next_wake is present only when pending work was deferred by a cap. An empty
+  /// deadline asks the caller to rely on new events rather than periodic polling.
   struct FrameSchedule {
     bool render{};
     std::optional<std::chrono::steady_clock::time_point> next_wake;
   };
 
-  /// Coalesces frame/redraw demand under a fixed cap on the caller's thread.
-  /// The caller supplies monotonic time and performs rendering/waiting itself.
+  /// @brief Coalesce frame and redraw demand on a fixed deadline grid.
+  /// The caller supplies monotonic time and owns rendering, frame storage and waits.
+  /// No work is queued here beyond a demand bit; reconstruct the scheduler to change
+  /// the cap. Calls are confined to one thread or require external serialization.
   class FrameScheduler final {
   public:
     using Clock = std::chrono::steady_clock;
 
-    /// Anchor capped deadlines at now so initial work can render immediately.
+    /// @brief Anchor capped deadlines at now so initial work can render immediately.
+    /// @pre fps_cap is a declared enumerator; subsequent poll times use this clock.
     FrameScheduler(FpsCap fps_cap, Clock::time_point now) noexcept;
 
-    /// Latch demand until eligible, then admit one render and skip missed periods.
+    /// @brief Latch either demand signal until eligible, then consume it in one admission.
+    /// Repeated signals coalesce while waiting. Admission advances past all elapsed
+    /// grid slots, so a delayed tick never creates a catch-up burst. The grid is
+    /// anchored at construction, not at the last admission; this does not promise
+    /// a full frame period between two admissions near a grid boundary.
     /// Idle and Unlimited polls never create a periodic wake without pending work.
+    /// @pre now does not move backwards relative to previous polls.
     [[nodiscard]] FrameSchedule poll(Clock::time_point now, bool has_new_frame, bool redraw_requested) noexcept;
 
   private:

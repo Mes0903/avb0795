@@ -28,6 +28,9 @@ namespace avb::platform::windows {
                            const OverlayClientGeometry &) = default;
   };
 
+  /// Forward border changes use work-area bounds; rollback restores the exact snapshot.
+  enum class GeometryRestoreBounds { WorkArea, Exact };
+
   /// Drag endpoints in physical client pixels, bounded by the displayed content.
   struct OverlayRegionGesture final {
     detail::NativePoint start;
@@ -128,13 +131,25 @@ namespace avb::platform::windows {
     /// Snapshot content placement before changing GLFW's border attributes.
     [[nodiscard]] std::expected<OverlayClientGeometry, core::AppError>
     snapshot_client_geometry() const noexcept;
-    /// @brief Restore client placement with current border insets and work-area bounds.
+    /// @brief Fit baseline client width and return the verified client geometry.
+    ///
+    /// Current frame insets and the nearest work area bound the content aspect.
+    /// The native move preserves activation/Z order and requires exact readback.
+    /// Programmatic fit bypasses the interactive minimum tracking dimensions.
+    /// Invalid inputs or native failure leave rollback to the calling transaction.
+    [[nodiscard]] std::expected<OverlayClientGeometry, core::AppError>
+    fit_client_geometry(const OverlayClientGeometry &baseline, core::Extent source) noexcept;
+    /// @brief Restore client placement with current border insets and the selected bounds.
     ///
     /// The outer rectangle is clamped to the nearest monitor's work area, so the
-    /// resulting client rectangle can differ from the original snapshot. Success
-    /// verifies that computed result; it does not promise the old rectangle fits.
+    /// resulting client rectangle can differ from the original snapshot. Exact
+    /// skips that clamp and verifies the original snapshot for transaction rollback.
+    /// Unrepresentable outer geometry is rejected before moving; failed native
+    /// operations/readback report an error and require caller-owned rollback.
+    /// Programmatic placement bypasses interactive tracking minimum dimensions.
     [[nodiscard]] std::expected<void, core::AppError>
-    restore_client_geometry(const OverlayClientGeometry &snapshot) noexcept;
+    restore_client_geometry(const OverlayClientGeometry &snapshot,
+      GeometryRestoreBounds bounds = GeometryRestoreBounds::WorkArea) noexcept;
     /// @brief Compare native client geometry with the supplied rectangle exactly.
     ///
     /// No clamping is performed here. A caller checking an original snapshot

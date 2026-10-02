@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Airelinna V1 uses the pinned dependencies listed below. GLFW, Dear ImGui, and
+avb0795 V1 uses the pinned dependencies listed below. GLFW, Dear ImGui, and
 nlohmann/json are statically linked into the Windows product. Catch2 is used
 only to build the test executables and is not included in the release archive.
 
@@ -10,8 +10,8 @@ Source: https://github.com/glfw/glfw/releases/tag/3.4
 
 License: zlib/libpng
 
-Airelinna builds a patched copy of GLFW 3.4. The checked-in patch removes
-`CS_OWNDC` only from GLFW's main Win32 window class because Airelinna creates
+avb0795 builds a patched copy of GLFW 3.4. The checked-in patch removes
+`CS_OWNDC` only from GLFW's main Win32 window class because avb0795 creates
 Vulkan `GLFW_NO_API` windows. GLFW's helper window class is unchanged. This is
 an altered source version, and the exact change is recorded in
 `third_party/patches/glfw-3.4-win32-no-own-dc.patch`.
@@ -42,8 +42,8 @@ Source: https://github.com/ocornut/imgui/releases/tag/v1.92.9
 
 License: MIT
 
-Airelinna patches the Vulkan backend so fallible object creation commits
-handles to backend-owned state only after success. This lets Airelinna stop the
+avb0795 patches the Vulkan backend so fallible object creation commits
+handles to backend-owned state only after success. This lets avb0795 stop the
 backend immediately on an error without later destroying an undefined Vulkan
 output. The exact change is recorded in
 `third_party/patches/imgui-1.92.9-vulkan-safe-failure.patch`.
@@ -127,3 +127,16 @@ THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE FOR ANY
 DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+## dkjson 2.11 — development tooling dependency only
+
+Source: https://dkolf.de/dkjson-lua/dkjson-2.11.lua
+
+License: MIT
+
+Copyright (C) 2010-2026 David Heiko Kolf
+
+The unmodified source and full upstream license are retained in
+`tools/vendor/dkjson.lua`; its hash is recorded in `tools/vendor/README.md`.
+This is an optional development inventory dependency only. The avb0795
+executable does not load it.

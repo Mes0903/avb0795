@@ -1,5 +1,5 @@
 /// @file
-/// @brief One WGC session/pool generation, contained intake, and nonblocking stop.
+/// @brief One WGC session/pool generation, contained intake, and staged stop.
 /// See the matching header for the caller-facing lifetime and thread contract.
 
 #include "platform/windows/wgc_capture_job.hpp"
@@ -284,6 +284,8 @@ namespace avb::platform::windows {
                                                            : PixelFormat::Unknown;
         const auto sequence =
           next_sequence_.fetch_add(1, std::memory_order_relaxed);
+        // Preserve unclipped size for reconfiguration, but carry only the
+        // intersection with allocated storage to any consumer that copies pixels.
         const auto copyable_content =
           detail::copyable_content_extent(content, observed_allocation);
         return AcquiredFrame{
@@ -452,6 +454,8 @@ namespace avb::platform::windows {
       }
       try {
         frame_state_->recreate(direct3d_device_, allocation, generation);
+        // Registration can still fail after native recreation. Keep intake
+        // closed until the runtime accepts the whole replacement generation.
         frame_arrived_token_ = frame_state_->register_arrival();
         token_registered_ = true;
         prepared_ = true;

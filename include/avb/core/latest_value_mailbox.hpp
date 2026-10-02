@@ -1,4 +1,5 @@
-/// @file One-slot owning handoff with replacement instead of a frame backlog.
+/// @file
+/// @brief One-slot owning handoff with replacement instead of a frame backlog.
 #ifndef AVB0795_CORE_LATEST_VALUE_MAILBOX_HPP
 #define AVB0795_CORE_LATEST_VALUE_MAILBOX_HPP
 
@@ -9,28 +10,41 @@
 
 namespace avb::core {
 
-  /// Mutex-protected newest-value handoff; supports move-only owning payloads.
-  /// The mailbox owns at most one pending value. Destruction of displaced payload
-  /// owners happens after unlocking; moved-from values are reset under the lock.
-  /// Callers must keep this object alive until all concurrent operations finish.
+  /// @brief Transfer the newest pending value between synchronized producers and consumers.
+  ///
+  /// A pending value is replaceable work, so consumers receive freshness rather
+  /// than a FIFO history. Taking a value transfers its ownership out of the slot;
+  /// later submissions cannot replace a value already held by a consumer.
+  /// Displaced payload owners are released after unlocking, allowing their final
+  /// release to reenter the mailbox. Moves and moved-from destruction still run
+  /// under the mutex and must not reenter it.
+  ///
+  /// @pre Keep the mailbox alive until every concurrent operation has finished;
+  /// close() stops admission but does not synchronize destruction with callers.
+  /// @note Throwing payload moves can change the slot and counters before failure;
+  /// this generic container does not provide a strong exception guarantee.
   template <typename T>
   class LatestValueMailbox final {
   public:
-    /// BecameReady identifies the empty-to-ready edge a producer may use to wake
-    /// its consumer. Replacement need not repeatedly wake a capped scheduler.
+    /// @brief Identify the admission edge observed while holding the mutex.
+    /// BecameReady lets a producer wake an idle consumer; replacing already-pending
+    /// work needs no extra wake. A consumer or reentrant release can empty the slot
+    /// before submit() returns, so this is not a current-readiness query.
     enum class SubmitResult { BecameReady,
                               ReplacedPending,
                               Closed };
 
-    /// Accepted submissions, overwrites, and successful takes; closed rejects are excluded.
+    /// @brief Count submissions admitted before payload insertion, replacements
+    /// transferred out of the slot, and successful takes; closed rejects do not count.
     struct Counters {
       std::uint64_t submitted{};
       std::uint64_t replaced{};
       std::uint64_t taken{};
     };
 
-    /// Take ownership by value, replacing older work or discarding it when closed.
-    /// Payload move operations may throw; no generic no-throw guarantee is imposed.
+    /// @brief Consume the supplied owner, replacing older pending work if open.
+    /// Closed rejection still consumes the by-value argument and releases it on
+    /// return. Payload move failures propagate; admission counters are not rolled back.
     [[nodiscard]] SubmitResult submit(T value)
     {
       // Keep the displaced owner outside the critical section for its final release.
@@ -57,7 +71,9 @@ namespace avb::core {
       return result;
     }
 
-    /// Transfer the newest pending value to the consumer, leaving the slot empty.
+    /// @brief Transfer the newest pending owner to the caller, leaving the slot empty.
+    /// An empty result means no value was pending at this operation's lock boundary;
+    /// it does not distinguish an open empty mailbox from a closed one.
     [[nodiscard]] std::optional<T> take()
     {
       std::optional<T> value;
@@ -74,7 +90,7 @@ namespace avb::core {
       return value;
     }
 
-    /// Permanently reject future submissions and release any pending payload.
+    /// @brief Permanently reject future submissions and release any pending payload.
     /// This does not join producers or prove that external callbacks have quiesced.
     void close()
     {
@@ -90,7 +106,7 @@ namespace avb::core {
       }
     }
 
-    /// Copy one coherent counter snapshot while holding the mailbox mutex.
+    /// @brief Copy one coherent counter snapshot while holding the mailbox mutex.
     [[nodiscard]] Counters counters() const
     {
       const std::lock_guard lock{mutex_};

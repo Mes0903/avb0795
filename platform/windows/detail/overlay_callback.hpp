@@ -9,8 +9,13 @@
 
 namespace avb::platform::windows::detail {
 
-  /// Prepare before mutating adapter state; failures fall back to the saved WndProc.
-  /// WM_NCDESTROY always forwards first and then clears callback reachability.
+  /// @brief Dispatch a prepared native message without letting exceptions escape.
+  ///
+  /// Operations and message-owned pointers are borrowed for this synchronous
+  /// invocation only. Failed preparation or an unhandled commit delegates to the
+  /// saved procedure. Final destruction forwards first, keeping the old procedure
+  /// and context usable during its cleanup, then clears callback reachability.
+  /// Exception containment preserves the native boundary, not successful handling.
   template <class Operations>
   [[nodiscard]] LRESULT
   dispatch_overlay_callback(Operations &operations, const UINT message, const WPARAM word_parameter, const LPARAM long_parameter) noexcept

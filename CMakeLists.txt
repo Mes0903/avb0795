@@ -1,6 +1,10 @@
+# Project composition only: dependency population precedes production targets,
+# and architecture checks run before test-only targets enter the directory tree.
+# Platform selection controls which native owners are compiled; it does not add
+# a platform service to the portable application/core libraries.
 cmake_minimum_required(VERSION 3.28)
 
-project(avb0795 LANGUAGES CXX)
+project(avb0795 VERSION 1.0.0 LANGUAGES CXX)
 
 option(AVB0795_BUILD_TESTS "Build avb0795 tests" ON)
 option(AVB0795_ENABLE_WINDOWS_INTEGRATION "Enable Windows integration" OFF)
@@ -18,6 +22,12 @@ endif()
 
 add_subdirectory(src)
 
+if(WIN32)
+  include(cmake/Packaging.cmake)
+endif()
+
+# Validate the configured ownership/link graph now. The separate source target
+# scans source text on demand; neither check is a replacement for the other.
 avb0795_assert_target_boundaries()
 avb0795_add_source_boundary_target()
 

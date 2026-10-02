@@ -59,6 +59,17 @@ namespace avb::platform::windows {
       return settings.selecting_region ? 100 : settings.opacity_percent;
     }
 
+    [[nodiscard]] core::Extent effective_presentation_extent(
+      const core::ReplicaSettings &settings, const core::Extent content) noexcept
+    {
+      if (!settings.selecting_region && settings.region) {
+        if (const auto region = core::intersect_region(*settings.region, content)) {
+          return {region->width, region->height};
+        }
+      }
+      return content;
+    }
+
     [[nodiscard]] bool same_selection_geometry(const render::PresentationSnapshot &a,
                                                const render::PresentationSnapshot &b) noexcept
     {
@@ -94,7 +105,9 @@ namespace avb::platform::windows {
     WindowsReplicaRuntime &owner;
     core::ReplicaSettings requested;
     Clock::time_point now;
+    std::optional<core::Extent> fit_extent;
     std::optional<OverlayClientGeometry> geometry;
+    std::optional<OverlayClientGeometry> fitted_geometry;
     bool border_changed{};
     bool began_selection{};
 
@@ -125,7 +138,7 @@ namespace avb::platform::windows {
     [[nodiscard]] bool apply_border()
     {
       border_changed = requested.border != owner.settings_.border;
-      if (!border_changed) {
+      if (!border_changed && !fit_extent) {
         return true;
       }
       auto captured = owner.adapter_->snapshot_client_geometry();
@@ -136,6 +149,9 @@ namespace avb::platform::windows {
         return false;
       }
       geometry = *captured;
+      if (!border_changed) {
+        return true;
+      }
       const auto changed = owner.overlay_->set_border(requested.border);
       if (!changed) {
         if (changed.error().code == core::AppErrorCode::RuntimeStateLost) {
@@ -149,6 +165,17 @@ namespace avb::platform::windows {
 
     [[nodiscard]] bool apply_geometry()
     {
+      if (fit_extent) {
+        const auto fitted = owner.adapter_->fit_client_geometry(*geometry, *fit_extent);
+        if (!fitted) {
+          if (fitted.error().code == core::AppErrorCode::RuntimeStateLost) {
+            throw fitted.error();
+          }
+          return false;
+        }
+        fitted_geometry = *fitted;
+        return true;
+      }
       if (!border_changed) {
         return true;
       }
@@ -193,7 +220,9 @@ namespace avb::platform::windows {
              owner.adapter_->opacity_percent() == effective_opacity(requested) &&
              owner.adapter_->presentation_matches(effective_mode(requested), effective_opacity(requested)) &&
              owner.adapter_->border_preference() == requested.border &&
-             owner.overlay_->border_matches(requested.border) && helper_matches;
+             owner.overlay_->border_matches(requested.border) &&
+             (!fitted_geometry || owner.adapter_->client_geometry_matches(*fitted_geometry)) &&
+             helper_matches;
     }
 
     [[nodiscard]] bool rollback(const Snapshot &snapshot) noexcept
@@ -217,7 +246,8 @@ namespace avb::platform::windows {
       restored = restored && border.has_value();
       owner.adapter_->set_border_preference(snapshot.settings.border);
       if (geometry) {
-        const auto position = owner.adapter_->restore_client_geometry(*geometry);
+        const auto position = owner.adapter_->restore_client_geometry(
+          *geometry, GeometryRestoreBounds::Exact);
         restored = restored && position.has_value();
       }
       return restored;
@@ -355,21 +385,31 @@ namespace avb::platform::windows {
     }
     const bool region_edit = settings.region != settings_.region;
     const bool begin_selection = settings.selecting_region && !settings_.selecting_region;
+    const bool content_available =
+      presented_content_ && !source_disconnected_ && !source_job_stopping_ &&
+      !pending_failed_event_ && device_recovery_phase_ == DeviceRecoveryPhase::Inactive &&
+      reconfiguration_phase_ == detail::SourceReconfigurationPhase::Inactive;
     // A new source selection clears its session-local crop while an interrupted
     // old owner can remain visible. Accept that clear with general preferences;
     // setting a positive crop or beginning selection requires current geometry.
-    if (((region_edit && settings.region) || begin_selection) &&
-        (!presented_content_ || source_disconnected_ || source_job_stopping_ ||
-         pending_failed_event_ || device_recovery_phase_ != DeviceRecoveryPhase::Inactive ||
-         reconfiguration_phase_ != detail::SourceReconfigurationPhase::Inactive)) {
+    if (((region_edit && settings.region) || begin_selection) && !content_available) {
       return std::unexpected{core::AppError{.code = core::AppErrorCode::InvalidCommand}};
     }
     if (region_edit && settings.region &&
         !core::valid_region(*settings.region, *presented_content_)) {
       return std::unexpected{core::AppError{.code = core::AppErrorCode::InvalidValue}};
     }
+    // Selection cancellation can run before interrupted content is cleared.
+    // Preserve clear/cancel admission while excluding those stale native dimensions.
+    const bool fit_available = content_available &&
+      !last_render_result_.presentation_suspended && !last_render_result_.device_loss &&
+      !last_render_result_.terminal_error;
+    const bool fit_changed = region_edit || settings.selecting_region != settings_.selecting_region;
     SettingsOperations operations{
-      .owner = *this, .requested = settings, .now = Clock::now()};
+      .owner = *this, .requested = settings, .now = Clock::now(),
+      .fit_extent = fit_changed && fit_available
+        ? std::optional{effective_presentation_extent(settings, *presented_content_)}
+        : std::nullopt};
     return detail::apply_settings_transaction(operations);
   }
 
@@ -803,16 +843,9 @@ namespace avb::platform::windows {
     if (!adapter_) {
       return;
     }
-    core::Extent extent{};
-    if (presented_content_) {
-      extent = *presented_content_;
-      if (!settings_.selecting_region && settings_.region) {
-        if (const auto region = core::intersect_region(*settings_.region, extent)) {
-          extent = {region->width, region->height};
-        }
-      }
-    }
-    adapter_->update_source_extent(extent);
+    adapter_->update_source_extent(presented_content_
+      ? effective_presentation_extent(settings_, *presented_content_)
+      : core::Extent{});
   }
 
   void WindowsReplicaRuntime::cancel_region_selection(TickCandidates &candidates) noexcept

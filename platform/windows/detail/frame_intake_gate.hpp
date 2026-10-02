@@ -10,8 +10,12 @@
 
 namespace avb::platform::windows::detail {
 
-  /// Serializes native acquisition, validation, and mailbox publication as one unit.
-  /// A losing callback only records contention; it does not wait for the claimant.
+  /// @brief Coalesce overlapping intake attempts without a waiting consumer queue.
+  ///
+  /// The claimant owns native acquisition through mailbox publication. A loser
+  /// sets a single pending bit, so many arrivals request one later service pass
+  /// rather than accumulating stale frames or blocking a native callback thread.
+  /// Admission and generation checks remain the caller's responsibility.
   class FrameIntakeGate final {
   public:
     /// Claim exclusive intake, or atomically request one later service opportunity.
@@ -30,10 +34,12 @@ namespace avb::platform::windows::detail {
       }
     }
 
-    // Called only by the claimant, after native pull and mailbox publication.
-    // Marking contention in the same atomic word prevents a lost release wake.
-    /// Release intake and report whether an overlapping caller needs rearming.
-    /// The caller still holds callback admission while rearming and waking.
+    /// @brief Release intake and report contention that needs another service pass.
+    ///
+    /// Pending and ownership share one atomic word to avoid losing contention at
+    /// release. The caller retains callback admission while rearming and waking,
+    /// which keeps borrowed host access covered by the callback lifetime proof.
+    /// @pre Only the current claimant calls this, after acquisition and publication.
     [[nodiscard]] bool release() noexcept
     {
       return (state_.exchange(0, std::memory_order_acq_rel) & pending) != 0;

@@ -44,8 +44,12 @@ namespace avb::platform::windows {
 
   class WindowsCaptureSource;
 
-  /// Move-only runtime lease on the exact catalog-published item observation.
-  /// The shared control block prevents refresh while any lease is retained.
+  /// @brief Retain the exact item observation selected from one catalog snapshot.
+  ///
+  /// Ownership transfers on move; destruction releases both the observation and
+  /// its contribution to the registry's active-lease count. This count prevents
+  /// refresh from replacing identities while capture or recovery still uses one.
+  /// Keeping the control block alive does not keep the registry wrapper alive.
   class WindowsSourceLease final {
   public:
     ~WindowsSourceLease();
@@ -68,11 +72,19 @@ namespace avb::platform::windows {
     std::shared_ptr<detail::ItemObservationState> observation_;
   };
 
-  /// Owns one source snapshot; refresh and lookup are serialized by its control.
-  /// COM identities stay here rather than being reconstructed from recycled HWNDs.
+  /// @brief Own a snapshot of opaque IDs and their canonical capture identities.
+  ///
+  /// Refresh and lookup serialize through shared control. IDs belong to this
+  /// registry's current generation; titles are display metadata, and recycled
+  /// native window handles must never be used to reconstruct a selected item.
+  /// Existing leases retain their observations independently of wrapper lifetime.
   class WindowsSourceRegistry final {
   public:
-    /// Exclusive refresh transaction; destruction cancels an uncommitted refresh.
+    /// @brief Exclude new lookups while a replacement snapshot is prepared.
+    ///
+    /// This move-only guard borrows its registry, which must outlive the guard.
+    /// Destruction cancels an uncommitted refresh and restores lookup access to
+    /// the previous snapshot; successful commit consumes the guard.
     class Refresh final {
     public:
       ~Refresh();
@@ -82,7 +94,13 @@ namespace avb::platform::windows {
       Refresh(Refresh &&other) noexcept;
       Refresh &operator=(Refresh &&other) noexcept;
 
-      /// Publish observations and return matching IDs in their input order.
+      /// @brief Replace the snapshot and return IDs in observation input order.
+      ///
+      /// Replacement containers are prepared before old observations retire.
+      /// Commit advances the generation, so every ID from the previous snapshot
+      /// becomes unusable even if a display label or native handle is unchanged.
+      /// Allocation failures may throw; the guard cancels its refresh on failure.
+      /// @pre Each observation is non-null and already has its close watcher.
       [[nodiscard]] std::expected<std::vector<core::SourceId>, core::AppError>
       commit(std::vector<std::shared_ptr<detail::ItemObservationState>>
                observations);
@@ -105,7 +123,11 @@ namespace avb::platform::windows {
 
     /// Reject refresh while a runtime lease or another refresh is active.
     [[nodiscard]] std::expected<Refresh, core::AppError> begin_refresh();
-    /// Resolve a current ID into an owning lease without recreating its item.
+    /// @brief Acquire a lease on an existing entry in the current generation.
+    ///
+    /// Refresh in progress, stale generations, and absent entries are rejected.
+    /// Successful lookup preserves identity, but does not promise the source is
+    /// still open: the capture owner must inspect the observation's sticky close.
     [[nodiscard]] std::expected<WindowsSourceLease, core::AppError>
     resolve(const core::SourceId &id) const;
 

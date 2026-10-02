@@ -1,169 +1,312 @@
-# Windows capture：來源身分、callback 與 frame ownership
-
-[回架構總覽](README.md) · [Runtime、overlay 與系統 adapter](windows-runtime-overlay.md)
-
-`WindowsSourceCatalog` 在列出來源時就建立真正的 `GraphicsCaptureItem`。使用者按下 Start 後，runtime 使用 registry lease 裡的同一個 item 建立 WGC job；每張影格再透過 move-only checkout 與 newest-only mailbox 交給 main-thread tick。這條路徑將「選到了哪個來源」和「目前是哪一代 capture resources」分開保存。
-
-本章描述目前 `platform/windows` 的實作。圖中 `owns`／`retains` 表示生命週期關係，`control` 表示呼叫或狀態操作，`data` 表示資料移轉，`wake` 只表示請主迴圈再次執行；wake 不攜帶 pixels 或 application events。
-
-## 1. 從 catalog 到穩定的來源 lease
-
-| 子單元 | 責任與入口 | 保留的東西 |
-|---|---|---|
-| [WindowsSourceCatalog](../../platform/windows/windows_source_catalog.hpp) | `enumerate()`、window/display eligibility、每次 refresh 的色彩分類 | 借用 registry；候選 observation 在本次列舉中暫存 |
-| `CaptureItemCreator` | `CreateForWindow`／`CreateForMonitor` | 本次列舉使用的 WinRT interop factory |
-| `DxgiColorReader`、`CloakReader` | output 色彩快照、window cloaking 查詢 | 本次 refresh 的原生查詢資源 |
-| [WindowsSourceRegistry](../../platform/windows/windows_source_registry.hpp) | `begin_refresh()`、`Refresh::commit()`、`resolve()` | generation 對應的 observation map |
-| [ItemObservationState](../../platform/windows/detail/item_observation_state.hpp) | sole `Closed` watcher、sticky closure、weak runtime wake binding | 原始 `GraphicsCaptureItem`、event token、callback 狀態 |
-| `WindowsSourceLease` | move-only runtime lease | observation 與共享 registry control |
-| [WindowsCaptureSource](../../platform/windows/windows_capture_source.hpp) | `is_closed()`、`consume_closed_edge()`、runtime wake activation/stop | lease、wake state、自己的 edge cursor |
+# Windows capture：來源身分、回呼與影格持有
 
 ```mermaid
-flowchart LR
-    Catalog[WindowsSourceCatalog] -->|control: refresh and commit| Registry[WindowsSourceRegistry]
-    Registry -->|owns: snapshot map| Observation[ItemObservationState]
-    Observation -->|owns: exact COM identity and Closed token| Item[GraphicsCaptureItem]
-    Runtime[WindowsReplicaRuntime] -->|owns| Source[WindowsCaptureSource]
-    Source -->|owns| Lease[WindowsSourceLease]
-    Lease -->|retains| Observation
-    Source -->|owns| Wake[RuntimeWakeState]
-    Observation -.->|weak binding after publication| Wake
-    Wake -.->|wake: borrowed callable| Loop[Main event loop]
+flowchart TB
+    App[Application] -->|控制：enumerate| Catalog[WindowsSourceCatalog]
+    Catalog -->|控制：commit 快照| Registry[WindowsSourceRegistry]
+    Registry -->|持有：來源觀察| Observation[ItemObservationState]
+    Observation -->|持有：原始擷取身分| Item[GraphicsCaptureItem]
+    Runtime[WindowsReplicaRuntime] -->|持有| Source[WindowsCaptureSource]
+    Registry -->|資料：WindowsSourceLease| Source
+    Source -->|持有：租約| Observation
+    Runtime -->|持有| Job[WgcCaptureJob]
+    Job -->|借用：穩定來源| Source
+    Job -->|持有| State[FrameCallbackState]
+    State -->|資料：最新 WindowsCapturedFrame| Runtime
+    Runtime -->|資料：移轉影格| Render[WindowsRenderStack]
+    State -.->|控制：喚醒主迴圈| Host[DesktopHost]
+    Host -->|控制：step| App
+    App -->|控制：tick| Runtime
 ```
 
-列舉首先排除不適合選取的 window，例如不可見、cloaked、沒有有效範圍／標題，以及本行程自己的 window。工具視窗是否可列出也由 `WindowEligibilityFacts` 判斷。Display 路徑確認 active desktop display，排除 mirroring driver，再建立候選 item。實際判斷與 Win32 callback 的 exception containment 位於 [windows_source_catalog.cpp](../../platform/windows/windows_source_catalog.cpp)。
+擷取路徑要把使用者選定的來源持續送到副本視窗，因此需要保存來源身分、接收 Windows 影格，並讓每張影格活到 GPU 使用完成。 `WindowsSourceCatalog`、`WindowsCaptureSource` 與 `WgcCaptureJob` 分別負責這三個階段。 上圖依據[來源登錄](../../platform/windows/windows_source_registry.hpp)、[擷取工作](../../platform/windows/wgc_capture_job.hpp)與 [runtime](../../platform/windows/windows_replica_runtime.cpp) 的建立及呼叫關係繪製
 
-候選 item 的 `Closed` watcher 先存在，descriptor 才能取得可公開的 `SourceId`。因此來源若在選取清單顯示後、Start 前關閉，後續 `is_closed()` 仍可看到 sticky fact；重新使用同一個 `HWND` 不會把舊 `SourceId` 偷換成另一個 item。
+Windows Graphics Capture（WGC）提供擷取項目、擷取工作階段與影格池。 項目回答「擷取哪個來源」，工作階段負責啟動擷取，影格池提供可輪替使用的儲存空間。 avb0795 在 Windows 層持有這些原生物件，透過[應用程式介面](../../include/avb/app/ports.hpp)向上傳遞可攜的描述資料與狀態
 
-`DxgiColorReader` 只建立本次 refresh 的 output 快照。Window 使用重疊面積最大的 output；沒有 output、查詢失敗或缺少 `IDXGIOutput6` 時維持 `UnknownAssumeSdr`。這是 descriptor 的提示資料，並沒有背景色彩監控或 HDR tone mapping。
+本頁從來源清單追到一張影格的歸還。 [Runtime 與 overlay](windows-runtime-overlay.md) 接續說明整體停止，[renderer](renderer.md) 展開 GPU 使用完成的證據，[DesktopHost](desktop-host.md) 說明喚醒後的主迴圈。 [回架構總覽](README.md)
 
-### Registry refresh 的交接順序
+## WindowsSourceCatalog 與 WindowsSourceRegistry
 
-`begin_refresh()` 會拒絕另一個 refresh，以及仍有 runtime lease 的狀態。`commit_refresh()` 先建立下一代 ID 與替換容器，然後在 registry mutex 之外 retire 舊 observations，最後交換 map/generation。`Refresh` 若沒有完成 commit，解構會取消 refresh 狀態。
+```mermaid
+flowchart TD
+    Enumerate[enumerate] -->|控制：begin_refresh| Guard[Refresh 交易守衛]
+    Guard -->|控制：建立候選| Scan[MonitorEnumerationContext / WindowEnumerationContext]
+    Scan -->|借用：本次查詢| Color[DxgiColorReader / CloakReader]
+    Scan -->|控制：建立項目| Creator[CaptureItemCreator]
+    Creator -->|資料：GraphicsCaptureItem| Observe[ItemObservationState::create]
+    Observe -->|控制：安裝 Closed watcher| Item[原始擷取項目]
+    Observe -->|資料：descriptor 與 observation 成對| Pending[PendingSource]
+    Pending -->|控制：Refresh::commit| Registry[Registry control]
+    Registry -->|持有：新世代 map| Entries[SourceId → observation]
+    Registry -->|資料：依候選順序產生 ID| Join[組成 SourceDescriptor 清單]
+    Join -->|資料：描述資料與 opaque ID| App[Application]
+```
 
-Registry mutex 保護 snapshot 與 refresh 狀態；它不包住可能重入的 WinRT token revocation。Lease 的共享 control 也讓 lease 計數不依賴 registry wrapper 的位址存活。正常應用程式流程保留 registry 到所有 runtime 都結束後，callback delegate 本身則只 weak-lock typed observation。
+來源清單需要讓畫面上的選項對應到同一個原生項目。 [WindowsSourceCatalog](../../platform/windows/windows_source_catalog.cpp) 在列舉期間建立 `GraphicsCaptureItem`，連同標題、尺寸與色彩提示組成候選資料。 [WindowsSourceRegistry](../../platform/windows/windows_source_registry.cpp) 保存 ID 到項目的對照，使用者啟動擷取時由 factory 查回原項目
 
-## 2. Publication 前後的 wake 邊界
+### 列舉資格與描述資料
 
-`WindowsCaptureSource::create()` 配置好 `RuntimeWakeState`，但不立即把借用的 host wake callable 綁給 observation。`WindowsReplicaRuntime::activate_for_publication()` 在 job 的 `start_for_publication()` 成功後才呼叫 `activate_runtime_wake()`；此後剩下的是 no-throw publication／ownership transfer。
+為了讓來源列提供可辨識的原生診斷資訊，catalog 在建立視窗描述值時將 HWND 轉成十六進位字串，存入 `SourceDescriptor::native_handle_text`。 這份文字與名稱一起複製到 UI 快照，來源解析持續依 `SourceId` 及 registry 世代進行。 顯示器的診斷字串保持空值，由 UI 呈現灰色 `—`
 
-這個順序讓未發佈的 factory partial 可以直接 unwind：來源即使已關閉，也只更新 registry 的 sticky state，不會留下仍在借用 host 的 runtime wake。Activation 前已發生的 closure 仍由第一個 runtime tick 消費；activation 不會重新建立 item 或 watcher。
+視窗候選由 `WindowEligibilityFacts` 收集原生查詢結果。 `is_window_source_eligible()` 要求視窗可見、cloaking 查詢成功且結果為一般顯示狀態、面積大於零、由其他行程持有，以及具備可顯示的標籤。 工具視窗另以 `WS_EX_APPWINDOW` 表示可供選取的意圖。 標題以修整空白後的視窗文字為優先，類別名稱提供後備標籤
+
+螢幕候選先取得 `MONITORINFOEXW`，以裝置名稱查對顯示介面卡的狀態旗標，再接受接到桌面的 active display。 鏡像驅動程式對應候選會在資格判斷處結束。 各候選還需要有效尺寸、可轉成 UTF-8 的名稱，以及成功建立的 WGC 項目
+
+色彩提示來自本次重新整理建立的 DXGI output 快照。 跨螢幕視窗採與視窗矩形重疊面積最大的 output。 `RGB_FULL_G22_NONE_P709` 對應 `Sdr`，`RGB_FULL_G2084_NONE_P2020` 對應 `HdrDetectedUnsupported`，其餘查詢結果歸入 `UnknownAssumeSdr`。 這份提示隨來源快照更新，實際 SDR 像素契約見 [renderer](renderer.md)
+
+原生列舉回呼以 `noexcept` 接住 C++ 例外，把 `exception_ptr` 留在當次 context，交由外層 `enumerate()` 轉成 `SourceCatalogFailure`。 單一候選的原生資訊查詢或 WGC 項目建立回報失敗時，該次 `visit()` 返回，列舉接著處理其他候選。 列舉本身失敗時，`Refresh` 守衛恢復前一份快照的查詢狀態
+
+### 快照世代保護選取身分
+
+為了辨識某個 ID 所屬的清單，registry 使用世代前綴與遞增序號。 [WindowsSourceIdGeneration](../../platform/windows/windows_source_registry.cpp) 的核心格式如下：
+
+```cpp
+prefix_ = "avb0795-source-" + std::to_string(generation_) + '-';
+```
+
+`issue()` 再以這個前綴產生 ID：
+
+```cpp
+const auto ordinal = next_ordinal_++;
+return core::SourceId{prefix_ + std::to_string(ordinal)};
+```
+
+例如某次提交產生 `avb0795-source-1-0`，下次重新整理則產生第 2 代 ID。 查詢會同時驗證目前前綴及 map 項目。 標題相同或 HWND 數值再次出現時，選取仍依該世代保存的 `GraphicsCaptureItem` 決定
+
+重新整理需要 `active_runtime_leases == 0`，且當下可取得 refresh 狀態。 `commit_refresh()` 先配置新容器與全部 ID，再撤回舊觀察的事件註冊，最後交換 map 及世代。 可能進入 WinRT 的撤回操作位於 registry mutex 外，讓鎖的保護範圍集中在快照與查詢狀態
+
+`Refresh` 借用 registry，作用域涵蓋整次列舉與提交。 `WindowsSourceLease` 則持有共享 control 與 observation，移動時連同租約計數的責任一併移轉。 租約釋放先清除 observation 參照，再減少計數，讓下一次 refresh 看到的零計數代表原生項目租約已歸還
+
+## WindowsCaptureSource 與來源關閉觀察
 
 ```mermaid
 sequenceDiagram
-    participant Factory as WindowsRuntimeFactory
-    participant Source as WindowsCaptureSource
-    participant Job as WgcCaptureJob
-    participant Policy as FrameCallbackPolicy
-    participant Native as WGC session
-    Factory->>Source: control: create with wake binding inactive
-    Factory->>Job: control: create_inactive
-    Job->>Policy: control: construct current epoch closed
-    Factory->>Job: control: start_for_publication
-    Job->>Source: control: final is_closed check
-    Job->>Native: control: StartCapture
-    alt StartCapture succeeds
-        Job->>Policy: control: open_current_epoch
-        Factory->>Source: control: activate_runtime_wake via runtime
-        Factory-->>Factory: transfer complete runtime ownership
-    else Source unavailable or start fails
-        Factory-->>Factory: unwind inactive aggregate
-        Note over Source,Policy: Sticky source observation remains, unopened policy does not issue final host wake
-    end
+    participant C as Catalog / Registry
+    participant O as ItemObservationState
+    participant S as WindowsCaptureSource
+    participant J as WgcCaptureJob
+    participant R as WindowsReplicaRuntime
+    participant W as RuntimeWakeState
+    C->>O: 控制：create 與 Closed 註冊
+    C-->>S: 資料：移轉 WindowsSourceLease
+    S->>W: 持有：預先配置 wake 狀態
+    R->>J: 控制：start_for_publication
+    J->>S: 控制：is_closed
+    J-->>R: 資料：成功啟動與 admission 開啟
+    R->>S: 控制：activate_runtime_wake
+    S->>O: 控制：綁定 weak wake
+    O->>O: 資料：Closed 保存 closed 與 sequence
+    O->>W: 控制：取得 admission 並喚醒
+    R->>S: 控制：consume_closed_edge
+    S-->>R: 資料：該來源的關閉事件
 ```
 
-`PublicationGate` 只允許一次 start attempt。它將 permission/native construction failure 轉為固定的 `AppError`；成功之後才執行 concrete job 提供的 no-throw opener。`ever_opened_` 由 frame policy 的既有 admission lock 保護，讓從未開啟的 policy 在 terminal stop／guard exit 時不送出 final host wake。
+擷取重建需要保留最初選定的項目，因此 [WindowsCaptureSource](../../platform/windows/windows_capture_source.cpp) 持有 registry 租約，供每代 job 借用。 來源隨時可能關閉，catalog 建立 observation 時就註冊 `Closed`。 [ItemObservationState](../../platform/windows/detail/item_observation_state.hpp) 把關閉事實保存到 `closed_` 與 `closed_sequence_`，讓選取期間、建構期間與圖形重建期間都能查閱同一份狀態
 
-## 3. Capture job 內部的 owner 層次
+### 關閉事實、事件游標與喚醒
 
-[WgcCaptureJob](../../platform/windows/wgc_capture_job.hpp) 擁有一代 session 與 callback state；它借用 stable source，也使用 render stack 所提供的 capture device。Source、device 與 externally retained frame checkouts 的釋放順序，由 runtime 協調。
+持續保存的關閉事實（sticky fact）用來回答來源是否已關閉。 一次性的事件則用來通知某個 consumer 發生變化。 `consume_closed_edge()` 比較 observation 的序號與來源自己的 `closed_cursor_`，更新游標後回傳事件。 `is_closed()` 持續讀取原本的關閉事實，供啟動與重建的最後檢查使用
+
+WGC delegate 捕捉 `weak_ptr<ItemObservationState>`。 進入時取得共享 state，完成關閉紀錄後再結束。 Runtime wake 也以 weak binding 保存在 observation 中，呼叫前在短鎖內取出共享 wake state，再於鎖外執行。 這樣可分別界定原生觀察的存活期與主迴圈的借用期
+
+### 發布後建立主迴圈借用關係
+
+發布（publication）的目的是讓 Application 接手一個可以持續推進並安全停止的 runtime。 為此，factory 先完成會配置或呼叫原生 API 的準備，最後執行 `StartCapture()`。 成功之後，runtime 開啟影格接收、綁定來源 wake，再透過 `unique_ptr<IReplicaRuntime>` 移交持有權。 完整建構順序見 [runtime factory](windows-runtime-overlay.md)
+
+來源建構時先配置 `RuntimeWakeState`，其 callable 的借用關係在 `activate_runtime_wake()` 綁定後生效。 發布前的 observation 已可記錄來源關閉，首次 tick 會依序號取得這項事實。 `PublicationGate` 保存 `attempted_` 與 `started_`，讓單次啟動的成功結果成為後續生命週期的依據
+
+停止來源 wake 時，`request_stop()` 先關閉 wake admission，再移除相符的 binding。 已取得 admission 的呼叫仍由計數追蹤。 最後一個呼叫會在完成喚醒後減少計數，`callbacks_quiescent()` 觀察到零時，runtime 可結束對 host callable 的這部分借用
+
+## WgcCaptureJob 與 FrameCallbackPolicy
 
 ```mermaid
 flowchart TD
-    Job[WgcCaptureJob / Impl] -->|owns| Session[GraphicsCaptureSession]
-    Job -->|retains shared state| State[FrameCallbackState]
-    State -->|owns| Pool[Direct3D11CaptureFramePool]
-    State -->|owns| Policy[FrameCallbackPolicy]
-    State -->|owns| Gate[FrameIntakeGate]
-    State -->|owns| Mailbox[LatestValueMailbox of WindowsCapturedFrame]
-    Delegate[FrameArrived delegate] -.->|weak typed state and captured epoch| State
-    Mailbox -->|data: move newest checkout| Tick[Runtime main-thread tick]
-    Tick -->|data: move accepted checkout| Slot[Renderer copy slot]
-    Slot -.->|retains checkout until D3 proof| Pool
+    Job[WgcCaptureJob::Impl] -->|借用| Source[WindowsCaptureSource]
+    Job -->|持有| Session[GraphicsCaptureSession]
+    Job -->|持有：shared_ptr| State[FrameCallbackState]
+    State -->|持有| Pool[Direct3D11CaptureFramePool]
+    State -->|持有| Policy[FrameCallbackPolicy]
+    State -->|持有| Gate[FrameIntakeGate]
+    State -->|持有| Mailbox[LatestValueMailbox]
+    Delegate[FrameArrived delegate] -.->|借用：weak state 與註冊 epoch| State
+    Delegate -->|控制：enter epoch| Admission[Admission 守衛]
+    Admission -->|資料：存活計數與接收資格| Policy
+    Policy -->|資料：fatal / resize| Tick[Runtime tick]
+    Mailbox -->|資料：移動最新 checkout| Tick
 ```
 
-`FrameCallbackState` 是 [wgc_capture_job.cpp](../../platform/windows/wgc_capture_job.cpp) 裡的 concrete private class，不是另一個 application port。它整合 pool、policy、intake gate、mailbox 與 sequence counter。`FramePool` 在 member declaration order 中先於 mailbox；反向 member destruction 因而先銷毀 mailbox，再釋放 pool。外部 renderer slot 所保留的 checkout 還需要 runtime 另外證明安全，不能只靠這個 member order。
+每代擷取需要把影格池、工作階段與回呼狀態一起保存。 [WgcCaptureJob](../../platform/windows/wgc_capture_job.cpp) 透過 `create_inactive()` 建立 free-threaded frame pool、capture session 及 `FrameCallbackState`，再註冊 `FrameArrived`。 初始 pool 使用來源項目當下的 `Size()` 與 `B8G8R8A8UIntNormalized` 格式，runtime 依 `initial_allocation()` 建立一致的 renderer slots
 
-### Admission 與 intake gate 是兩個不同問題
+回呼可在原生執行緒上到達，因此接收規則由共享的 [FrameCallbackPolicy](../../platform/windows/detail/wgc_capture_state.cpp) 管理。 Runtime 在主執行緒讀取固定尺寸的 `CaptureSignalBatch`，回呼則保存數值型態的 fatal 與 resize 資訊，並請求主迴圈執行下一次 tick
 
-[FrameCallbackPolicy](../../platform/windows/detail/wgc_capture_state.hpp) 的 `Admission` 解決「此 epoch 能否進入、是否仍有 caller 借用 callback-visible state」。Admission 已取得時仍要 `is_open()`，因為 stop 或 reconfigure 可能剛好改變 epoch／intake 狀態。
+### 三種識別值各自回答一個問題
 
-[FrameIntakeGate](../../platform/windows/detail/frame_intake_gate.hpp) 解決「誰能從 native pull 一路做到 mailbox publication」。只把 `TryGetNextFrame()` 或 mailbox 各自鎖住，無法保證兩個 caller 之間不出現較舊影格覆蓋較新影格的順序。Gate 因而涵蓋 native acquisition、metadata validation 與 submit，並只使用 `busy`／`pending` 兩個 atomic state bits。
+| 識別值 | 要回答的問題 | 建立與檢查位置 |
+| --- | --- | --- |
+| `SourceId` 世代 | 這個選項屬於哪份來源清單？ | Registry refresh 與 `resolve()` |
+| callback `epoch` | 這次回呼屬於哪次事件註冊？ | `register_arrival()` 捕捉，`enter()` 驗證 |
+| `resource_generation` | 這張影格使用哪代配置？ | Runtime 指派，capture policy 與提交路徑驗證 |
 
-競爭失敗的 caller 標記 pending 後返回，不等待 claimant。Claimant 完成後 `release()`，若觀察到競爭，便透過仍存活的 admission 呼叫 `record_pending()`／`wake_if_open()`，把後續工作交回既有 bounded service。Gate 不擁有 frame，也不新增 thread、mailbox 或 service。
+例如視窗縮放後，來源租約繼續指向同一個 item，callback epoch 向前推進，影格資源世代也向前推進。 裝置重建也沿用來源租約，由穩定 runtime 提供下一代資源編號。 這些值把來源身分、事件註冊與配置相容性分成可獨立追查的條件
 
-## 4. 從 native frame 到 newest-only mailbox
+### Admission 保存回呼與 wake 的完整存活期
 
-```mermaid
-flowchart LR
-    Arrival[FrameArrived or pending service] -->|control: enter epoch| Admission[Admission]
-    Admission -->|control: try_claim| Gate[FrameIntakeGate]
-    Gate -->|control: claimant only| Pull[TryGetNextFrame]
-    Pull -->|data: adopt immediately| Pending[PendingFrameCheckout]
-    Pending -->|data: metadata and owning frame| Validate[observe_frame]
-    Validate -->|data: accepted checkout| Mailbox[Newest-only mailbox]
-    Validate -->|data: fixed fatal or resize fact| Signals[Signal latches]
-    Mailbox -.->|wake: empty to ready| Loop[Main event loop]
-    Signals -.->|wake: new signal edge| Loop
-    Loop -->|control: next tick| Tick[WindowsReplicaRuntime]
-    Tick -->|control: take and drain| Mailbox
-```
+為了在重建或停止時知道何時可釋放 state，每次有效 epoch 的 handler 先取得 `Admission`。 守衛增加 `callbacks_in_flight_`，結束時歸還計數。 Handler 接著呼叫 `is_open()`，檢查當下的 epoch 與接收狀態。 這個二次檢查涵蓋「取得 admission 後，主執行緒接著開始停止」的交錯順序
 
-`PendingFrameCheckout` 在 native frame 取得後立即接手 ownership，早於 `ContentSize()`、surface projection 與 texture description 查詢。任一步驟拋出例外，都會經過本地 no-throw Close；成功後才轉為 [WindowsCapturedFrame](../../platform/windows/windows_captured_frame.hpp)。
+`close_for_reconfigure()` 關閉接收、清除 pending 並增加 epoch。 `request_terminal_stop()` 另把 `terminal_` 保存為永久停止狀態。 舊註冊捕捉的 epoch 會走快速返回路徑，已取得守衛的回呼則繼續由計數涵蓋到結束
 
-`WindowsCapturedFrame` 保存 sequence、resource generation、實際 allocation、可拷貝的 content 範圍、expected pool format 與 host steady-clock observation time。`texture()` 回傳 `ComPtr<ID3D11Texture2D>` view；view 本身不能取代 WGC checkout 的 lifetime。Renderer 必須保留 wrapper 到來源拷貝安全後，才能讓 pool 回收這張 frame。
+回呼靜止（quiescence）指所有取得 admission 的呼叫都已返回。 最後一次喚醒也列入此範圍。 Policy 在鎖內認領 final wake，在鎖外執行 callable，返回後再減少計數。 `ever_opened_` 把 final wake 的適用範圍限定到已開啟接收的工作。 主迴圈若在最後減數前醒來，runtime 的有限間隔觀察會再次查閱計數
 
-Policy 用原始 `ContentSize` 判斷 resize，checkout 則保存經 allocation clipping 的 copyable content。Format 固定為該 generation 的 BGRA pool format；surface format mismatch 是 fatal contract failure，不是一次 resize。Projection、allocation 或 unknown exception 會變成固定 category/native detail，不會跨出 WinRT `noexcept` trampoline。
+### Fatal 與 resize 的固定訊號
 
-Mailbox replacement 會釋放舊 checkout，因此 raw-frame backlog 只有 newest slot。只有 empty-to-ready 或新的 signal edge 需要 wake；單純替換已 ready 的 frame 不持續打斷 capped scheduler。
+`observe_frame()` 先比對資源世代、實際配置尺寸、有效內容尺寸與 surface 格式。 Metadata 合約違反會保存 `InvalidFrameMetadata`，格式違反會保存 `FormatMismatch`。 原生介面投影、配置記憶體與其他例外分別保存相應 category 及數值 detail
 
-### Temporarily closed epoch 的雙向 handshake
+有效內容尺寸與配置尺寸相異時，policy 保存最新 `resize_`，並在第一個 resize edge 喚醒主迴圈。 `drain_signals()` 取走 resize 及通知 edge，同時持續回報 `fatal_active`。 Fatal 成立後，接收結果保持結束路徑，runtime 依此啟動 job 停止與整體清理
 
-Matching callback 發現 admission 尚未 open 時，會先 `record_pending()`，再 `wake_if_open()`；opener 則先 store open，再讀 pending，並不清除它。這讓 callback-first 和 opener-first 兩種順序都能留下可服務的工作。
-
-`service_pending_arrival()` 才原子 claim pending，取得當前 epoch admission，並執行最多 pool buffer count 次 intake。它與 native callback 共用同一條 exception-contained intake path，所以沒有額外的未驗證 frame acquisition 路徑。Stale epoch 或 terminal callback 不會把 pending 工作重新灌回來。
-
-## 5. Resize、stop 與 quiescence
+## FrameIntakeGate 與待處理到達訊號
 
 ```mermaid
 flowchart TD
-    Resize[Resize fact accepted by runtime] -->|control| Begin[begin_reconfigure]
-    Begin -->|control: close epoch and revoke| WaitCallbacks[Wait for callback quiescence]
-    WaitCallbacks -->|control| Discard[Discard final old mailbox checkout]
-    Discard -->|control| WaitRender[Wait for render_allocation_idle]
-    WaitRender -->|control| Prepare[Advance generation and rebuild slots / prepare_reconfigure]
-    Prepare -->|control| Check[Final sticky source-open check]
-    Check -->|source open| Commit[commit_reconfigure]
-    Check -->|closed or fatal| Stop[Stop old job and retain safe drain]
-    Commit -->|control| Open[Open pending-arrival handshake]
+    Arrival[原生回呼或主執行緒 service] -->|控制：取得 Admission| Open{接收狀態}
+    Open -->|控制：closed epoch 保存工作| Pending[record_pending]
+    Pending -->|控制：再次檢查 open| Wake[喚醒主迴圈]
+    Open -->|控制：open epoch try_claim| Gate{FrameIntakeGate}
+    Gate -->|控制：取得 busy| Pull[TryGetNextFrame]
+    Gate -->|資料：合併 pending bit| Return[返回呼叫者]
+    Pull -->|資料：影格與 metadata| Validate[驗證與 mailbox submit]
+    Validate -->|控制：release| Release{取出 pending bit}
+    Release -->|控制：待處理工作成立| Pending
+    Release -->|控制：本次接收完成| Return
+    Wake -->|控制：service_pending_arrival| Service[最多 pool_buffer_count 次 intake]
+    Service -->|控制：共用接收路徑| Arrival
 ```
 
-`begin_reconfigure()` 是 main-thread barrier 的開始：close admission、advance epoch、revoke old `FrameArrived`。Runtime 之後等 callback quiescence，丟棄最後一張舊 mailbox frame，再等 renderer 所有 old-allocation users 安全。`prepare_reconfigure()` 保持新 epoch closed；runtime 最後確認 source 仍開啟，才執行 no-throw `commit_reconfigure()`。細部 coordinator 在 [windows_replica_runtime.cpp](../../platform/windows/windows_replica_runtime.cpp)。
+影格接收需要維持「取得影格、驗證、發布」的順序，讓稍早取得的影格先完成發布。 [FrameIntakeGate](../../platform/windows/detail/frame_intake_gate.hpp) 因此涵蓋整段接收操作。 它以一個原子整數保存 `busy` 與 `pending`，競爭中的呼叫合併成一次後續服務機會，主執行緒再接續處理
 
-Terminal `request_stop()` 同樣不 join：它先讓 policy terminal、close mailbox，再分別嘗試 revoke handler 與 close session。[CaptureJobStopState](../../platform/windows/detail/wgc_capture_state.hpp) 保留第一個 cleanup failure，兩個 native steps 都會嘗試，重複 stop 不會抹除已知 uncertainty。
+### 用同一個原子狀態交接接收權
 
-`stop_quiescent()` 同時要求 native stop 成功、所有 admitted callbacks 結束，以及 internal mailbox closed/empty。它不包含已交給 renderer 的 checkout；runtime 還必須結合 D3／Vulkan retirement proof 才能 destroy job/pool。
+`try_claim()` 的關鍵運算如下。 這裡保留原始程式的型態與運算式：
 
-最後一次 runtime wake／frame wake 也算在 callback count 內。Counter 只有在借用的 callable 返回後才歸零，且 foreign wake 不在 admission lock 內呼叫。Wake 若先讓 main loop 看見尚未 quiescent，既有 bounded drain poll 會再次觀察完成；不需要在釋放 count 後冒險再呼叫 host。
+```cpp
+const auto available = (observed & busy) == 0;
+const auto desired = available ? busy : observed | pending;
+if (state_.compare_exchange_weak(observed, desired,
+                                 std::memory_order_acq_rel,
+                                 std::memory_order_acquire)) {
+  return available;
+}
+```
 
-## 6. 從哪裡追一次問題
+閒置狀態的呼叫將原子值更新為 `busy`，成為本次接收者。 另一個呼叫遇到 `busy` 時設置 `pending`，隨即返回。 成功接收者完成發布後用下列操作一併釋放接收權與取得待處理標記：
 
-| 現象 | 優先閱讀 | 應確認的邊界 |
-|---|---|---|
-| Start 前來源已消失 | catalog、registry、capture source | sole watcher 是否早於 descriptor；是否使用同一個 item |
-| 首張靜態影格遺失 | callback policy、`service_pending_arrival()` | callback/opener handshake 是否保留 pending |
-| Frame 順序或重入問題 | intake gate、`intake_one()` | gate 是否涵蓋 acquisition 到 publication |
-| Pool checkout 被提早回收 | captured frame、renderer copy slot | checkout wrapper 是否仍由來源拷貝 owner 保留 |
-| Stop 永遠不完成 | job stop state、runtime drain | callback、native cleanup、mailbox、external render proof 各自是哪一項未完成 |
+```cpp
+return (state_.exchange(0, std::memory_order_acq_rel) & pending) != 0;
+```
 
-既有 `tests/windows/windows_policy_test.cpp` 使用 controlled adapters 與同步點檢查 publication、wake lifetime、intake 與 checkout ownership；`tests/windows/wgc_hardware_test.cpp` 才實際進入 WGC hardware capture。閱讀或更新本文件本身不會啟動擷取。
+例如 A 已取得 busy，B 與 C 隨後到達，兩者共同留下同一個 pending bit。 A 完成後看到 pending，就透過仍存活的 admission 執行 `record_pending()` 與 `wake_if_open()`。 Wake 的借用期因此受到回呼計數保護。 Gate 的 CAS 重試針對原子值更新，接收權仍由目前持有者一路保留到 mailbox 發布結束
+
+### 初次開啟接收的雙向檢查
+
+`StartCapture()` 期間可能已有回呼到達。 有效 epoch 的 callback 即使看到接收關閉，仍先保存 pending，再讀取 open。 Opener 則先寫入 open，再讀取 pending。 [FrameCallbackPolicy](../../platform/windows/detail/wgc_capture_state.cpp) 使用 `memory_order_seq_cst` 排列這四個讀寫動作
+
+```mermaid
+sequenceDiagram
+    participant C as 有效 epoch callback
+    participant P as FrameCallbackPolicy
+    participant O as open_current_epoch
+    participant T as Runtime tick
+    C->>P: 資料：pending = true
+    O->>P: 資料：open = true
+    C->>P: 控制：讀取 open
+    O->>P: 控制：讀取 pending
+    P->>T: 控制：任一側觀察到可服務工作後喚醒
+    T->>P: 控制：claim_pending_arrival
+    P-->>T: 資料：取得並清除 pending
+```
+
+兩條路徑共同保證至少一側可看見接收已開啟且有工作待服務。 `service_pending_arrival()` 原子取走 pending 後取得目前 epoch 的 admission，每次至多執行 `pool_buffer_count()` 次 intake。 目前 factory 設為 5，提供 renderer 三個 slots 之外的接收與 mailbox 空間。 數量限制也讓持續到達的影格留給後續 tick 接手
+
+## WindowsCapturedFrame 與最新影格信箱
+
+```mermaid
+flowchart TB
+    Pool[WGC frame pool] -->|資料：借出 Direct3D11CaptureFrame| Pending[PendingFrameCheckout]
+    Pending -->|控制：讀 ContentSize / texture desc| Metadata[FrameObservation]
+    Pending -->|資料：移轉 checkout| Frame[WindowsCapturedFrame]
+    Metadata -->|控制：observe_frame| Policy[FrameCallbackPolicy]
+    Policy -->|資料：accepted| Submit[mailbox.submit]
+    Frame -->|資料：移動持有權| Submit
+    Submit -->|持有：最新一張| Mailbox[LatestValueMailbox]
+    Mailbox -->|資料：take| Runtime[Runtime]
+    Runtime -->|資料：submit| Slot[Renderer slot]
+    Slot -->|持有：到來源複製完成| Frame
+    Frame -.->|借用：texture 介面視圖| Texture[ID3D11Texture2D]
+    Frame -->|控制：Close 歸還 checkout| Pool
+```
+
+影格池會重複使用儲存空間，因此 consumer 使用某張影格時，需要保留它的借出憑證（checkout）。 [WindowsCapturedFrame](../../platform/windows/windows_captured_frame.hpp) 把這項責任包成可移動物件，與 sequence、資源世代、配置範圍、有效內容範圍及擷取觀察時間一起傳遞。 影格在[擷取工作](../../platform/windows/wgc_capture_job.cpp)中先進入最新值信箱，再由 runtime 移交 renderer
+
+### 先持有，再投影 metadata
+
+`TryGetNextFrame()` 回傳後，`PendingFrameCheckout` 立刻接手原生影格。 接著讀取 `ContentSize()`、透過 `IDirect3DDxgiInterfaceAccess` 取得 texture，再由 `GetDesc()` 取得實際配置及格式。 這些投影操作若拋出例外，本地守衛會呼叫 `Close()`，接收路徑則保存固定的 fatal 訊號
+
+成功時，原始 `ContentSize` 留給 resize 判斷，交給 renderer 的有效內容採兩個矩形的交集。 [copyable_content_extent](../../platform/windows/detail/wgc_capture_state.cpp) 的運算為：
+
+```cpp
+return {.width = std::min(content.width, allocation.width),
+        .height = std::min(content.height, allocation.height)};
+```
+
+推導示例：影格池配置為 1280 × 720，來源剛變為 1400 × 900。 Resize 訊號保留 1400 × 900，當張 checkout 的有效內容則為 1280 × 720。 來源縮小到 1000 × 600 時，有效內容跟著縮為 1000 × 600。 Renderer 依此決定複製及取樣範圍
+
+### 最新值取代與 Close 責任
+
+`LatestValueMailbox<WindowsCapturedFrame>` 持有最新一張影格。 新影格替換既有值時，舊 checkout 隨物件釋放而歸還。 空信箱變成 ready 或新訊號 edge 出現時會喚醒主迴圈，已 ready 的信箱替換內容則沿用既定排程。 信箱演算法詳見 [core](core.md)
+
+`WindowsCapturedFrame::texture()` 回傳的 `ComPtr<ID3D11Texture2D>` 保存介面參照。 Pool checkout 另由 wrapper 持有，renderer 要以來源複製完成證據決定 wrapper 的歸還時刻。 因此 slot 會跨 GPU 工作保留完整 `WindowsCapturedFrame`，再於完成觀察後釋放
+
+移動指定先歸還目標原有的 checkout，再接手新影格。 `close_checkout()` 先以 `std::exchange(frame_, nullptr)` 清除自身持有欄位，再嘗試原生 `Close()`，讓移動與解構共用一次歸還責任。 `FrameCallbackState` 的欄位宣告讓 mailbox 早於 pool 解構，runtime 則另外等待 renderer 持有的 checkout 使用完畢
+
+## SourceReconfiguration 與 CaptureJobStopState
+
+```mermaid
+flowchart TD
+    Resize[有效 resize 訊號] -->|控制：begin_reconfigure| Epoch[關閉接收並前進 epoch]
+    Epoch -->|控制：撤回 FrameArrived| CallbackWait[保留 job 至 callbacks_quiescent]
+    CallbackWait -->|資料：回呼完成證據| Mailbox[取走最後一張 mailbox frame]
+    Mailbox -->|控制：等待配置使用完成| RenderWait[render_allocation_idle]
+    RenderWait -->|資料：外部 checkout / GPU 完成證據| Prepare[前進 generation / 重建 slots / Recreate pool]
+    Prepare -->|控制：檢查 source 與 prepared 狀態| Commit[commit_reconfigure]
+    Commit -->|控制：開啟新 epoch| Active[繼續擷取]
+    Stop[request_stop] -->|控制：terminal / close mailbox| Terminal[接收終止]
+    Terminal -->|控制：分別嘗試 revoke 與 session Close| Native[CaptureJobStopState]
+    Native -->|資料：兩項原生完成證據| JobProof[stop_quiescent]
+    CallbackWait -->|資料：回呼完成證據| JobProof
+    JobProof -->|資料：job 內部完成證據| Runtime[Runtime 保留與釋放協調]
+    RenderWait -->|資料：外部使用完成證據| Runtime
+```
+
+來源尺寸改變時，舊影格仍可能位於回呼、信箱或 renderer。 [SourceReconfigurationPhase](../../platform/windows/detail/windows_runtime_policy.hpp) 把這些持有者依序接起來，由 [WindowsReplicaRuntime::progress_source_reconfiguration()](../../platform/windows/windows_replica_runtime.cpp) 執行具體操作。 終止擷取則由 [CaptureJobStopState](../../platform/windows/detail/wgc_capture_state.hpp) 保存原生清理的完成證據
+
+### 尺寸重建的四個階段
+
+`begin_reconfigure()` 先推進 epoch 並撤回舊 handler，runtime 進入 `WaitingForCallbacks`。 回呼完成後，runtime 取走最後一張舊信箱影格，進入 `WaitingForRender`。 Renderer 回報 `render_allocation_idle()` 後，runtime 增加 `resource_generation_`，依新尺寸重建 capture slots，再呼叫 job 的 `prepare_reconfigure()`
+
+`prepare_reconfigure()` 會確認接收關閉、舊 handler 已撤回、回呼計數歸零與信箱清空，再 `Recreate()` pool 並註冊新 epoch。 完成後進入 `Prepared`。 Runtime 再次查閱來源仍開啟的事實，呼叫 `commit_reconfigure()` 開啟接收，最後更新 allocation 與 overlay 的來源長寬比
+
+每次 tick 最多推進四個已就緒的階段。 來源關閉或捕捉到 fatal 時，runtime 轉入 job 停止，並保留已建立的資源等待清理證據。 `Recreate()` 後還有 handler 註冊等步驟，準備失敗代表 runtime 要循停止路徑整理這組部分更新的資源
+
+### 停止的內部證據與外部證據
+
+Terminal stop 先封閉 admission 與信箱，再分別嘗試撤回 `FrameArrived` 與關閉 capture session。 每項原生操作都有獨立的例外 containment，第一個 cleanup failure 保存為固定 category 及 detail。 重複 `request_stop()` 沿用這次結果，runtime 持續持有清理證據待確認的 job
+
+`CaptureJobStopState::stop_quiescent()` 的實際合取條件如下：
+
+```cpp
+return requested_ && native_stop_succeeded_ && callbacks_quiescent &&
+       mailbox_closed;
+```
+
+呼叫者傳入的 mailbox 條件由 `mailbox_closed_and_empty()` 取得。 上式證明 job 內部的 session、事件註冊、回呼及信箱已收束。 Renderer 另外提供外部 checkout、D3 使用與 Vulkan presentation 的完成證據。 Runtime 收齊兩組證據後依序釋放 job 與 render stack，Application 再依整體 `Stopped` 事件結束 runtime 持有權
+
+來源關閉、回呼歸零與 GPU 完成各自有自己的觀察入口。 追查停止期間的進度時，可依序查閱 `is_closed()`、`frame_callbacks_quiescent()`、`cleanup_failure()` 及 renderer 的完成欄位。 完整聚合條件與有界觀察期限見 [runtime drain](windows-runtime-overlay.md)

@@ -2,17 +2,21 @@
 
 ```mermaid
 flowchart LR
-  R[Runtime<br/>排程 / generation / 顯示設定] --> F[平台 graphics facade]
-  F --> B[來源 bridge<br/>copy 與 external import owners]
-  F --> V[VulkanRenderer<br/>canonical slots / retained content]
-  B -->|SlotKey + CpuRowsView<br/>或 external image + completed wait| F
-  F -->|typed completion| V
-  V --> Q[Graphics queue<br/>upload / draw / submission fence]
-  Q --> P[Present queue<br/>present record / present fence]
-  V --> W[WSI<br/>active / retired swapchains]
-  P --> W
-  V -->|VulkanTickResult| F
-  F -->|合併進度 / deadline / loss facts| R
+  R[Runtime<br/>排程 / generation / 顯示設定] -->|擁有；控制：tick / admission| F[平台 graphics facade]
+  F -->|擁有；控制：producer progress| B[來源 bridge<br/>copy 與 external import owners]
+  F -->|擁有；控制：renderer progress| V[VulkanRenderer<br/>canonical slots / retained content]
+  B -->|資料：keyed completion / producer proof| F
+  F -->|資料：typed completion| V
+  V -.->|借用：CpuRowsView / external image / completed wait| B
+  V -->|擁有；控制：upload / draw| Q[Graphics queue<br/>submission fence]
+  V -->|擁有；控制：present enqueue| P[Present records<br/>render-finished semaphore / present fence]
+  Q -->|證據：submission 與 acquire fence| Slot[Slot reuse]
+  P -->|證據：獨立 present fence| Reuse[Present record reuse]
+  V -->|擁有| W[WSI<br/>active / retired swapchains]
+  Slot -->|證據：image users| W
+  Reuse -->|證據：present users| W
+  V -->|資料：VulkanTickResult| F
+  F -->|資料：合併進度 / deadline / loss facts| R
 ```
 
 為了讓各平台的來源影格共用 Vulkan 繪製流程，系統需要把來源的原生生命週期與 renderer 的繪製生命週期分別管理。`VulkanRenderer` 接收具型別的影格資料，保存三個 canonical slots，負責 Vulkan device、CPU upload、取樣影像、command buffers、WSI 與呈現退休。平台 facade 協調來源 bridge，將完成證據轉成 renderer 的 typed completion，再將兩個 owners 的狀態合併交給 runtime。
@@ -23,7 +27,7 @@ flowchart LR
 
 為了在 resize、surface recovery 與結束時安全處理呈現中的影像，WSI 操作需要同時檢查 slot image users 與獨立 present records。[`vulkan_wsi.cpp`](../../render/vulkan_wsi.cpp) 集中 swapchain 建立／退休、render-pass 與 framebuffer resources、present proof observation、acquired-image release 及 recovery episode。這些方法存取同一個 `Impl`，將完成證據交回 canonical transitions，並沿用共同的 error／deadline 結果。
 
-目前 graphics dependency configuration 與原生驗證使用 Windows。`avb0795_vulkan_renderer` 擁有獨立的 source／link 邊界，連結 core、Vulkan、GLFW 與 diagnostics。Linux 的 Portal／PipeWire 接入屬於後續平台工作。
+本輪交付的 graphics dependency configuration 與原生驗證以 Windows 為範圍，目前來源契約為 BGRA8，畫面驗證使用 SDR。`avb0795_vulkan_renderer` 擁有獨立的 source／link 邊界，連結 core、Vulkan、GLFW 與 diagnostics；Windows facade／bridge 保存 WGC、D3 與 Win32 import。已實作的 UI cadence、frame／present pools、CPU padding 與 opt-in report 共同支援本輪效能觀測。Linux Portal／PipeWire runtime、ROI-sized transport、GPU early-submit 與 HDR 是後續工作；最終配對量測的狀態見 [效能觀測指南](../development/vulkan-performance.md#本階段驗證範圍)。
 
 Controller 的 frame／present 容量由 `DesktopHost` 的獨立 Vulkan owner 管理，詳見 [Controller Vulkan resources](controller-vulkan-resources.md)。兩個 owners 共用值政策，各自根據完成證據操作自己的 native handles。
 
@@ -31,13 +35,14 @@ Controller 的 frame／present 容量由 `DesktopHost` 的獨立 Vulkan owner �
 
 ```mermaid
 flowchart TD
-  B[平台 bridge 建立 capture device] --> S[VulkanStartupRequest]
-  S --> I[instance / GLFW surface]
-  I --> D[選擇 physical device<br/>檢查完整 WSI 條件]
-  D --> L[logical device / queues<br/>common graphics resources]
-  L --> V[VulkanDeviceBorrow]
-  V --> A[bridge attach<br/>平台 procedure resolution / import]
-  A --> E[ExternalSampledImageView<br/>CompletedProducerWait]
+  B[平台 bridge 建立 capture device] -->|資料：adapter / feature 偏好| S[VulkanStartupRequest]
+  S -->|控制：renderer bootstrap| I[instance / GLFW surface]
+  I -->|控制：WSI 檢查| D[選擇 physical device]
+  D -->|控制：建立 renderer resources| L[logical device / queues<br/>common graphics resources]
+  L -.->|借用：handles / enabled facts| V[VulkanDeviceBorrow]
+  V -.->|借用：attach 期間與後續 import 使用| A[bridge attach<br/>平台 procedure resolution / import]
+  A -->|擁有| Imports[Imported image / memory / view / timeline]
+  Imports -.->|借用：registration 與 completed wait| E[ExternalSampledImageView<br/>CompletedProducerWait]
 ```
 
 為了讓 renderer 選用適合來源互通的裝置，bootstrap 需要 adapter 偏好與可選 feature 要求。`VulkanStartupRequest` 提供 candidate preference、optional extension group 與 timeline request，renderer 在 constructor 期間消費這些資訊。裝置選擇同時檢查 graphics／present queue、surface 與維護呈現所需的 features。
@@ -194,15 +199,19 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-  A[關閉 source admission] --> P[producer completion<br/>與 Vulkan retirement]
-  P --> D[detach_ring serial<br/>撤銷 descriptor / retained refs]
-  D --> B[bridge release_ring<br/>external owners]
-  B --> R[release_ring_resources<br/>CPU / slot resources]
-  P --> S[final detach_for_shutdown]
-  S --> F[bridge destruction]
-  F --> V[renderer destruction<br/>device / instance]
+  A[關閉 source admission] -->|控制：持續 progress| P[producer / acquire / submission / present]
+  P -->|證據：producer 與 capture image users 完成| Idle[render_allocation_idle]
+  Idle -->|控制：驗證 serial / slot identities| D[detach_ring<br/>撤銷 descriptor / retained refs]
+  D -->|控制：釋放 imports| B[bridge release_ring]
+  B -->|控制：釋放 allocation-local resources| R[release_ring_resources<br/>devices 與獨立 presents 持續存活]
+  P -->|證據：全部 native work 完成| All[Final teardown]
+  All -->|控制：撤銷 renderer references| S[detach_for_shutdown]
+  S -->|控制：釋放 imports / timeline / D3| F[bridge destruction]
+  F -->|控制：最後釋放| V[renderer destruction<br/>device / instance]
 ```
 
-為了讓 ring replacement 保留 device 與獨立 present records，`render_allocation_idle` 描述 capture allocation 的使用證據。`detach_ring` 先檢查 serial、slot identity 與完成狀態，再撤銷 references；成功後 facade 依 bridge、renderer 順序釋放該 ring。Final teardown 透過 `detach_for_shutdown` 直接銷毀 descriptor registrations，接續釋放 external owners 與整個 renderer。
+為了讓 ring replacement 保留 device 與獨立 present records，`render_allocation_idle` 描述 capture allocation 的使用證據。Windows aggregate 同時要求 bridge copy／Map records 完成；renderer 的 slots 回到 `Empty`、`CpuReady` 或 `GpuReady`，表示 allocation 的 image users 已退休。Pending present 的 semaphore 與 swapchain 由獨立 record 保存，沿自己的 proof 繼續退休。`detach_ring` 驗證 serial、slot identity 與 image ownership，成功 reset descriptor pool 後撤銷 descriptor、external image 與 retained references；facade 接著依 bridge imports、renderer ring resources 的順序釋放該 allocation。
+
+最終 teardown 需要全部 producer、frame 與 presentation obligations 已收束。`detach_for_shutdown` 檢查 renderer 的全部 native work，直接銷毀 descriptor pool 並撤銷 ring references；aggregate 接續釋放 bridge imports、timeline 與 D3 owners，最後銷毀 renderer device／instance。這個順序讓 borrowed device 與 imported image 的實際 owners 覆蓋全部使用期。
 
 為了讓量測涵蓋每個 native allocation，renderer 在實際 create／destroy 與 submit／present-retire 呼叫點更新 counters。Bridge 的 timeline create／destroy 由 facade 轉交 `observe_external_semaphore`，共同更新同一份 replica high-water ledger。`VulkanObservationContext` 提供短命的來源／transport metadata，renderer 在一次 observation 內合併 GPU、driver 與 WSI facts。完整 workflow 與固定 workload 的資料保留於本機 verification／artifacts。

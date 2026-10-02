@@ -9,8 +9,12 @@
 
 namespace avb::platform::windows::detail {
 
-  /// Nonrecursive lock used only for short state transitions, never native intake.
-  /// Do not invoke wake callbacks or potentially reentrant WinRT calls while held.
+  /// @brief Serialize short callback-state transitions with lexical ownership.
+  ///
+  /// Acquisition can wait under contention and the lock is nonrecursive. Keep
+  /// native intake, wake callbacks, and potentially reentrant WinRT calls outside
+  /// the critical section. The lock owner must outlive every guard; the guard's
+  /// destructor releases the lock but does not extend the protected data lifetime.
   class ExclusiveSrwLock final {
   public:
     ExclusiveSrwLock() noexcept = default;

@@ -108,7 +108,12 @@ namespace avb::platform::windows::detail {
   [[nodiscard]] std::uint32_t scaled_resize_band(std::uint32_t logical_pixels,
                                                  std::uint32_t dpi) noexcept;
 
-  /// Preserve source content aspect while anchoring the edge opposite the user's drag.
+  /// @brief Constrain client-content aspect while preserving the opposite drag anchor.
+  ///
+  /// Current DPI-dependent frame insets are excluded from the aspect calculation.
+  /// Top and bottom drags take height as authoritative; other edges use width.
+  /// Invalid extents return the proposal unchanged, and native-coordinate
+  /// saturation can limit exact aspect preservation at representational bounds.
   [[nodiscard]] NativeRect
   aspect_constrained_rect(NativeRect proposed, SizingEdge edge, core::Extent source, FrameInsets insets = {}) noexcept;
 
@@ -120,9 +125,22 @@ namespace avb::platform::windows::detail {
   [[nodiscard]] NativeRect outer_to_content_rect(NativeRect outer,
                                                  FrameInsets insets) noexcept;
 
-  /// Keep restored border geometry within the selected monitor's work area.
+  /// @brief Fit each outer-rectangle axis into the selected monitor work area.
+  ///
+  /// Placement is shifted when its size fits; an oversized axis is reduced to the
+  /// available span. This policy can change size and aspect, so it is a placement
+  /// bound rather than a promise to restore the original client geometry exactly.
   [[nodiscard]] NativeRect
   clamp_outer_rect_to_work_area(NativeRect outer, NativeRect work_area) noexcept;
+
+  /// @brief Fit client width to content aspect, returning the bounded outer rectangle.
+  ///
+  /// Preserve the client center, then shift within the work area. Oversized content
+  /// shrinks uniformly after subtracting frame insets; rounded axes stay at least
+  /// one pixel. Invalid or unrepresentable inputs return no proposal.
+  [[nodiscard]] std::optional<NativeRect> fit_content_rect(
+    NativeRect client_screen, core::Extent source, FrameInsets insets,
+    NativeRect work_area) noexcept;
 
   /// @brief Resize around the client center, preserving the effective source aspect.
   /// The DPI-scaled minimum yields to work-area capacity; invalid native inputs

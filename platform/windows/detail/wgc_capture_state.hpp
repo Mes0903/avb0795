@@ -42,8 +42,14 @@ namespace avb::platform::windows::detail {
   [[nodiscard]] core::Extent
   copyable_content_extent(core::Extent content, core::Extent allocation) noexcept;
 
-  /// Synchronizes callback admission and coalesced signals without owning a pool.
-  /// Epochs reject old handlers; a closed current epoch preserves one pending bit.
+  /// @brief Coordinate callback lifetime, intake readiness, and bounded signals.
+  ///
+  /// Matching handlers are counted even while intake is closed, allowing early
+  /// arrivals to preserve a pending bit without touching the native pool. Epochs
+  /// invalidate old registrations; resource-generation metadata independently
+  /// rejects frames that do not match the prepared allocation. The main-thread
+  /// owner changes allocation metadata only after admitted callbacks drain.
+  /// The policy owns no pool or checkout and cannot prove external GPU retirement.
   class FrameCallbackPolicy final {
   public:
     /// Keeps callback-visible wake ownership live through intake and final wake.
@@ -96,7 +102,12 @@ namespace avb::platform::windows::detail {
     /// Wake on an empty-to-ready mailbox transition while caller admission lives.
     void notify_mailbox_ready() noexcept;
 
-    /// Validate immutable metadata and coalesce resize; malformed input latches fatal.
+    /// @brief Validate allocation identity and retain the newest requested size.
+    ///
+    /// Content size may differ from allocation during a resize; that requests
+    /// reconfiguration rather than authorizing an out-of-bounds copy. Generation,
+    /// allocation, format, and invalid dimensions are fatal contract violations.
+    /// Once fatal is latched, later frames cannot restore intake acceptance.
     [[nodiscard]] FrameObservationResult
     observe_frame(const FrameObservation &frame) noexcept;
     /// Retain a native projection failure as one sticky, allocation-free signal.
@@ -154,8 +165,13 @@ namespace avb::platform::windows::detail {
     std::optional<core::Extent> resize_;
   };
 
-  /// Single start attempt: source check precedes the last fallible native action.
-  /// OpenAdmission is supplied as a no-throw operation by the concrete WGC job.
+  /// @brief Separate fallible capture start from the committed publication state.
+  ///
+  /// A failed start must leave callback intake closed so partially constructed
+  /// owners can unwind before a tick loop owns their lifetime. Successful native
+  /// start commits the gate before invoking the supplied admission opener.
+  /// @pre SourceClosed and OpenAdmission do not throw; the caller has completed
+  /// all other fallible publication preparation before making its single attempt.
   class PublicationGate final {
   public:
     /// Publish only after StartCapture succeeds; earlier failures remain inactive.
@@ -205,7 +221,12 @@ namespace avb::platform::windows::detail {
     bool started_{};
   };
 
-  /// Retains the first uncertain native stop step; repeated stop does not erase it.
+  /// @brief Retain evidence of native cleanup independently of callback drain.
+  ///
+  /// Revocation and session close are attempted independently so failure of one
+  /// does not skip the other. The first failure remains sticky; later calls do
+  /// not retry or turn uncertainty into a successful stop proof. Pool and session
+  /// owners must therefore remain alive while native cleanup is unverified.
   class CaptureJobStopState final {
   public:
     /// Attempt both cleanup steps once and contain every exception independently.

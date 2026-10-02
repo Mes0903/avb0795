@@ -90,21 +90,21 @@ Driver metadata 的 `raw:` 前綴表示 Vulkan 回報的原始 vendor-encoded dr
 
 ## Controller 更新期限
 
-為了讓擷取與 GPU 完成檢查各自維持進度，controller 需要獨立決定何時建立 ImGui 畫面。`DesktopHost` 使用純值 `UiCadence` 計算 UI deadline，再與 Application、graphics owner 的 deadline 合併。
-
 ```mermaid
 flowchart TD
-    Pump[GLFW event pump] --> Progress[Controller graphics progress]
-    Progress --> App[Application step]
-    App --> Decide[UiCadence decision]
-    Decide -->|Visible| Widgets[Backend NewFrame → widgets → Render → present attempt]
-    Decide -->|HiddenSync| Sync[完整 input queue → NewFrame → EndFrame]
-    Decide -->|None| Wait[合併三個 owner 的最早 deadline]
-    Widgets --> Wait
-    Sync --> Wait
-    Wait -->|UI command| Pump
-    Wait -->|deadline / native event| Pump
+    Pump[GLFW event pump] -->|控制：觀察可見性與完成事件| Progress[Controller graphics progress]
+    Progress -->|控制：每輪推進| App[Application step]
+    App -->|控制：Continue| Decide[UiCadence decision]
+    Decide -->|控制：Visible| Widgets[Backend NewFrame → widgets → Render → present attempt]
+    Decide -->|控制：HiddenSync| Sync[完整 input queue → NewFrame → EndFrame]
+    Decide -->|控制：None| Wait[合併 application / graphics / UI<br/>三個 deadline]
+    Widgets -->|控制：重新觀察可見性與 UI decision| Wait
+    Sync -->|控制：acknowledge input| Wait
+    Wait -->|控制：UI command 立即重入| Pump
+    Wait -->|控制：deadline / native event| Pump
 ```
+
+為了讓擷取與 GPU 完成檢查各自維持進度，controller 需要獨立決定何時建立 ImGui 畫面。`DesktopHost` 使用純值 `UiCadence` 計算 UI deadline，再與 Application、graphics owner 的 deadline 合併。每輪先 pump events、推進 controller graphics 與 Application，接著以 `Visible`、`HiddenSync` 或 `None` 決定 UI 工作；已入列的 UI command 讓下一輪立即開始。
 
 | 狀態 | UI 更新方式 |
 | --- | --- |
@@ -119,7 +119,7 @@ Windows 最小化狀態與 framebuffer 尺寸共同決定可見性。Native inpu
 
 隱藏同步暫時將 `ConfigInputTrickleEventQueue` 設為 false，讓同批 press、release、focus events 完整消化，結束後恢復原設定。可見 UI 持續使用原本的 trickling 行為。到期的 widget build 持續處理互動，native GPU capacity 決定該幀的 present admission。
 
-為了將已接受的透明度存入偏好設定，ControllerView 的 gesture draft 保存 preview 與待 commit 狀態；還原後確認手勢結束，再透過 typed command 交給 Application 儲存 accepted state。Opacity 與 region 數值欄位啟用 scoped `LiveEditOnInputScalar`，打字時將解析後的數值寫入既有 draft，讓草稿跨越多次隱藏同步。Opacity 沿 preview 更新目前畫面，編輯結束時保存；region 沿「套用範圍」一次送出完整座標。Escape 使用 widget 的還原語意回到本次編輯起值。
+為了將已接受的透明度存入偏好設定，ControllerView 的 gesture draft 保存 preview 與待 commit 狀態；還原後確認手勢結束，再透過 typed command 交給 Application 儲存 accepted state。Opacity 拉桿啟用 scoped `LiveEditOnInputScalar`，Ctrl-click 輸入時將解析後的數值寫入既有 draft，讓草稿跨越多次隱藏同步。Opacity 沿 preview 更新目前畫面，編輯結束時保存。Escape 使用 widget 的還原語意回到本次編輯起值。選區透過副本框選提交來源像素矩形。
 
 ImGui 的 scalar widget patch 將 temporary text export 綁定至當次 active editor，讓同 ID 的文字輸入與後續拖曳各自沿用對應數值。CMake 在所有 UI 平台驗證這份 patch 的輸出雜湊；下載來源使用獨立的 Git 目錄探索邊界與 LF 格式，以固定 patch 結果。
 
@@ -127,4 +127,18 @@ ImGui 的 scalar widget patch 將 temporary text export 綁定至當次 active e
 
 ## 本階段驗證範圍
 
-Task 1 建立觀測工具與基線；Task 2 接入 UI cadence 與 input continuity；Task 3 整理 shared renderer 邊界；Tasks 4–5 重用 replica 與 controller 同步物件；Task 6 依 content 與 allocation 的差集清除 CPU padding。效能比較的結論以對應的實測報告與 manifest 為依據；程式建置、純政策測試、互動驗收、硬體擷取測試與 benchmark 分別記錄。
+```mermaid
+flowchart LR
+    Delivered[已實作的 Windows boundary<br/>cadence / pools / CPU padding / opt-in report] -->|證據：Task 6 已保存| Checkpoints[full 15 / hardware 3<br/>validation 0 / snapshot / B4–B6]
+    Checkpoints -->|資料：本輪 correctness checkpoints| Final[Task 7 待完成<br/>最終 acceptance 與配對矩陣]
+    Final -->|證據：有效 paired reports 與 manifest| Result[效能判讀與交付結論]
+    Future[後續工作] -->|範圍：新平台與 transport 功能| Later[Portal / PipeWire runtime<br/>ROI-sized transport / GPU early-submit / HDR]
+```
+
+為了以實際可執行範圍交付本輪成果，驗證需要分別記錄功能實作、correctness checkpoints 與最終效能比較。Task 1 已建立 opt-in report 與基線；Task 2 已接入 UI cadence 與 input continuity；Task 3 已建立 Windows shared renderer 的 source／target 邊界；Tasks 4–5 已重用 replica 與 controller 的 frame／present resources；Task 6 已依 content 與 allocation 的差集清除 CPU padding。
+
+Task 6 提交為 `0fe7b1c`。2026-09-19 的驗證紀錄保存 full 15/15、hardware 3/3、isolated validation VUID／Validation Error 0、精確 snapshot build，以及 B4／B5／B6 的 byte-cost checkpoints。本機工作樹檔案 `docs/verification/2026-09-16-vulkan-performance-task6.md` 與 `artifacts/vulkan-perf/task6-20260919/` 保存這些 local-only 證據，沿 verification／artifacts 的未提交保存範圍管理。B5 使用有效的 retry，首次 incomplete run 仍保留原始狀態；這組單次情境資料提供 Task 7 定位依據。
+
+Task 7 的最終 V1–V6、完整互動 acceptance，以及同環境 B1–B6 各三次的 baseline／candidate 交錯配對矩陣仍待完成。最終 throughput 與 latency 結論將以有效 paired reports、manifest、counts、median／range 與既定警戒門檻判讀。程式建置、純政策測試、互動驗收、硬體擷取測試與 benchmark 各自保存證據。
+
+後續範圍包含 Linux Portal／PipeWire runtime、ROI-sized transport、GPU early-submit 與 HDR。本輪 Windows compile、boundary 與 hardware 證據支持目前交付範圍；crop 仍沿完整 transport 與 shader UV，GPU readiness 仍由 producer completion proof 驅動。

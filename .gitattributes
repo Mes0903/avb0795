@@ -1,1 +1,2 @@
+tools/vendor/dkjson.lua -text
 third_party/patches/*.patch text eol=lf

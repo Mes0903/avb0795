@@ -1,3 +1,7 @@
+# Check the pinned Win32 class-style alteration after dependency population.
+# This is deliberately a narrow drift gate: the visible window class must have
+# the expected patched style while GLFW's helper class keeps its upstream style.
+# It reads source and fails configuration; it never applies or repairs a patch.
 include_guard(GLOBAL)
 
 function(_avb0795_count_exact_line output lines expected)
@@ -10,6 +14,10 @@ function(_avb0795_count_exact_line output lines expected)
   set(${output} ${count} PARENT_SCOPE)
 endfunction()
 
+# The caller supplies the populated GLFW source root, including offline overrides.
+# Exact occurrence counts reject missing/duplicated expected lines; a separate
+# assignment scan rejects a remaining incompatible main-class style. The helper
+# check prevents accidentally broadening the patch to unrelated native windows.
 function(avb0795_verify_glfw_patch glfw_source_dir)
   set(main_class_source "${glfw_source_dir}/src/win32_window.c")
   set(helper_class_source "${glfw_source_dir}/src/win32_init.c")

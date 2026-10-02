@@ -16,6 +16,10 @@ namespace avb::platform::windows::features::detail {
   using Clock = std::chrono::steady_clock;
   inline constexpr auto helper_retirement_grace = std::chrono::milliseconds{250};
 
+  /// @brief Runtime eligibility facts independent of native helper ownership.
+  ///
+  /// User preference alone is insufficient: a published tick owner, connected
+  /// window source, and nonterminal runtime are required before showing a helper.
   struct HelperActivationFacts final {
     bool requested{};
     bool window_capture{};
@@ -31,6 +35,11 @@ namespace avb::platform::windows::features::detail {
            facts.source_connected && !facts.stopping_or_terminal;
   }
 
+  /// @brief Preserve visibility history needed to authorize delayed retirement.
+  ///
+  /// Even a show whose readback failed counts as ever shown. Only a verified
+  /// hide establishes the timestamp from which the full grace interval runs;
+  /// losing hidden-state evidence prevents time alone from permitting release.
   struct HelperRetirementState final {
     bool ever_shown{};
     bool hidden_verified{true};
@@ -59,6 +68,12 @@ namespace avb::platform::windows::features::detail {
     return deadline && now >= *deadline;
   }
 
+  /// @brief Apply a visibility change and distinguish verified rollback from state loss.
+  ///
+  /// The operations seam borrows the native owner synchronously. Its no-throw
+  /// return types still carry failure; each mutation needs explicit readback.
+  /// Restoring the previous visible state is appropriate for a settings change,
+  /// while terminal hiding uses the separate deactivation policy below.
   template <typename Operations>
     requires requires(Operations &operations, bool active) {
       { operations.observe_active() } noexcept -> std::same_as<std::expected<bool, core::AppError>>;
@@ -90,6 +105,10 @@ namespace avb::platform::windows::features::detail {
                         : core::AppErrorCode::RuntimeStateLost}};
   }
 
+  /// @brief Require verified hiding without restoring visibility after failure.
+  ///
+  /// Stop and source loss cannot safely roll back to an active helper. Any failed
+  /// hide or readback therefore reports state loss and leaves ownership retained.
   template <typename Operations>
     requires requires(Operations &operations) {
       { operations.write_active(false) } noexcept -> std::same_as<std::expected<void, core::AppError>>;
@@ -112,6 +131,11 @@ namespace avb::platform::windows::features::detail {
     bool ownership_uncertain{};
   };
 
+  /// @brief Retire native resources only after hidden-state and grace proofs hold.
+  ///
+  /// Destroying the window must precede unregistering its class. Progress is a
+  /// decreased owned-resource count, allowing partial release to be distinguished
+  /// from retries; unsuccessful destruction or class cleanup retains uncertainty.
   template <typename Operations>
     requires requires(Operations &operations) {
       { operations.resource_count() } noexcept -> std::same_as<unsigned>;

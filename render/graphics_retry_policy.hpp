@@ -1,6 +1,9 @@
 /// @file
-/// Shared value policies for both Vulkan owners. Results describe evidence and
-/// required actions; each concrete owner retains its own handles and timers.
+/// @brief Shared value policies for both Vulkan owners.
+///
+/// Results describe evidence and required actions; each concrete owner retains
+/// its own handles and timers. Classifiers describe obligations without polling
+/// native state, and an error category alone never establishes safe destruction.
 #ifndef AVB0795_RENDER_GRAPHICS_RETRY_POLICY_HPP
 #define AVB0795_RENDER_GRAPHICS_RETRY_POLICY_HPP
 
@@ -17,7 +20,7 @@
 
 namespace avb::render {
 
-  /// Smallest resource scope that must be reconstructed after a native failure.
+  /// @brief Smallest resource scope that must be reconstructed after a native failure.
   enum class GraphicsFailureCategory { Swapchain,
                                        Surface,
                                        Device,
@@ -30,7 +33,10 @@ namespace avb::render {
     Terminal,
   };
 
-  /// Owner's attempt count, generation and elapsed time for one recovery episode.
+  /// @brief Owner's attempt count, generation and elapsed time for one recovery episode.
+  ///
+  /// attempt counts construction attempts already made, starting at zero. Elapsed
+  /// time is measured from the episode start; negative values are treated as zero.
   struct GraphicsRetryInput final {
     GraphicsFailureCategory category{GraphicsFailureCategory::Swapchain};
     std::uint32_t attempt{};
@@ -38,23 +44,32 @@ namespace avb::render {
     std::chrono::milliseconds elapsed_no_progress{};
   };
 
-  /// Bounded action with candidate generation and remaining construction delay.
+  /// @brief Bounded action with candidate generation and remaining construction delay.
+  ///
+  /// A terminal decision has no candidate or delay. A zero delay permits an
+  /// attempt now; a positive delay is relative to the supplied observation time.
   struct GraphicsRetryDecision final {
     GraphicsRetryAction action{GraphicsRetryAction::Terminal};
     std::optional<std::uint64_t> candidate_generation;
     std::optional<std::chrono::milliseconds> retry_after;
   };
 
-  /// Three construction attempts at episode offsets 0, 100 and 500 ms.
-  /// The owner resets its episode only after a successful replacement present retires.
+  /// @brief Three construction attempts at episode offsets 0, 100 and 500 ms.
+  ///
+  /// The owner retains the episode budget through replacement construction and
+  /// resets it only after a successful replacement present retires. Each evaluate
+  /// call is independent; this value policy stores no timer or attempt history.
   class GraphicsRetryPolicy final {
   public:
-    /// Calculate the next action; only device rebuild advances generation.
+    /// @brief Calculate the next action; only device rebuild advances generation.
+    ///
+    /// Exhausted attempts, a terminal category, or device-generation overflow
+    /// return a terminal decision. Evaluating does not consume an attempt.
     [[nodiscard]] GraphicsRetryDecision
     evaluate(GraphicsRetryInput input) const noexcept;
   };
 
-  /// Keep an already-due retry strictly in the future to avoid a tight loop.
+  /// @brief Keep an already-due retry strictly in the future to avoid a tight loop.
   [[nodiscard]] constexpr std::chrono::milliseconds strictly_future_retry_delay(
     const std::chrono::milliseconds retry_after) noexcept
   {
@@ -63,7 +78,7 @@ namespace avb::render {
              : std::chrono::milliseconds{1};
   }
 
-  /// Distinguish an unsupported loader/driver floor from other startup failures.
+  /// @brief Distinguish an unsupported loader/driver floor from other startup failures.
   [[nodiscard]] constexpr core::AppErrorCode
   vulkan_instance_create_error_code(const VkResult result) noexcept
   {
@@ -72,21 +87,25 @@ namespace avb::render {
              : core::AppErrorCode::RuntimeConstructionFailure;
   }
 
-  /// Evidence about one swapchain's image users, presentation and failed release.
+  /// @brief Evidence about one swapchain's image users, presentation and failed release.
+  ///
+  /// The owner aggregates all slots and present records for the same handle.
+  /// Submission completion can clear image use while a present fence still owes
+  /// proof; release_retained records an image that could not be explicitly returned.
   struct SwapchainOwnershipFacts final {
     bool native_image_use_pending{};
     bool present_fence_pending{};
     bool release_retained{};
   };
 
-  /// Replacement may retain old presents, but not unreleased acquired images.
+  /// @brief Replacement may retain old presents, but not unreleased acquired images.
   [[nodiscard]] constexpr bool
   same_surface_replacement_ready(const SwapchainOwnershipFacts facts) noexcept
   {
     return !facts.native_image_use_pending && !facts.release_retained;
   }
 
-  /// Destruction requires both image-use and presentation proof. A failed image
+  /// @brief Destruction requires both image-use and presentation proof. A failed image
   /// release alone does not prevent destruction once all actual use has ended.
   [[nodiscard]] constexpr bool
   retired_swapchain_destroyable(const SwapchainOwnershipFacts facts) noexcept
@@ -94,15 +113,18 @@ namespace avb::render {
     return !facts.native_image_use_pending && !facts.present_fence_pending;
   }
 
-  /// How the active handle moves to the retired set before vkCreateSwapchainKHR.
+  /// @brief How the active handle moves to the retired set before vkCreateSwapchainKHR.
   struct SameSurfaceSwapchainCreatePlan final {
     bool may_create{};
     bool retire_active_before_create{};
     bool use_active_as_old{};
   };
 
-  /// Never reuse an old handle after a create attempt has retired it, even when
+  /// @brief Never reuse an old handle after a create attempt has retired it, even when
   /// creation fails; a later attempt starts with no active oldSwapchain.
+  ///
+  /// The returned plan owns no handle and changes no record. The caller performs
+  /// the retirement before passing the old handle to native creation.
   [[nodiscard]] constexpr SameSurfaceSwapchainCreatePlan
   plan_same_surface_swapchain_create(
     const bool active_present,
@@ -206,15 +228,22 @@ namespace avb::render {
     return true;
   }
 
-  /// Selection-only view of a ring slot; retained is a borrowed-owner marker.
+  /// @brief Selection-only view of a ring slot; retained is a borrowed-owner marker.
+  ///
+  /// This value contains no image or lifetime lease. The native owner must keep
+  /// the corresponding slot valid when applying the selected index.
   struct RenderFrameCandidate final {
     RenderSlotPhase phase{RenderSlotPhase::Empty};
     std::uint64_t sequence{};
     bool retained{};
   };
 
-  /// Select the newest ready sequence, then an explicitly requested retained
-  /// redraw. A delayed older slot must never replace a newer submitted image.
+  /// @brief Select the newest ready sequence, then an explicitly requested retained redraw.
+  ///
+  /// A delayed older slot must never replace a newer submitted image. The span is
+  /// borrowed only for the call; the returned index refers to its unchanged order.
+  /// Equal ready sequences keep the first match. No eligible ready or safely empty
+  /// retained candidate returns nullopt, including for an empty span.
   [[nodiscard]] constexpr std::optional<std::size_t> select_render_frame(
     const std::span<const RenderFrameCandidate> candidates,
     const std::uint64_t last_submitted_sequence,
@@ -243,13 +272,16 @@ namespace avb::render {
     return std::nullopt;
   }
 
-  /// Which host-pollable signal can establish a slot's next safe cleanup step.
+  /// @brief Which host-pollable signal can establish a slot's next safe cleanup step.
   enum class SlotProofFence { None,
                               Acquire,
                               Submission };
 
-  /// An acquire without submission uses acquire proof; uncertain submission
+  /// @brief An acquire without submission uses acquire proof; uncertain submission
   /// retains submission proof instead of assuming that enqueue failed.
+  ///
+  /// None means there is no Vulkan fence to poll for this phase, not that every
+  /// API or image-ownership obligation has ended.
   [[nodiscard]] constexpr SlotProofFence
   proof_fence_for_slot(const RenderSlotPhase phase) noexcept
   {
@@ -270,7 +302,7 @@ namespace avb::render {
     return SlotProofFence::None;
   }
 
-  /// Whether a slot still holds Vulkan/image ownership requiring retirement.
+  /// @brief Whether a slot still holds Vulkan/image ownership requiring retirement.
   [[nodiscard]] constexpr bool
   slot_has_vulkan_work(const RenderSlotPhase phase) noexcept
   {
@@ -296,15 +328,19 @@ namespace avb::render {
     bool awaiting_successful_present{};
   };
 
-  /// Events that change the existing retry budget without introducing a service.
+  /// @brief Events that change the existing retry budget without introducing a service.
   enum class GraphicsRecoveryObservation {
     ConstructionAttempted,
     ReplacementConstructed,
     SuccessfulPresentRetired,
   };
 
-  /// Advance an attempted/replaced episode; reset only on proven presentation
+  /// @brief Advance an attempted/replaced episode; reset only on proven presentation
   /// from a replacement whose successful present was still awaited.
+  ///
+  /// The owner verifies that the present belongs to the current episode before
+  /// reporting it. The returned state replaces the caller's prior value; attempted
+  /// construction saturates the counter instead of wrapping to a fresh budget.
   [[nodiscard]] constexpr GraphicsRecoveryEpisodeState
   advance_graphics_recovery_episode(
     GraphicsRecoveryEpisodeState state,
@@ -326,7 +362,7 @@ namespace avb::render {
     return state;
   }
 
-  /// Control-flow consequence of a timeout-zero swapchain acquire.
+  /// @brief Control-flow consequence of a timeout-zero swapchain acquire.
   enum class AcquireAction {
     UseImage,
     Wait,
@@ -336,19 +372,22 @@ namespace avb::render {
     Terminal,
   };
 
-  /// Whether acquire produced an image and pending signal operations.
+  /// @brief Whether acquire produced an image and pending signal operations.
   enum class AcquireOwnership { ImageAndSyncAcquired,
                                 Unchanged };
 
-  /// Keeps image ownership separate from suboptimal/recreation control flow.
+  /// @brief Keeps image ownership separate from suboptimal/recreation control flow.
   struct AcquireClassification final {
     AcquireAction action{AcquireAction::Terminal};
     AcquireOwnership ownership{AcquireOwnership::Unchanged};
     bool recreate_after_safe_use{};
   };
 
-  /// Only success/suboptimal acquire an image. Other results leave the supplied
+  /// @brief Only success/suboptimal acquire an image. Other results leave the supplied
   /// semaphore/fence unchanged; timeout/not-ready request a later observation.
+  ///
+  /// ImageAndSyncAcquired records pending acquire synchronization, not host-observed
+  /// completion. If no submission consumes it, acquire proof must retire first.
   [[nodiscard]] constexpr AcquireClassification
   classify_acquire_result(const VkResult result,
                           const bool full_screen_exclusive_enabled) noexcept
@@ -381,13 +420,13 @@ namespace avb::render {
     }
   }
 
-  /// Submission proof obligation, including guaranteed-not-enqueued OOM.
+  /// @brief Submission proof obligation, including guaranteed-not-enqueued OOM.
   enum class SubmitOutcome { Enqueued,
                              NotEnqueued,
                              DeviceLost,
                              Uncertain };
 
-  /// Unknown submission results retain possibly referenced resources; never
+  /// @brief Unknown submission results retain possibly referenced resources; never
   /// manufacture completion by treating every failure as not enqueued.
   [[nodiscard]] constexpr SubmitOutcome
   classify_submit_result(const VkResult result) noexcept
@@ -405,7 +444,7 @@ namespace avb::render {
     }
   }
 
-  /// Select the proof phase; device loss is handled by the owner's loss path.
+  /// @brief Select the proof phase; device loss is handled by the owner's loss path.
   [[nodiscard]] constexpr std::optional<RenderSlotPhase>
   slot_phase_after_submit(const SubmitOutcome outcome) noexcept
   {
@@ -422,17 +461,17 @@ namespace avb::render {
     return std::nullopt;
   }
 
-  /// Only enabled optional extensions may explain their specialized results.
+  /// @brief Only enabled optional extensions may explain their specialized results.
   struct PresentFeatureFacts final {
     bool full_screen_exclusive_enabled{};
     bool present_timing_enabled{};
   };
 
-  /// Whether presentation may still reference its fence and wait semaphore.
+  /// @brief Whether presentation may still reference its fence and wait semaphore.
   enum class PresentOwnership { Enqueued,
                                 NotEnqueued,
                                 Uncertain };
-  /// Recovery scope resulting from presentation, independent of its ownership.
+  /// @brief Recovery scope resulting from presentation, independent of its ownership.
   enum class PresentRecovery {
     None,
     RecreateSwapchain,
@@ -441,15 +480,19 @@ namespace avb::render {
     Terminal,
   };
 
-  /// Default is conservative uncertainty: terminal does not mean safe release.
+  /// @brief Default is conservative uncertainty: terminal does not mean safe release.
   struct PresentClassification final {
     PresentOwnership ownership{PresentOwnership::Uncertain};
     PresentRecovery recovery{PresentRecovery::Terminal};
     bool presentation_pending{true};
   };
 
-  /// Keep WSI rejection records whose queue operations were enqueued. OOM is
+  /// @brief Keep WSI rejection records whose queue operations were enqueued. OOM is
   /// the known no-enqueue path; unknown results retain their present record.
+  ///
+  /// Supply facts for extensions actually enabled by the device owner. Specialized
+  /// results without their enabled feature stay uncertain/terminal. A recovery
+  /// request does not cancel presentation_pending or transfer its ownership back.
   [[nodiscard]] constexpr PresentClassification
   classify_present_result(const VkResult result,
                           const PresentFeatureFacts features = {}) noexcept
@@ -486,7 +529,7 @@ namespace avb::render {
     }
   }
 
-  /// A non-enqueued present leaves the acquired image under submission drain.
+  /// @brief A non-enqueued present leaves the acquired image under submission drain.
   [[nodiscard]] constexpr RenderSlotPhase
   slot_phase_after_present(const PresentOwnership ownership) noexcept
   {
@@ -495,22 +538,22 @@ namespace avb::render {
              : RenderSlotPhase::Submitted;
   }
 
-  /// A non-successful maintenance1 release never clears acquired-image state.
+  /// @brief A non-successful maintenance1 release never clears acquired-image state.
   enum class ReleaseOwnership { Released,
                                 Retained,
                                 Uncertain };
-  /// Release failures choose surface teardown or terminal retained ownership.
+  /// @brief Release failures choose surface teardown or terminal retained ownership.
   enum class ReleaseRecovery { None,
                                SurfaceLost,
                                Terminal };
 
-  /// Paired release evidence/action; uncertainty is the fail-closed default.
+  /// @brief Paired release evidence/action; uncertainty is the fail-closed default.
   struct ReleaseClassification final {
     ReleaseOwnership ownership{ReleaseOwnership::Uncertain};
     ReleaseRecovery recovery{ReleaseRecovery::Terminal};
   };
 
-  /// Accept only VK_SUCCESS as release proof; surface loss preserves the
+  /// @brief Accept only VK_SUCCESS as release proof; surface loss preserves the
   /// record under its swapchain until legal destruction is possible.
   [[nodiscard]] constexpr ReleaseClassification
   classify_release_result(const VkResult result) noexcept
@@ -526,7 +569,7 @@ namespace avb::render {
     }
   }
 
-  /// Cleanup of completed but unconsumed binary signals and image ownership.
+  /// @brief Cleanup of completed but unconsumed binary signals and image ownership.
   struct SlotReleasePlan final {
     RenderSlotPhase next_phase{RenderSlotPhase::ReleaseRetained};
     bool destroy_acquire_semaphore{};
@@ -534,8 +577,12 @@ namespace avb::render {
     bool clear_acquired_ownership{};
   };
 
-  /// Determine which semaphores cannot be recycled after unused acquire/present.
+  /// @brief Determine which semaphores cannot be recycled after unused acquire/present.
   /// Image release and completed-signal destruction are separate decisions.
+  ///
+  /// Requires the prior phase's acquire/submission proof to have completed before
+  /// release is attempted. This plan describes cleanup after that observation;
+  /// it does not make an outstanding binary signal safe to destroy.
   [[nodiscard]] constexpr SlotReleasePlan
   plan_slot_release(const RenderSlotPhase prior_phase,
                     const ReleaseClassification classification) noexcept
@@ -563,7 +610,10 @@ namespace avb::render {
     NewPending,
   };
 
-  /// Aggregate owner evidence at one observation; elapsed time is owner-kept.
+  /// @brief Aggregate owner evidence at one observation; elapsed time is owner-kept.
+  ///
+  /// ownership_uncertain prevents completion even if no known pending record is
+  /// counted. New work and repeated polls must not restart elapsed_no_progress.
   struct RuntimeDrainInput final {
     bool pending_ownership{};
     bool ownership_uncertain{};
@@ -571,7 +621,7 @@ namespace avb::render {
     std::chrono::milliseconds elapsed_no_progress{};
   };
 
-  /// Stalled retains owners and polling; may_complete alone permits release.
+  /// @brief Stalled retains owners and polling; may_complete alone permits release.
   struct RuntimeDrainDecision final {
     core::RuntimeDrainStatus status{core::RuntimeDrainStatus::Normal};
     bool may_complete{};
@@ -579,11 +629,14 @@ namespace avb::render {
     std::optional<std::chrono::milliseconds> poll_after;
   };
 
-  /// Poll unresolved ownership within 50 ms; publish Stalled after ten seconds
-  /// without retirement. The policy does not sleep, destroy or abandon owners.
+  /// @brief Schedule unresolved ownership checks within 50 ms and detect stalled drains.
+  ///
+  /// Ten seconds without retirement yields Stalled while retaining the polling
+  /// obligation. The policy does not sleep, destroy or abandon owners; the caller
+  /// keeps the no-progress clock and applies a requested restart on real progress.
   class RuntimeDrainPolicy final {
   public:
-    /// Derive drain status/deadline from evidence without altering the owner.
+    /// @brief Derive drain status/deadline from evidence without altering the owner.
     [[nodiscard]] RuntimeDrainDecision
     evaluate(RuntimeDrainInput input) const noexcept;
   };

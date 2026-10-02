@@ -4,3 +4,5 @@
 /compile_commands.json
 # Machine-specific overrides may contain local SDK/dependency paths.
 /CMakeUserPresets.json
+/artifacts/
+/.vscode/

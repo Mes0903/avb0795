@@ -21,8 +21,12 @@ namespace avb::platform::windows {
   class Win32OverlayAdapter;
   class WindowsRuntimeFactory;
 
-  /// Main-thread owner of the floating GLFW_NO_API replica window.
-  /// Owns GLFW decoration only; native transparency/subclass policy lives in the adapter.
+  /// @brief Own the floating replica window used by native input and presentation.
+  ///
+  /// All operations and destruction belong to the GLFW main thread while GLFW
+  /// remains initialized. The wrapper controls decoration; a separate adapter
+  /// owns subclass and input-transparency policy. Render surfaces and subclass
+  /// reachability must be retired before releasing the window they borrow.
   class OverlayWindow final {
   private:
     struct Impl;
@@ -47,7 +51,12 @@ namespace avb::platform::windows {
     OverlayWindow(OverlayWindow &&) = delete;
     OverlayWindow &operator=(OverlayWindow &&) = delete;
 
-    /// Change GLFW_DECORATED; the runtime coordinates client-geometry restoration.
+    /// @brief Change decoration and cache the preference only after native readback.
+    ///
+    /// This operation does not preserve client placement by itself. The caller
+    /// snapshots and restores geometry as part of the surrounding settings
+    /// transaction. An error can follow a native mutation, so it does not prove
+    /// the old border is still applied or remove the need for rollback.
     [[nodiscard]] std::expected<void, core::AppError>
     set_border(core::BorderPreference border) noexcept;
     /// Return the owner's confirmed border preference.
@@ -63,8 +72,12 @@ namespace avb::platform::windows {
     /// Return physical framebuffer pixels; zero extent suspends presentation.
     [[nodiscard]] core::Extent framebuffer_extent() const noexcept;
 
-    /// Explicitly destroy after render/surface drain and safe subclass handling.
-    /// A failed detach requires the adapter to remain alive through WM_NCDESTROY.
+    /// @brief Destroy the window after its native users have safely retired.
+    ///
+    /// Explicit destruction clears the stored pointer so later destruction is
+    /// harmless. If subclass detach failed, keep the adapter alive through native
+    /// destruction so the final messages still reach valid callback state.
+    /// @pre All presentation and surface use of the window has ended.
     void destroy() noexcept;
 
   private:

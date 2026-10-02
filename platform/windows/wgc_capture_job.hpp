@@ -1,5 +1,5 @@
 /// @file
-/// @brief One WGC session/pool generation, contained intake, and nonblocking stop.
+/// @brief One WGC session/pool generation, contained intake, and staged stop.
 /// Native implementation details remain below the portable application ports.
 
 #ifndef AVB0795_PLATFORM_WINDOWS_WGC_CAPTURE_JOB_HPP
@@ -61,34 +61,44 @@ namespace avb::platform::windows {
                            const CaptureCleanupFailure &) = default;
   };
 
-  /// Owns one session/pool and newest-only raw-frame mailbox.
-  /// Main-thread consumers coordinate drain; WinRT delegates hold weak typed state.
+  /// @brief Own a capture session, frame pool, and newest-only checkout mailbox.
+  ///
+  /// Main-thread lifecycle operations coordinate with free-threaded WinRT
+  /// delegates through shared callback state. A registration epoch rejects late
+  /// handlers; resource generations identify which allocation a delivered frame
+  /// belongs to. Neither token replaces the caller's obligation to retire GPU
+  /// uses and externally held checkouts before recreating or destroying the pool.
   class WgcCaptureJob final {
   public:
     using WakeMainLoop = std::function<void()>;
 
-    // Concrete P2/P3 construction boundary. The P3 runtime owns source and its
-    // monotonically increasing resource generation; its render stack owns
-    // d3d_device. Both borrowed objects must outlive this job. P3 supplies a
-    // non-zero, representable pool count sized to its bounded destination slots
-    // plus callback/local and mailbox checkout headroom. wake_main_loop only
-    // requests a main-thread tick and is not an application event sink.
-    /// Build all native callback state with frame intake still closed.
+    /// @brief Prepare native capture and callback state with intake still closed.
+    ///
+    /// The source and graphics owner outlive this job. The runtime supplies the
+    /// resource generation and a pool count covering destination slots plus
+    /// intake and mailbox checkout headroom. The copied wake callable only asks
+    /// for a main-thread tick; borrowed targets must survive callback drain.
+    /// A closed source, invalid count, empty wake, or native construction failure
+    /// returns a typed error without publishing an active runtime.
     [[nodiscard]] static std::expected<std::unique_ptr<WgcCaptureJob>,
                                        core::AppError>
     create_inactive(WindowsCaptureSource &source, ID3D11Device &d3d_device, std::uint64_t resource_generation, std::uint32_t pool_buffer_count, WakeMainLoop wake_main_loop);
 
-    // The exact checked extent used to create this job's initial pool. Factory
-    // and device recovery use it to initialize matching render/runtime state;
-    // later size changes still go through the runtime reconfiguration barrier.
-    /// Return the allocation validated during this job's construction.
+    /// @brief Return the checked extent used for the initial pool allocation.
+    ///
+    /// Factory construction and device recovery use this value to initialize
+    /// matching graphics state. It is not a live size query; subsequent changes
+    /// require the reconfiguration barrier and remain separate from this value.
     [[nodiscard]] core::Extent initial_allocation() const noexcept;
 
-    // Runtime owners must request stop and retain the job until stop_quiescent(),
-    // and must release every WindowsCapturedFrame handed to external/renderer
-    // ownership. stop_quiescent() proves only internal callback, mailbox, and
-    // native cleanup; once publication starts, destruction fail-fasts if that
-    // internal proof is absent. An inactive factory partial may unwind normally.
+    /// @brief Release a safely drained job, or an unpublished construction partial.
+    ///
+    /// Once publication starts, destruction terminates the process if internal
+    /// stop safety has not been proved. Internal quiescence covers callbacks,
+    /// mailbox, and native cleanup; it cannot count checkouts already transferred
+    /// to rendering work or external consumers.
+    /// @pre A published job has stopped, stop_quiescent() is true, and all
+    /// externally held frames and their GPU uses have retired.
     ~WgcCaptureJob();
 
     WgcCaptureJob(const WgcCaptureJob &) = delete;
@@ -107,18 +117,32 @@ namespace avb::platform::windows {
     [[nodiscard]] CaptureSignalBatch drain_signals();
     /// Claim one pending arrival and perform a pool-count-bounded intake pass.
     void service_pending_arrival() noexcept;
-    /// Check sticky source closure, StartCapture, then open the pending handshake.
+    /// @brief Attempt capture start once and open intake only after it succeeds.
+    ///
+    /// The sticky source check precedes the native start call. Success commits
+    /// the job to published lifetime rules; it does not guarantee that a frame
+    /// arrives or that the source cannot close immediately afterward.
     [[nodiscard]] std::expected<void, core::AppError> start_for_publication();
     /// Close the old epoch and revoke its handler; later ticks prove quiescence.
     [[nodiscard]] std::expected<void, core::AppError> begin_reconfigure();
     /// Include final borrowed wake execution in the callback-lifetime proof.
     [[nodiscard]] bool frame_callbacks_quiescent() const noexcept;
-    /// Recreate only after old mailbox/checkouts/render allocation are safely retired.
+    /// @brief Recreate the pool and register the prepared epoch without opening it.
+    ///
+    /// The method checks internal callback and mailbox quiescence. A native
+    /// failure may occur after recreation has begun, so failure is not a promise
+    /// that the old allocation remains usable.
+    /// @pre The owner has retired all external checkouts and GPU uses, and has
+    /// successfully begun reconfiguration with a matching new resource generation.
     [[nodiscard]] std::expected<void, core::AppError>
     prepare_reconfigure(core::Extent allocation, std::uint64_t generation);
     /// Open the prepared epoch after the runtime's final sticky source check.
     void commit_reconfigure() noexcept;
-    /// Initiate terminal cleanup, containing revoke/Close failure without waiting.
+    /// @brief Close intake and attempt handler revocation and session close once.
+    ///
+    /// The method does not join callbacks. Native calls may still take time or
+    /// fail; retained cleanup uncertainty keeps stop_quiescent() false and must
+    /// keep the job owned instead of treating exception containment as success.
     void request_stop() noexcept;
     /// Prove internal callback/mailbox/native safety, not external render-held checkouts.
     [[nodiscard]] bool stop_quiescent() const noexcept;

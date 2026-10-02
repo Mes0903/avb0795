@@ -129,6 +129,9 @@ namespace avb::platform::windows::features {
 
   bool BrowserCaptureKeepAlive::window_identity_valid() const noexcept
   {
+    // A matching class name alone does not prove ownership. Check thread,
+    // process, registered atom, instance, parent, and expected styles before
+    // changing visibility or destroying a handle that might have been reused.
     if (!on_owner_thread() || !instance_ || !window_ || !class_atom_) {
       return false;
     }

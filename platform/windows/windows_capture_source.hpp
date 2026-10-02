@@ -18,19 +18,22 @@ namespace avb::platform::windows {
 
   class WgcCaptureJob;
 
-  // Stable P2/P3 source handoff. The P3 runtime factory resolves a catalog entry
-  // once, transfers its WindowsSourceLease here, and keeps this object alive
-  // across every capture-job/resource generation. The wake callable only asks
-  // the owning main loop to tick; source state remains local and is consumed
-  // synchronously through the operations below.
-  /// Stable source identity across capture-job rebuilds and graphics recovery.
-  /// Main-thread operations retain a preallocated wake state for callback drains.
+  /// @brief Preserve selected source identity across job rebuilds and recovery.
+  ///
+  /// The factory transfers one registry lease here; rebuilding graphics resources
+  /// never repeats selection or recreates the native item from a window handle.
+  /// Main-thread operations consume typed close state. The wake callable merely
+  /// requests a tick and may borrow a host whose lifetime must cover admitted
+  /// calls, including the final wake issued as callback admission drains.
   class WindowsCaptureSource final {
   public:
     using WakeMainLoop = std::function<void()>;
 
-    /// Consume a registry lease without activating borrowed host callbacks.
-    /// Unpublished construction failures may therefore unwind immediately.
+    /// @brief Consume a source lease with runtime wake admission still unpublished.
+    ///
+    /// The observation continues recording closure before activation, so a source
+    /// lost during construction is detectable without exposing the borrowed host.
+    /// An empty wake callable or construction failure returns a typed error.
     [[nodiscard]] static std::expected<std::unique_ptr<WindowsCaptureSource>,
                                        core::AppError>
     create(WindowsSourceLease lease, WakeMainLoop wake_main_loop);
@@ -49,15 +52,19 @@ namespace avb::platform::windows {
     /// Observe closure even before runtime activation or between job generations.
     [[nodiscard]] bool is_closed() const noexcept;
 
-    // Bind the preallocated runtime wake only after successful publication.
-    // Before activation, the registry observation still records sticky close.
-    /// Enable callback wake access only when successful StartCapture guarantees publication.
+    /// @brief Bind the preallocated wake after runtime publication is guaranteed.
+    ///
+    /// The factory calls this after successful capture start; an unpublished
+    /// failure can therefore unwind without a callback borrowing the host.
+    /// Activation after stop is ignored. Sticky closure must still be checked
+    /// independently because a close recorded before binding need not wake again.
     void activate_runtime_wake() noexcept;
 
-    // Stop detaches the runtime wake binding without waiting or retiring the
-    // registry-owned source observation. Retain this object until callbacks are
-    // quiescent.
-    /// Close admission and detach the binding without waiting for admitted calls.
+    /// @brief Close wake admission and detach this source's runtime binding.
+    ///
+    /// Already admitted calls finish independently; retain this object and the
+    /// borrowed wake target until callbacks_quiescent() becomes true. Stop leaves
+    /// the registry's longer-lived close observation intact for future selection.
     void request_stop() noexcept;
     /// True only after all admitted wakes, including their final wake, return.
     [[nodiscard]] bool callbacks_quiescent() const noexcept;

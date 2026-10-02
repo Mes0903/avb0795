@@ -17,9 +17,14 @@
 
 namespace avb::platform::windows {
 
-  /// Owns the WGC pool checkout, not merely a reference to its texture.
-  /// Moving transfers exactly-once Close responsibility to the next owner.
-  /// The pool owner must outlive callback, mailbox, and renderer-held instances.
+  /// @brief Retain a WGC pool checkout until the last scheduled GPU use retires.
+  ///
+  /// Moving transfers responsibility for attempting Close exactly once. A COM
+  /// reference to the texture cannot substitute for checkout ownership because
+  /// returning the frame allows the pool to reuse its storage. The pool owner
+  /// must outlive instances held by intake, the mailbox, and rendering work.
+  /// Generation and allocation metadata travel with the checkout so consumers
+  /// can reject work from an allocation that has already been superseded.
   class WindowsCapturedFrame final {
   public:
     /// Adopt a checked-out frame together with immutable generation metadata.
@@ -50,9 +55,12 @@ namespace avb::platform::windows {
     [[nodiscard]] std::chrono::steady_clock::time_point
     capture_timestamp() const noexcept;
 
-    // The returned texture is only a view. This wrapper must remain alive until
-    // every use of the texture has completed so the WGC checkout stays owned.
-    /// Project a texture view while preserving the separate checkout lifetime.
+    /// @brief Obtain a COM texture view without transferring the pool checkout.
+    ///
+    /// Keep this wrapper alive until every submitted use of the view completes.
+    /// Projection failure throws; calling on a moved-from wrapper also throws.
+    /// The returned COM pointer retains the texture interface, not permission to
+    /// return the frame early or reuse it after its checkout has been closed.
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D11Texture2D> texture() const;
 
   private:

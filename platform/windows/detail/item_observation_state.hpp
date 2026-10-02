@@ -22,8 +22,13 @@
 
 namespace avb::platform::windows::detail {
 
-  /// Counts borrowed host wake calls through their complete execution.
-  /// A shared atomic word linearizes admission against terminal source stop.
+  /// @brief Account for every admitted use of a borrowed host wake target.
+  ///
+  /// Shared ownership keeps this counter and callable alive, but does not extend
+  /// lifetimes of objects captured by reference. The owner closes admission and
+  /// waits for quiescence before destroying those objects. One atomic word makes
+  /// stop and entry mutually ordered; the last departing call remains counted
+  /// while issuing its final wake, so a zero count cannot hide host use.
   class RuntimeWakeState final {
   private:
     /// Scope guard whose final wake remains counted until the callable returns.
@@ -72,8 +77,13 @@ namespace avb::platform::windows::detail {
     std::atomic_uint64_t admission_state_{};
   };
 
-  /// Canonical GraphicsCaptureItem identity and sole pre-publication Closed token.
-  /// Delegates weak-lock this self-contained state; they never borrow a registry.
+  /// @brief Own canonical item identity and its pre-publication close observation.
+  ///
+  /// The registry and runtime leases share this state. Its native delegate holds
+  /// only a weak pointer, allowing a late invocation to fail its lock after
+  /// retirement without accessing a destroyed registry or source wrapper.
+  /// Closure is sticky across runtime bindings; the optional wake communicates
+  /// readiness only and is not the source of truth for whether the item closed.
   class ItemObservationState final {
   private:
     struct ConstructionKey {};
@@ -105,7 +115,11 @@ namespace avb::platform::windows::detail {
     bind_runtime_wake(const std::shared_ptr<RuntimeWakeState> &wake) noexcept;
     /// Clear only the matching binding; a replacement binding must be preserved.
     void unbind_runtime_wake(const RuntimeWakeState *wake) noexcept;
-    /// Reject late delegates and revoke the sole watcher without joining callbacks.
+    /// @brief Close observation admission and attempt native watcher revocation.
+    ///
+    /// Retirement does not join callbacks or report revocation failure. An
+    /// already admitted callback may finish against its retained shared state;
+    /// runtime wake admission supplies the separate borrowed-host lifetime proof.
     void retire() noexcept;
 
   private:

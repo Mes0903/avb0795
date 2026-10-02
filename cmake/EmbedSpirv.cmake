@@ -1,3 +1,7 @@
+# Convert compiled shader bytes into owning static C++ arrays and borrowed spans.
+# This script generates build-tree files; it does not compile GLSL or validate a
+# shader's semantic interface with the renderer. Keep generation separate so the
+# build graph can track shader compilation and embedding as distinct dependencies.
 foreach(required_variable
         AVB0795_VERTEX_SPIRV
         AVB0795_FRAGMENT_SPIRV
@@ -8,6 +12,11 @@ foreach(required_variable
   endif()
 endforeach()
 
+# Return formatted 32-bit words and their count through the caller's scope.
+# Reject truncated/non-word-aligned input and an unexpected little-endian magic
+# before generating source. These checks establish the supported byte layout,
+# not full SPIR-V validity. Reassemble each word explicitly from its byte order so
+# the generated numeric values do not depend on CMake's host endianness.
 function(_avb0795_spirv_words input output_words output_count)
   if(NOT EXISTS "${input}")
     message(FATAL_ERROR "SPIR-V input does not exist: ${input}")
@@ -61,6 +70,9 @@ file(MAKE_DIRECTORY
   "${output_header_directory}"
   "${output_source_directory}")
 
+# These bracket/quoted values are generated C++ source, not executable CMake or
+# documentation comments. Their literal bytes form the renderer's generated API;
+# explanatory CMake comments belong outside the values.
 set(header_contents [=[#pragma once
 
 #include <cstdint>
