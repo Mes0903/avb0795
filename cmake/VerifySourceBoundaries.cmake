@@ -274,21 +274,29 @@ function(avb0795_assert_target_boundaries)
         _avb0795_boundary_failure(
           "${product_target} must be the executable composition root")
       endif()
-      _avb0795_assert_sources(
-        "${product_target}"
-        "main.cpp"
-        "resources/windows/avb0795.rc"
-        "resources/windows/avb0795.manifest")
-      _avb0795_assert_links(
-        "${product_target}"
-        avb0795_app
-         avb0795_ui
-         avb0795_desktop
-         avb0795_windows
-         avb0795_windows_graphics
-         avb0795_diagnostics
-         glfw
-         windowsapp)
+      if(WIN32)
+        _avb0795_assert_sources(
+          "${product_target}"
+          "main.cpp"
+          "resources/windows/avb0795.rc"
+          "resources/windows/avb0795.manifest")
+        _avb0795_assert_links(
+          "${product_target}"
+          avb0795_app
+          avb0795_ui
+          avb0795_desktop
+          avb0795_windows
+          avb0795_windows_graphics
+          avb0795_diagnostics
+          glfw
+          windowsapp)
+      elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        _avb0795_assert_sources("${product_target}" "platform/linux/main.cpp")
+        _avb0795_assert_links("${product_target}"
+          avb0795_app avb0795_desktop avb0795_linux avb0795_linux_graphics glfw Vulkan::Vulkan)
+      else()
+        _avb0795_boundary_failure("${product_target} has no supported platform composition")
+      endif()
      endif()
    endforeach()
 endfunction()
@@ -523,6 +531,9 @@ function(_avb0795_scan_files category)
       if(linux_relative MATCHES "^platform/linux/(portal_screencast|detail/acquisition_policy)\\.(hpp|cpp)$")
         list(APPEND allowed_linux_app_headers avb/app/source_acquisition.hpp)
       endif()
+      if(linux_relative MATCHES "^platform/linux/linux_(disabled_hotkey|unavailable_services)\\.hpp$")
+        list(APPEND allowed_linux_app_headers avb/app/ports.hpp)
+      endif()
       _avb0795_assert_app_includes("${file}" "${contents}" ${allowed_linux_app_headers})
       if(NOT linux_relative MATCHES "^platform/linux/(x11_controller_window|x11_overlay_adapter)\\.cpp$")
         _avb0795_assert_no_match("${file}" "${contents}"
@@ -673,14 +684,34 @@ function(_avb0795_run_source_boundary_scan)
   _avb0795_scan_files(windows ${windows_files})
 
   _avb0795_collect_sources(linux_files "platform/linux")
+  # Only this exact file owns Linux composition. All other adapters retain their
+  # narrow include/owner rules, including the two temporary port implementations.
+  list(REMOVE_ITEM linux_files "${AVB0795_SOURCE_ROOT}/platform/linux/main.cpp")
   _avb0795_scan_files(linux ${linux_files})
 
   _avb0795_collect_sources(render_files "render")
   _avb0795_scan_files(render ${render_files})
 
-  _avb0795_collect_sources(main_files "main.cpp")
+  _avb0795_collect_sources(main_files "main.cpp" "platform/linux/main.cpp")
   foreach(file IN LISTS main_files)
     file(READ "${file}" contents)
+    if(file STREQUAL "${AVB0795_SOURCE_ROOT}/platform/linux/main.cpp")
+      _avb0795_assert_app_includes("${file}" "${contents}"
+        avb/app/app_command_queue.hpp avb/app/application.hpp avb/app/config_store.hpp)
+      _avb0795_assert_layer_includes("${file}" "${contents}" "core" core/types.hpp)
+      _avb0795_assert_layer_includes("${file}" "${contents}" "desktop" desktop/desktop_host.hpp)
+      _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "render")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "platform/windows")
+      _avb0795_assert_layer_includes("${file}" "${contents}" "platform/linux"
+        platform/linux/controller_font.hpp platform/linux/linux_atomic_replace.hpp
+        platform/linux/linux_disabled_hotkey.hpp platform/linux/linux_preferences.hpp
+        platform/linux/linux_ui_language.hpp platform/linux/linux_unavailable_services.hpp
+        platform/linux/x11_controller_window.hpp platform/linux/x11_overlay_adapter.hpp)
+      _avb0795_assert_no_match("${file}" "${contents}"
+        "#[ \t]*include[ \t]*[<\"](X11/|GLFW/glfw3native\\.h)"
+        "Linux composition reaches native window protocol outside its adapters")
+    endif()
     _avb0795_assert_no_match(
       "${file}"
       "${contents}"

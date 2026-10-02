@@ -1,7 +1,7 @@
 # These targets encode compile/link ownership, not just convenient source groups.
 # Portable values and language policy can be used without native graphics. The UI
 # consumes public command/view contracts but never links the application owner.
-# Concrete Windows services and the controller host meet at the executable below.
+# Concrete platform services and the controller host meet at each native entry.
 add_library(avb0795_diagnostics
   diagnostics/performance_report.cpp
 )
@@ -286,4 +286,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
   target_link_libraries(avb0795_linux
     PRIVATE avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO PkgConfig::AVB0795_PIPEWIRE
   )
+  add_executable(avb0795 ${PROJECT_SOURCE_DIR}/platform/linux/main.cpp)
+  # The concrete capability attachment's public presentation values use Vulkan
+  # types; do not expose all replica-renderer dependencies through the adapter.
+  target_link_libraries(avb0795 PRIVATE
+    avb0795_app avb0795_desktop avb0795_linux avb0795_linux_graphics glfw Vulkan::Vulkan)
+  target_compile_features(avb0795 PRIVATE cxx_std_23)
 endif()
