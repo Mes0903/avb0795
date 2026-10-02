@@ -287,64 +287,78 @@ namespace avb::ui {
       ImGui::TextDisabled("%s",
         i18n::text(i18n::TextId::AutoRefreshPaused, language).data());
     }
-    // A full-row selectable owns identity and navigation, while literal text
-    // occupies independent columns. Native diagnostics remain presentation values;
-    // the emitted command retains the opaque catalog ID and session generation.
-    constexpr auto table_flags = ImGuiTableFlags_RowBg |
-      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersH |
-      ImGuiTableFlags_Resizable;
-    if (ImGui::BeginTable("sources_table", 3, table_flags)) {
-      ImGui::TableSetupColumn(i18n::text(i18n::TextId::SourceType, language).data(),
-                              ImGuiTableColumnFlags_WidthFixed);
-      ImGui::TableSetupColumn(i18n::text(i18n::TextId::SourceName, language).data(),
-                              ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("HWND", ImGuiTableColumnFlags_WidthFixed);
-      ImGui::TableHeadersRow();
-      for (const auto &source : state.sources) {
-        ImGui::PushID(source.id.value.c_str());
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-        ImGui::BeginDisabled(!source.select.enabled);
-        const auto row_position = ImGui::GetCursorPos();
-        const bool selected = ImGui::Selectable(
-          "##source", source.selected, ImGuiSelectableFlags_SpanAllColumns,
-          {0.0F, ImGui::GetTextLineHeight()});
-        const bool hovered = ImGui::IsItemHovered(
-          ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled);
-        ImGui::SetCursorPos(row_position);
-        const auto disabled = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
-        const auto type_color = source.kind == core::SourceKind::Window
-          ? ImVec4{1.0F, 0.45F, 0.7F, 1.0F}
-          : ImVec4{0.65F, 0.6F, 1.0F, 1.0F};
-        ImGui::PushStyleColor(ImGuiCol_Text,
-          source.select.enabled ? type_color : disabled);
-        literal_text(source.kind_glyph);
-        ImGui::PopStyleColor();
-        ImGui::TableSetColumnIndex(1);
-        ImGui::PushStyleColor(ImGuiCol_Text, source.select.enabled
-          ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : disabled);
-        literal_text(source.label);
-        ImGui::PopStyleColor();
-        ImGui::TableSetColumnIndex(2);
-        ImGui::PushStyleColor(ImGuiCol_Text,
-          source.select.enabled && !source.native_handle_text.empty()
-          ? ImVec4{0.4F, 0.9F, 0.55F, 1.0F} : disabled);
-        literal_text(source.native_handle_text.empty()
-          ? std::string_view{"—"} : source.native_handle_text);
-        ImGui::PopStyleColor();
-        ImGui::EndDisabled();
-        if (hovered) {
-          ImGui::BeginTooltip();
-          ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0F);
+    if (state.source_selection_method == core::SourceSelectionMethod::SystemPicker) {
+      emit_if(radio_button(widget_label(i18n::TextId::ChooseDisplay, "choose_display", language).c_str(),
+                          state.chosen_source_kind == core::SourceKind::Display, state.controls.choose_display),
+              command_sink, app::ChooseSourceKind{state.session_id, core::SourceKind::Display});
+      emit_if(radio_button(widget_label(i18n::TextId::ChooseWindow, "choose_window", language).c_str(),
+                          state.chosen_source_kind == core::SourceKind::Window, state.controls.choose_window),
+              command_sink, app::ChooseSourceKind{state.session_id, core::SourceKind::Window});
+      emit_if(button(widget_label(i18n::TextId::FreshSourcePicker, "fresh_picker", language).c_str(),
+                     state.controls.fresh_picker), command_sink,
+              app::StartSourcePicker{state.session_id, state.chosen_source_kind});
+      if (state.acquisition_status_text) literal_text(*state.acquisition_status_text);
+    } else {
+      // A full-row selectable owns identity and navigation, while literal text
+      // occupies independent columns. Native diagnostics remain presentation values;
+      // the emitted command retains the opaque catalog ID and session generation.
+      constexpr auto table_flags = ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersH |
+        ImGuiTableFlags_Resizable;
+      if (ImGui::BeginTable("sources_table", 3, table_flags)) {
+        ImGui::TableSetupColumn(i18n::text(i18n::TextId::SourceType, language).data(),
+                                ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn(i18n::text(i18n::TextId::SourceName, language).data(),
+                                ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("HWND", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableHeadersRow();
+        for (const auto &source : state.sources) {
+          ImGui::PushID(source.id.value.c_str());
+          ImGui::TableNextRow();
+          ImGui::TableSetColumnIndex(0);
+          ImGui::BeginDisabled(!source.select.enabled);
+          const auto row_position = ImGui::GetCursorPos();
+          const bool selected = ImGui::Selectable(
+            "##source", source.selected, ImGuiSelectableFlags_SpanAllColumns,
+            {0.0F, ImGui::GetTextLineHeight()});
+          const bool hovered = ImGui::IsItemHovered(
+            ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled);
+          ImGui::SetCursorPos(row_position);
+          const auto disabled = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+          const auto type_color = source.kind == core::SourceKind::Window
+            ? ImVec4{1.0F, 0.45F, 0.7F, 1.0F}
+            : ImVec4{0.65F, 0.6F, 1.0F, 1.0F};
+          ImGui::PushStyleColor(ImGuiCol_Text,
+            source.select.enabled ? type_color : disabled);
+          literal_text(source.kind_glyph);
+          ImGui::PopStyleColor();
+          ImGui::TableSetColumnIndex(1);
+          ImGui::PushStyleColor(ImGuiCol_Text, source.select.enabled
+            ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : disabled);
           literal_text(source.label);
-          ImGui::PopTextWrapPos();
-          ImGui::EndTooltip();
+          ImGui::PopStyleColor();
+          ImGui::TableSetColumnIndex(2);
+          ImGui::PushStyleColor(ImGuiCol_Text,
+            source.select.enabled && !source.native_handle_text.empty()
+            ? ImVec4{0.4F, 0.9F, 0.55F, 1.0F} : disabled);
+          literal_text(source.native_handle_text.empty()
+            ? std::string_view{"—"} : source.native_handle_text);
+          ImGui::PopStyleColor();
+          ImGui::EndDisabled();
+          if (hovered) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0F);
+            literal_text(source.label);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+          }
+          emit_if(selected, command_sink,
+                  app::SelectSource{state.session_id, source.id});
+          ImGui::PopID();
         }
-        emit_if(selected, command_sink,
-                app::SelectSource{state.session_id, source.id});
-        ImGui::PopID();
+        ImGui::EndTable();
       }
-      ImGui::EndTable();
+
     }
 
     // Every session action uses this render's projected generation token;
@@ -353,7 +367,7 @@ namespace avb::ui {
                    state.controls.start),
             command_sink,
             app::Start{state.session_id});
-    emit_if(button(widget_label(i18n::TextId::Stop, "stop", language).c_str(),
+    emit_if(button(widget_label(state.acquisition_id ? i18n::TextId::CancelAcquisition : i18n::TextId::Stop, "stop", language).c_str(),
                    state.controls.stop),
             command_sink,
             app::Stop{state.session_id});

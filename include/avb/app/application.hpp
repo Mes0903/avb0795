@@ -4,6 +4,7 @@
 #define AVB0795_APP_APPLICATION_HPP
 
 #include "avb/app/commands.hpp"
+#include "avb/app/source_acquisition.hpp"
 #include "avb/app/config_store.hpp"
 #include "avb/app/controller_view_state.hpp"
 #include "avb/core/application_state.hpp"
@@ -32,7 +33,9 @@ namespace avb::app {
 
   /// @brief Sequence user intentions, domain state and one exclusively owned runtime.
   ///
-  /// Services/queue are borrowed and must outlive this object. A retained runtime
+  /// Services/queue and optional source acquisition are borrowed and must outlive
+  /// this object. Only explicit Start/picker intentions enter acquisition; absent
+  /// acquisition keeps the synchronous catalog path. A retained runtime
   /// may be destroyed only after Stopped; the host must honor AbandonProcess by
   /// exiting without stack unwinding instead of destroying uncertain native owners.
   /// Visible lifecycle and resource retention are separate: Error can mean either
@@ -40,7 +43,7 @@ namespace avb::app {
   ///
   /// @pre Use and destroy on the main thread; injected services must not reenter
   /// application mutations. Call shutdown() and continue stepping to Clean before
-  /// ordinary destruction when a runtime has been published.
+  /// ordinary destruction when a runtime has been published or acquisition injected.
   class Application final {
   public:
     /// @brief Load preferences and initialize discovery, hotkey and presentation state.
@@ -49,9 +52,10 @@ namespace avb::app {
     /// as a save destination. Typed
     /// service failures become notices while startup continues with available data.
     /// No capture is started. Unexpected exceptions may propagate during construction.
-    Application(AppCommandQueue &commands, ISourceCatalog &source_catalog, IReplicaRuntimeFactory &runtime_factory, IGlobalHotkey &global_hotkey, ConfigStore &config_store, std::filesystem::path config_path, core::PlatformCapabilities capabilities, core::CaptureExclusionStatus controller_exclusion, SystemLanguageQuery system_language_query, const std::filesystem::path &legacy_config_path = {});
+    Application(AppCommandQueue &commands, ISourceCatalog &source_catalog, IReplicaRuntimeFactory &runtime_factory, IGlobalHotkey &global_hotkey, ConfigStore &config_store, std::filesystem::path config_path, core::PlatformCapabilities capabilities, core::CaptureExclusionStatus controller_exclusion, SystemLanguageQuery system_language_query, const std::filesystem::path &legacy_config_path = {}, ISourceAcquisition *source_acquisition = nullptr);
     /// @brief Destroy members without initiating or completing asynchronous shutdown.
-    /// @pre No uncertain published runtime remains; AbandonProcess requires the
+    /// @pre No uncertain runtime remains and injected acquisition is quiescent.
+    /// AbandonProcess requires the
     /// host's non-unwinding exit path instead of this destructor.
     ~Application();
 
@@ -60,9 +64,11 @@ namespace avb::app {
     Application(Application &&) = delete;
     Application &operator=(Application &&) = delete;
 
-    /// @brief Process one FIFO batch, tick the retained runtime once, and publish a view.
+    /// @brief Process FIFO commands, acquisition facts, then one runtime tick and a view.
+    /// Ready publication occurs before the runtime slot; stale/cancelled intentions
+    /// cannot select a source or construct a runtime.
     /// Quit discards the unprocessed remainder of that batch. A runtime constructed
-    /// while consuming tick results starts work on a subsequent step, requested by
+    /// while consuming runtime tick results starts work on a subsequent step, requested by
     /// an immediate deadline. Calls after an exit decision do nothing.
     /// Unexpected exceptions select AbandonProcess while retaining native ownership;
     /// earlier accepted commands are not rolled back as a batch.
@@ -73,7 +79,8 @@ namespace avb::app {
     /// references into owned rows/strings across either mutation or owner destruction;
     /// copied catalog string_views continue to refer to static storage.
     [[nodiscard]] const ControllerViewState &view_state() const noexcept;
-    /// @brief Return the earliest runtime, discovery or immediate application deadline.
+    /// @brief Return the earliest runtime, acquisition, discovery or service-shutdown deadline.
+    /// Immediate work participates in the same minimum.
     /// An empty result means no timer is currently requested, not that no runtime
     /// exists or no future event can arrive. The host must also wake for queued input
     /// and native events, and check exit disposition before waiting.
@@ -81,7 +88,11 @@ namespace avb::app {
     next_deadline() const noexcept;
     /// Read the host exit instruction independently of the visible session lifecycle.
     [[nodiscard]] core::ExitDisposition exit_disposition() const noexcept;
-    /// @brief Close command admission, clear the hotkey and initiate retained-runtime drain.
+    /// @brief Close admission and initiate runtime/acquisition retirement.
+    /// Clean requires Stopped and service quiescence, including retained idle sources.
+    /// The acquisition-only clock expires after ten seconds without service ownership
+    /// progress and stops at service quiescence. Runtime retains its own progress
+    /// watchdog and reports Stalled; Normal status is not an ownership acknowledgment.
     /// Idempotent while shutdown is underway. Continue calling step until exit
     /// disposition changes; this operation never joins or performs a final config save.
     /// Unsaved accepted settings remain a notice, and known stalled drain selects
@@ -113,7 +124,20 @@ namespace avb::app {
     struct PendingStart {
       core::SourceDescriptor source;
       core::ReplicaSettings settings;
+      bool acquisition{};
+      bool fresh{};
+      core::SourceKind kind{core::SourceKind::Display};
     };
+
+    /// Admit one explicit intent; retained runtime replacement waits for Stopped.
+    void start_acquisition(core::SourceKind kind, bool fresh, Clock::time_point now);
+    /// Revoke publication authority before sending nonblocking cancellation.
+    void cancel_acquisition() noexcept;
+    /// Consume identity-bound facts before this step's runtime tick.
+    void tick_acquisition(Clock::time_point now);
+    /// Decide Clean only from both acknowledgments; time only unretired acquisition.
+    /// Runtime Stalled is arbitrated from its facts, never inferred from this clock.
+    void evaluate_shutdown(Clock::time_point now) noexcept;
 
     /// Initialize defaults/services before the first controller frame; never auto-start capture.
     void initialize(const std::filesystem::path &legacy_config_path);
@@ -129,6 +153,8 @@ namespace avb::app {
     void process_runtime_result(RuntimeTickResult result,
                                 std::chrono::steady_clock::time_point now);
 
+    void handle(const ChooseSourceKind &, Clock::time_point);
+    void handle(const StartSourcePicker &, Clock::time_point);
     void handle(const RefreshSources &command,
                 std::chrono::steady_clock::time_point now);
     void handle(const SetAutoRefresh &command, Clock::time_point now);
@@ -211,6 +237,16 @@ namespace avb::app {
     void request_immediate(std::chrono::steady_clock::time_point now) noexcept;
 
     // Borrowed composition dependencies; their concrete native implementations stay outside app.
+    ISourceAcquisition *source_acquisition_{};
+    std::optional<SourceAcquisitionRequest> acquisition_request_;
+    AcquisitionPhase acquisition_phase_{AcquisitionPhase::Idle};
+    core::SourceKind chosen_source_kind_{core::SourceKind::Display};
+    std::uint64_t last_acquisition_id_{};
+    bool acquisition_start_intent_{};
+    bool acquisition_quiescent_{};
+    std::optional<Clock::time_point> acquisition_deadline_;
+    // Only acquisition acknowledgments renew this clock; quiescence removes it.
+    std::optional<Clock::time_point> acquisition_shutdown_deadline_;
     AppCommandQueue &commands_;
     ISourceCatalog &source_catalog_;
     IReplicaRuntimeFactory &runtime_factory_;

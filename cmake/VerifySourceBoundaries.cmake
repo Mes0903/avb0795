@@ -476,7 +476,7 @@ function(_avb0795_scan_files category)
       _avb0795_assert_no_match(
         "${file}"
         "${contents}"
-        "(^|[^A-Za-z0-9_])(Application|ApplicationState|ReplicaSession|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack|WindowsFrameBridge|VulkanRenderer)([^A-Za-z0-9_]|$)"
+        "(^|[^A-Za-z0-9_])(Application|ApplicationState|ReplicaSession|IReplicaRuntime|ISourceAcquisition|SourceAcquisitionRequest|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack|WindowsFrameBridge|VulkanRenderer)([^A-Za-z0-9_]|$)"
         "UI crosses the frontend command/view-state boundary")
     elseif(category STREQUAL "desktop")
       _avb0795_assert_layer_includes("${file}" "${contents}" "i18n")

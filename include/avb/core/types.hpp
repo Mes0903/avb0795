@@ -251,9 +251,14 @@ namespace avb::core {
                            const ReplicaSettings &) = default;
   };
 
+  /// @brief Discovery policy; system selection starts only through explicit intent.
+  enum class SourceSelectionMethod { Catalog, SystemPicker };
+
   /// @brief Pre-runtime behavior capabilities used to admit commands and explain controls.
   /// An available capability does not guarantee that a later native operation
   /// succeeds; bridge selection depends on actual constructed graphics resources.
+  /// Composition supplies observed capabilities. Opacity defaults to the historical
+  /// supported behavior; unsupported compositions retain saved preferences separately.
   struct PlatformCapabilities {
     bool display_capture{};
     bool window_capture{};
@@ -262,6 +267,9 @@ namespace avb::core {
     bool global_hotkey{};
     bool capture_exclusion{};
     bool browser_capture_keep_alive{};
+    SourceSelectionMethod source_selection_method{SourceSelectionMethod::Catalog};
+    bool always_on_top{};
+    bool window_opacity{true};
 
     friend bool operator==(const PlatformCapabilities &,
                            const PlatformCapabilities &) = default;

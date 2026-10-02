@@ -3,6 +3,7 @@
 #include "avb/app/controller_view_state.hpp"
 
 #include "avb/app/config_store.hpp"
+#include "avb/app/source_acquisition.hpp"
 #include "avb/app/localized_presentation.hpp"
 #include "avb/core/application_state.hpp"
 #include "avb/core/hotkey.hpp"
@@ -52,23 +53,28 @@ namespace avb::app {
     supports_source(core::SourceKind kind,
                     core::PlatformCapabilities capabilities) noexcept
     {
-      return kind == core::SourceKind::Display ? capabilities.display_capture
-                                               : capabilities.window_capture;
+      switch (kind) {
+      case core::SourceKind::Display: return capabilities.display_capture;
+      case core::SourceKind::Window: return capabilities.window_capture;
+      }
+      return false;
     }
 
   }    // namespace
 
   ControllerViewState build_controller_view(
-    const core::ApplicationState &state, core::SessionId current_session_id, std::span<const core::SourceDescriptor> sources, core::PlatformCapabilities capabilities, const UserConfig &config, bool hotkey_binding_confirmed, core::CaptureExclusionStatus controller_exclusion, const RuntimeFeedback &runtime_feedback, bool runtime_present, bool stop_requested, std::optional<core::AppError> application_notice, i18n::Language language, bool language_changes_allowed)
+    const core::ApplicationState &state, core::SessionId current_session_id, std::span<const core::SourceDescriptor> sources, core::PlatformCapabilities capabilities, const UserConfig &config, bool hotkey_binding_confirmed, core::CaptureExclusionStatus controller_exclusion, const RuntimeFeedback &runtime_feedback, bool runtime_present, bool stop_requested, std::optional<core::AppError> application_notice, i18n::Language language, bool language_changes_allowed, core::SourceKind chosen_source_kind, AcquisitionPhase acquisition_phase, std::optional<std::uint64_t> acquisition_id)
   {
     const auto &session = state.current_session();
     const auto lifecycle = session.lifecycle();
     // Error alone is insufficient: failed construction has no runtime and can
     // restart, while terminal Error with a retained runtime must finish drain.
+    const bool acquisition_pending = acquisition_id.has_value();
+    const bool system_picker = capabilities.source_selection_method == core::SourceSelectionMethod::SystemPicker;
     const bool stop_or_drain =
       stop_requested || lifecycle == core::SessionLifecycle::Stopping ||
       (runtime_present && lifecycle == core::SessionLifecycle::Error);
-    const ControlContext context{.stop_or_drain = stop_or_drain,
+    const ControlContext context{.stop_or_drain = stop_or_drain || acquisition_pending,
                                  .language = language};
     const bool inactive = !runtime_present &&
                           (lifecycle == core::SessionLifecycle::Idle ||
@@ -84,6 +90,10 @@ namespace avb::app {
 
     ControllerViewState view{
       .session_id = current_session_id,
+      .source_selection_method = capabilities.source_selection_method,
+      .chosen_source_kind = chosen_source_kind,
+      .acquisition_phase = acquisition_phase,
+      .acquisition_id = acquisition_id,
       .language_preference = config.language,
       .effective_language = language,
       .status_text = lifecycle_text(lifecycle, language),
@@ -101,6 +111,11 @@ namespace avb::app {
         i18n::text(i18n::TextId::ExtensionsScope, language),
     };
 
+    if (acquisition_pending) {
+      const auto key = acquisition_phase == AcquisitionPhase::Cancelling ? i18n::TextId::AcquisitionCancelling :
+        acquisition_phase == AcquisitionPhase::PreparingStream ? i18n::TextId::AcquisitionPreparing : i18n::TextId::AcquisitionPermission;
+      view.acquisition_status_text = i18n::text(key, language);
+    }
     if (lifecycle == core::SessionLifecycle::Error) {
       view.session_error_text =
         i18n::text(i18n::TextId::SessionFailed, language);
@@ -157,6 +172,7 @@ namespace avb::app {
 
     const bool has_source = session.selected_source().has_value();
     const bool source_capability =
+      system_picker ? supports_source(chosen_source_kind, capabilities) :
       !has_source || supports_source(session.selected_source()->kind,
                                      capabilities);
     const bool region_active = runtime_present && !stop_or_drain && has_source &&
@@ -166,16 +182,21 @@ namespace avb::app {
       view.content_extent = runtime_feedback.content_extent;
     }
     view.controls = ControllerControls{
+      .choose_display = control(context, select_or_start_allowed && system_picker, capabilities.display_capture),
+      .choose_window = control(context, select_or_start_allowed && system_picker, capabilities.window_capture),
+      .fresh_picker = control(context, select_or_start_allowed && system_picker, source_capability),
       .refresh = control(context, inactive),
-      .auto_refresh = {.enabled = language_changes_allowed},
+      .auto_refresh = {.enabled = language_changes_allowed && !acquisition_pending},
       .start = control(context, select_or_start_allowed, source_capability,
-                       !has_source),
-      .stop = control(context, active),
+                       !system_picker && !has_source),
+      .stop = acquisition_pending
+        ? ControlState{.enabled = language_changes_allowed}
+        : control(context, active),
       .editable = control(context, settings_allowed),
       .pass_through =
         control(context, settings_allowed, capabilities.pass_through),
       .fps = control(context, settings_allowed),
-      .opacity = control(context, settings_allowed),
+      .opacity = control(context, settings_allowed, capabilities.window_opacity),
       .wheel_zoom = control(context, settings_allowed),
       .region = control(context, region_active && view.content_extent.has_value()),
       .cancel_region_selection = control(context, active && session.settings().selecting_region),

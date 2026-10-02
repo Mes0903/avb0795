@@ -19,6 +19,7 @@ namespace avb::core {
 namespace avb::app {
 
   struct UserConfig;
+  enum class AcquisitionPhase;
 
   /// @brief Snapshot availability plus borrowed static text explaining disabled controls.
   /// This presentation hint is not authorization: commands still undergo admission
@@ -64,6 +65,9 @@ namespace avb::app {
 
   /// Application command availability for the current snapshot.
   struct ControllerControls {
+    ControlState choose_display;
+    ControlState choose_window;
+    ControlState fresh_picker;
     ControlState refresh;
     ControlState auto_refresh;
     ControlState start;
@@ -89,8 +93,15 @@ namespace avb::app {
   /// session_id is the sole generation source for session-specific widget commands;
   /// source-specific drafts additionally bind selected_source_id and content_extent.
   /// requested language and effective language are separate so System remains visible.
+  /// Acquisition phase/id are value projections, never service access; a pending id
+  /// freezes replica edits while cancellation and language remain available.
   struct ControllerViewState {
     core::SessionId session_id;
+    core::SourceSelectionMethod source_selection_method{core::SourceSelectionMethod::Catalog};
+    core::SourceKind chosen_source_kind{core::SourceKind::Display};
+    AcquisitionPhase acquisition_phase{};
+    std::optional<std::uint64_t> acquisition_id;
+    std::optional<std::string_view> acquisition_status_text;
     i18n::LanguagePreference language_preference{
       i18n::LanguagePreference::System};
     i18n::Language effective_language{i18n::Language::English};
@@ -127,7 +138,7 @@ namespace avb::app {
   /// @return A projection independent of input span/state lifetime; building owned
   /// strings and rows may throw before the caller publishes the returned value.
   [[nodiscard]] ControllerViewState build_controller_view(
-    const core::ApplicationState &state, core::SessionId current_session_id, std::span<const core::SourceDescriptor> sources, core::PlatformCapabilities capabilities, const UserConfig &config, bool hotkey_binding_confirmed, core::CaptureExclusionStatus controller_exclusion, const RuntimeFeedback &runtime_feedback, bool runtime_present, bool stop_requested, std::optional<core::AppError> application_notice = std::nullopt, i18n::Language language = i18n::Language::English, bool language_changes_allowed = true);
+    const core::ApplicationState &state, core::SessionId current_session_id, std::span<const core::SourceDescriptor> sources, core::PlatformCapabilities capabilities, const UserConfig &config, bool hotkey_binding_confirmed, core::CaptureExclusionStatus controller_exclusion, const RuntimeFeedback &runtime_feedback, bool runtime_present, bool stop_requested, std::optional<core::AppError> application_notice = std::nullopt, i18n::Language language = i18n::Language::English, bool language_changes_allowed = true, core::SourceKind chosen_source_kind = core::SourceKind::Display, AcquisitionPhase acquisition_phase = {}, std::optional<std::uint64_t> acquisition_id = std::nullopt);
 
 }    // namespace avb::app
 

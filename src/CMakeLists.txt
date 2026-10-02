@@ -46,6 +46,7 @@ target_compile_features(avb0795_core PUBLIC cxx_std_23)
 add_library(avb0795_app
   app/app_command_queue.cpp
   app/application.cpp
+  app/application_acquisition.cpp
   app/application_language.cpp
   app/config_store.cpp
   app/controller_view_state.cpp

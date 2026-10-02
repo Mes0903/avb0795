@@ -108,6 +108,9 @@ namespace {
     .global_hotkey = true,
     .capture_exclusion = true,
     .browser_capture_keep_alive = true,
+    .source_selection_method = avb::core::SourceSelectionMethod::Catalog,
+    .always_on_top = true,
+    .window_opacity = true,
   };
 
   /// Print fixed diagnostics/native codes without source titles or pixel data.

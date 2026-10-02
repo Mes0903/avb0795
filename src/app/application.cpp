@@ -19,8 +19,8 @@ namespace avb::app {
   }
 
   Application::Application(
-    AppCommandQueue &commands, ISourceCatalog &source_catalog, IReplicaRuntimeFactory &runtime_factory, IGlobalHotkey &global_hotkey, ConfigStore &config_store, std::filesystem::path config_path, core::PlatformCapabilities capabilities, core::CaptureExclusionStatus controller_exclusion, SystemLanguageQuery system_language_query, const std::filesystem::path &legacy_config_path)
-      : commands_{commands}, source_catalog_{source_catalog}, runtime_factory_{runtime_factory}, global_hotkey_{global_hotkey}, config_store_{config_store}, config_path_{std::move(config_path)}, system_language_query_{std::move(system_language_query)}, capabilities_{capabilities}, controller_exclusion_{controller_exclusion}
+    AppCommandQueue &commands, ISourceCatalog &source_catalog, IReplicaRuntimeFactory &runtime_factory, IGlobalHotkey &global_hotkey, ConfigStore &config_store, std::filesystem::path config_path, core::PlatformCapabilities capabilities, core::CaptureExclusionStatus controller_exclusion, SystemLanguageQuery system_language_query, const std::filesystem::path &legacy_config_path, ISourceAcquisition *source_acquisition)
+      : source_acquisition_{source_acquisition}, commands_{commands}, source_catalog_{source_catalog}, runtime_factory_{runtime_factory}, global_hotkey_{global_hotkey}, config_store_{config_store}, config_path_{std::move(config_path)}, system_language_query_{std::move(system_language_query)}, capabilities_{capabilities}, controller_exclusion_{controller_exclusion}
   {
     initialize(legacy_config_path);
   }
@@ -49,7 +49,7 @@ namespace avb::app {
     (void) state_.set_fps(session_id, config_.fps_cap);
     (void) state_.set_border(session_id, config_.border);
     (void) state_.set_extensions(session_id, config_.extensions);
-    (void) state_.set_opacity(session_id, config_.opacity_percent);
+    (void) state_.set_opacity(session_id, capabilities_.window_opacity ? config_.opacity_percent : 100);
     (void) state_.set_wheel_zoom_percent(session_id, config_.wheel_zoom_percent);
 
     refresh_sources();
@@ -90,6 +90,8 @@ namespace avb::app {
         }
       }
 
+      tick_acquisition(now);
+
       // Runtime events are returned synchronously from the current owner, so no
       // separate callback event queue or stale-runtime epoch is needed in app.
       if (runtime_) {
@@ -102,6 +104,7 @@ namespace avb::app {
       }
 
       if (exit_disposition_ != core::ExitDisposition::AbandonProcess) {
+        evaluate_shutdown(now);
         update_source_refresh(now);
         rebuild_view();
       }
@@ -124,7 +127,7 @@ namespace avb::app {
     // empty or distant deadline, otherwise a headless drain could stop advancing.
     auto earliest = runtime_deadline_;
     for (const auto &candidate :
-         std::array{immediate_deadline_, source_refresh_deadline_}) {
+         std::array{immediate_deadline_, source_refresh_deadline_, acquisition_deadline_, acquisition_shutdown_deadline_}) {
       if (candidate && (!earliest || *candidate < *earliest)) {
         earliest = candidate;
       }
@@ -153,7 +156,8 @@ namespace avb::app {
       hotkey_binding_confirmed_, controller_exclusion_, runtime_feedback_,
       runtime_ != nullptr, stop_requested_, notice, effective_language_,
       !quit_intent_ &&
-        exit_disposition_ == core::ExitDisposition::Continue);
+        exit_disposition_ == core::ExitDisposition::Continue, chosen_source_kind_, acquisition_phase_,
+      acquisition_request_.transform([](const auto &request) { return request.id.value; }));
     view_state_.auto_refresh_enabled = config_.auto_refresh_enabled;
     view_state_.auto_refresh_paused =
       config_.auto_refresh_enabled && !automatic_refresh_allowed();
@@ -166,8 +170,26 @@ namespace avb::app {
       [this, now](const auto &value) { handle(value, now); }, command);
   }
 
+  void Application::handle(const ChooseSourceKind &command, Clock::time_point)
+  {
+    if (!validate_session(command.session_id) || !source_acquisition_ ||
+        capabilities_.source_selection_method != core::SourceSelectionMethod::SystemPicker ||
+        !selection_allowed() || !source_supported(command.kind)) { reject(); return; }
+    chosen_source_kind_ = command.kind;
+    clear_notice(NoticeOperation::Command);
+  }
+  void Application::handle(const StartSourcePicker &command, Clock::time_point now)
+  {
+    if (!validate_session(command.session_id) || !source_acquisition_ ||
+        capabilities_.source_selection_method != core::SourceSelectionMethod::SystemPicker) {
+      reject(); return;
+    }
+    start_acquisition(command.kind, true, now);
+  }
+
   void Application::handle(const SetAutoRefresh &command, Clock::time_point)
   {
+    if (acquisition_request_) { reject(); return; }
     if (config_.auto_refresh_enabled != command.enabled) {
       config_.auto_refresh_enabled = command.enabled;
       source_refresh_deadline_.reset();
@@ -183,7 +205,7 @@ namespace avb::app {
     const auto lifecycle = state_.current_session().lifecycle();
     // Catalog refresh may retire native source observations, so even an Error
     // runtime still draining must keep the current catalog generation alive.
-    if (runtime_ || stop_requested_ ||
+    if (acquisition_request_ || runtime_ || stop_requested_ ||
         (lifecycle != core::SessionLifecycle::Idle &&
          lifecycle != core::SessionLifecycle::Error)) {
       reject();
@@ -230,6 +252,11 @@ namespace avb::app {
       return;
     }
 
+    if (source_acquisition_ && capabilities_.source_selection_method == core::SourceSelectionMethod::SystemPicker) {
+      start_acquisition(chosen_source_kind_, false, now);
+      return;
+    }
+
     const auto &session = state_.current_session();
     if (!session.selected_source() ||
         !source_supported(session.selected_source()->kind)) {
@@ -273,6 +300,12 @@ namespace avb::app {
   {
     if (!validate_session(command.session_id)) {
       reject();
+      return;
+    }
+
+    if (acquisition_request_) {
+      cancel_acquisition();
+      clear_notice(NoticeOperation::Command);
       return;
     }
 
@@ -390,7 +423,7 @@ namespace avb::app {
 
   void Application::handle(const SetOpacity &command, Clock::time_point now)
   {
-    if (!validate_session(command.session_id) || !settings_allowed()) {
+    if (!validate_session(command.session_id) || !settings_allowed() || !capabilities_.window_opacity) {
       reject();
       return;
     }
@@ -569,7 +602,7 @@ namespace avb::app {
   {
     // Resolve the global hotkey against current state, not a captured SessionId.
     // A late hotkey while draining cannot apply settings to a retiring overlay.
-    if (!runtime_ || stop_requested_) {
+    if (!runtime_ || stop_requested_ || acquisition_request_) {
       return;
     }
     const auto lifecycle = state_.current_session().lifecycle();
@@ -616,13 +649,16 @@ namespace avb::app {
 
   bool Application::source_supported(core::SourceKind kind) const noexcept
   {
-    return kind == core::SourceKind::Display ? capabilities_.display_capture
-                                             : capabilities_.window_capture;
+    switch (kind) {
+    case core::SourceKind::Display: return capabilities_.display_capture;
+    case core::SourceKind::Window: return capabilities_.window_capture;
+    }
+    return false;
   }
 
   bool Application::settings_allowed() const noexcept
   {
-    if (stop_requested_) {
+    if (stop_requested_ || acquisition_request_) {
       return false;
     }
     const auto lifecycle = state_.current_session().lifecycle();
@@ -637,7 +673,7 @@ namespace avb::app {
 
   bool Application::selection_allowed() const noexcept
   {
-    if (stop_requested_) {
+    if (stop_requested_ || acquisition_request_) {
       return false;
     }
     const auto lifecycle = state_.current_session().lifecycle();
@@ -650,7 +686,7 @@ namespace avb::app {
 
   bool Application::region_allowed() const noexcept
   {
-    return runtime_ && !stop_requested_ &&
+    return runtime_ && !stop_requested_ && !acquisition_request_ &&
       state_.current_session().lifecycle() == core::SessionLifecycle::Capturing &&
       state_.current_session().selected_source() && runtime_feedback_.content_extent &&
       runtime_feedback_.content_extent->width > 0 && runtime_feedback_.content_extent->height > 0;
@@ -750,7 +786,7 @@ namespace avb::app {
   {
     // Preserve Error independently of the stop bit: the UI must distinguish an
     // idle failed start from terminal Error with native owners still draining.
-    if (!runtime_ || stop_requested_) {
+    if (!runtime_ || stop_requested_ || acquisition_request_) {
       return;
     }
     if (!preserve_error) {
@@ -771,7 +807,7 @@ namespace avb::app {
   bool Application::automatic_refresh_allowed() const noexcept
   {
     const auto &session = state_.current_session();
-    return !runtime_ && !stop_requested_ && !quit_intent_ &&
+    return !runtime_ && !stop_requested_ && !acquisition_request_ && !quit_intent_ &&
       exit_disposition_ == core::ExitDisposition::Continue &&
       !session.selected_source() &&
       (session.lifecycle() == core::SessionLifecycle::Idle ||
@@ -802,7 +838,7 @@ namespace avb::app {
     }
 
     const auto &selected = state_.current_session().selected_source();
-    if (selected) {
+    if (selected && capabilities_.source_selection_method == core::SourceSelectionMethod::Catalog) {
       const auto found = std::ranges::find(
         *refreshed, selected->id, &core::SourceDescriptor::id);
       if (found == refreshed->end()) {
@@ -813,8 +849,9 @@ namespace avb::app {
       }
       invalidate_region_interaction();
     }
-    // Publish only a successful refresh; an enumeration error keeps the previous
-    // portable snapshot, while missing IDs in a successful refresh clear selection.
+    // Publish only a successful refresh; an enumeration error keeps the prior snapshot.
+    // Catalog reconciles missing IDs by clearing selection. SystemPicker replaces
+    // only the snapshot, preserving the selected descriptor and source-local crop.
     sources_ = std::move(*refreshed);
     clear_notice(NoticeOperation::SourceRefresh);
   }
@@ -992,7 +1029,8 @@ namespace avb::app {
     reset_runtime_feedback();
 
     if (quit_intent_) {
-      exit_disposition_ = core::ExitDisposition::Clean;
+      // Runtime release proves only runtime retirement; it cannot renew the service clock.
+      evaluate_shutdown(now);
       return;
     }
 
@@ -1014,7 +1052,12 @@ namespace avb::app {
         reject(replaced.error());
         return;
       }
-      start_current(now, true);
+      if (pending.acquisition) {
+        start_acquisition(pending.kind, pending.fresh, now);
+        request_immediate(now);
+      } else {
+        start_current(now, true);
+      }
       return;
     }
 
@@ -1055,6 +1098,12 @@ namespace avb::app {
     }
 
     quit_intent_ = true;
+    cancel_acquisition();
+    if (source_acquisition_) {
+      acquisition_quiescent_ = false;
+      source_acquisition_->request_shutdown();
+      acquisition_shutdown_deadline_ = now + std::chrono::seconds{10};
+    }
     invalidate_region_interaction();
     view_state_.content_extent.reset();
     view_state_.settings.selecting_region = false;
@@ -1085,7 +1134,7 @@ namespace avb::app {
     request_immediate(now);
 
     if (!runtime_) {
-      exit_disposition_ = core::ExitDisposition::Clean;
+      evaluate_shutdown(now);
       return;
     }
 

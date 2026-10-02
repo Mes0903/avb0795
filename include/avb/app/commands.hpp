@@ -21,7 +21,16 @@ namespace avb::app {
     core::SourceId source_id;
   };
 
-  /// Start the selected source, or queue replacement of an Interrupted runtime.
+  /// Choose a supported source kind without opening selection or changing crop.
+  struct ChooseSourceKind { core::SessionId session_id; core::SourceKind kind; };
+  /// Explicitly acquire a fresh source, including replacement with the same kind.
+  struct StartSourcePicker { core::SessionId session_id; core::SourceKind kind; };
+
+  /// @brief Start the catalog source or explicitly acquire the chosen picker kind.
+  /// Catalog requires a selected descriptor. SystemPicker resumes a selected source
+  /// of the chosen kind; absent selection or a changed kind starts fresh acquisition.
+  /// An Interrupted runtime remains owned until Stopped, then its session is replaced
+  /// before starting. This intention never grants native control to the command sender.
   struct Start {
     core::SessionId session_id;
   };
@@ -112,7 +121,7 @@ namespace avb::app {
   /// lifecycle and capability admission. Global commands resolve against current
   /// state without a token. No alternative carries a callback or mutable domain reference.
   using AppCommand =
-    std::variant<RefreshSources, SelectSource, Start, Stop, SetMode, SetBorder, SetFps, SetExtensions, ReplaceHotkey, RestoreActiveReplicaEditable, Quit, SetLanguage, SetAutoRefresh, SetOpacity, SetRegion, SetRegionSelection, SetWheelZoomPercent>;
+    std::variant<ChooseSourceKind, StartSourcePicker, RefreshSources, SelectSource, Start, Stop, SetMode, SetBorder, SetFps, SetExtensions, ReplaceHotkey, RestoreActiveReplicaEditable, Quit, SetLanguage, SetAutoRefresh, SetOpacity, SetRegion, SetRegionSelection, SetWheelZoomPercent>;
 
 }    // namespace avb::app
 
