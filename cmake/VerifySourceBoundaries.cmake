@@ -127,7 +127,7 @@ function(_avb0795_assert_known_production_targets)
       avb0795_ui
       avb0795_vulkan_renderer
       avb0795_windows
-      avb0795_linux_services
+      avb0795_linux
       avb0795_windows_graphics
       avb0795_desktop
       avb0795
@@ -182,14 +182,16 @@ function(avb0795_assert_target_boundaries)
       avb0795_ui avb0795_core avb0795_i18n imgui)
   endif()
 
-  if(TARGET avb0795_linux_services)
-    _avb0795_assert_sources(avb0795_linux_services
+  if(TARGET avb0795_linux)
+    _avb0795_assert_sources(avb0795_linux
       "platform/linux/linux_preferences.cpp"
       "platform/linux/linux_atomic_replace.cpp"
       "platform/linux/linux_ui_language.cpp"
-      "platform/linux/controller_font.cpp")
-    _avb0795_assert_links(avb0795_linux_services
-      avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG)
+      "platform/linux/controller_font.cpp"
+      "platform/linux/detail/acquisition_policy.cpp"
+      "platform/linux/portal_screencast.cpp")
+    _avb0795_assert_links(avb0795_linux
+      avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO)
   endif()
 
   if(TARGET avb0795_windows)
@@ -507,11 +509,15 @@ function(_avb0795_scan_files category)
         "(^|[^A-Za-z0-9_])(ISourceCatalog|IReplicaRuntimeFactory|IReplicaRuntime|IGlobalHotkey|ConfigStore|OverlayWindow|WindowsRenderStack|WindowsFrameBridge|VulkanRenderer|WgcCaptureJob|WindowsCaptureSource|WindowsCapturedFrame)([^A-Za-z0-9_]|$)"
         "desktop shell reaches a port, replica runtime, config store, or native replica owner")
     elseif(category STREQUAL "linux")
-      _avb0795_assert_app_includes("${file}" "${contents}")
+      file(RELATIVE_PATH linux_relative "${AVB0795_SOURCE_ROOT}" "${file}")
+      set(allowed_linux_app_headers)
+      if(linux_relative MATCHES "^platform/linux/(portal_screencast|detail/acquisition_policy)\\.(hpp|cpp)$")
+        list(APPEND allowed_linux_app_headers avb/app/source_acquisition.hpp)
+      endif()
+      _avb0795_assert_app_includes("${file}" "${contents}" ${allowed_linux_app_headers})
       _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
       _avb0795_assert_layer_includes("${file}" "${contents}" "render")
       _avb0795_assert_layer_includes("${file}" "${contents}" "platform/windows")
-      file(RELATIVE_PATH linux_relative "${AVB0795_SOURCE_ROOT}" "${file}")
       set(allowed_linux_i18n_headers)
       set(allowed_linux_desktop_headers)
       if(linux_relative MATCHES "^platform/linux/linux_ui_language\\.(hpp|cpp)$")

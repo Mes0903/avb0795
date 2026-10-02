@@ -258,17 +258,20 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(AVB0795_FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
-  add_library(avb0795_linux_services
+  pkg_check_modules(AVB0795_GIO REQUIRED IMPORTED_TARGET GLOBAL gio-2.0 gio-unix-2.0)
+  add_library(avb0795_linux
     ${PROJECT_SOURCE_DIR}/platform/linux/linux_preferences.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/linux_atomic_replace.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/linux_ui_language.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/controller_font.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/detail/acquisition_policy.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/portal_screencast.cpp
   )
-  target_include_directories(avb0795_linux_services
+  target_include_directories(avb0795_linux
     PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include
   )
-  target_compile_features(avb0795_linux_services PUBLIC cxx_std_23)
-  target_link_libraries(avb0795_linux_services
-    PRIVATE avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG
+  target_compile_features(avb0795_linux PUBLIC cxx_std_23)
+  target_link_libraries(avb0795_linux
+    PRIVATE avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO
   )
 endif()
