@@ -274,10 +274,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
   target_include_directories(avb0795_linux
     PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include
   )
-  add_library(avb0795_linux_graphics ${PROJECT_SOURCE_DIR}/platform/linux/linux_cpu_frame_bridge.cpp)
+  add_library(avb0795_linux_graphics ${PROJECT_SOURCE_DIR}/platform/linux/linux_cpu_frame_bridge.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/detail/overlay_policy.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/x11_controller_window.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/x11_overlay_adapter.cpp)
   target_include_directories(avb0795_linux_graphics PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(avb0795_linux_graphics PUBLIC cxx_std_23)
-  target_link_libraries(avb0795_linux_graphics PRIVATE avb0795_vulkan_renderer avb0795_linux)
+  find_package(X11 REQUIRED)
+  target_link_libraries(avb0795_linux_graphics PRIVATE avb0795_vulkan_renderer avb0795_linux glfw X11::X11 X11::Xext)
   target_compile_features(avb0795_linux PUBLIC cxx_std_23)
   target_link_libraries(avb0795_linux
     PRIVATE avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO PkgConfig::AVB0795_PIPEWIRE
