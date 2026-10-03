@@ -129,6 +129,8 @@ function(_avb0795_assert_known_production_targets)
       avb0795_windows
       avb0795_linux
       avb0795_linux_graphics
+      avb0795_linux_cpu_frames
+      avb0795_linux_x11_catalog
       avb0795_windows_graphics
       avb0795_desktop
       avb0795
@@ -183,6 +185,17 @@ function(avb0795_assert_target_boundaries)
       avb0795_ui avb0795_core avb0795_i18n imgui)
   endif()
 
+  if(TARGET avb0795_linux_cpu_frames)
+    _avb0795_assert_sources(avb0795_linux_cpu_frames
+      "platform/linux/linux_captured_frame.cpp" "platform/linux/detail/cpu_frame_pool.cpp")
+    _avb0795_assert_links(avb0795_linux_cpu_frames avb0795_core)
+  endif()
+
+  if(TARGET avb0795_linux_x11_catalog)
+    _avb0795_assert_sources(avb0795_linux_x11_catalog "platform/linux/x11_source_catalog.cpp")
+    _avb0795_assert_links(avb0795_linux_x11_catalog avb0795_core PkgConfig::AVB0795_XCB)
+  endif()
+
   if(TARGET avb0795_linux)
     _avb0795_assert_sources(avb0795_linux
       "platform/linux/linux_preferences.cpp"
@@ -194,10 +207,9 @@ function(avb0795_assert_target_boundaries)
       "platform/linux/linux_source_acquisition.cpp"
       "platform/linux/portal_screencast.cpp"
       "platform/linux/pipewire_capture.cpp"
-      "platform/linux/linux_captured_frame.cpp"
       "platform/linux/detail/pipewire_buffer_policy.cpp")
     _avb0795_assert_links(avb0795_linux
-      avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO PkgConfig::AVB0795_PIPEWIRE)
+      avb0795_core avb0795_i18n avb0795_linux_cpu_frames PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO PkgConfig::AVB0795_PIPEWIRE)
   endif()
 
   if(TARGET avb0795_linux_graphics)
@@ -413,15 +425,8 @@ function(_avb0795_scan_files category)
         "${normalized_lower_contents}"
         "#[ \t]*include[ \t]+[^<\" \t\r\n]"
         "portable source uses a non-literal include")
-      # The source table names its diagnostic column with this exact caption.
-      # Keep native declarations and includes checked; this allowance grants
-      # presentation text, with no native identifier lookup or resource access.
-      set(symbol_contents "${contents}")
-      if(category STREQUAL "ui")
-        string(REPLACE "\"HWND\"" "\"\"" symbol_contents "${symbol_contents}")
-      endif()
       _avb0795_assert_no_match(
-        "${file}" "${symbol_contents}" "${portable_native_symbol}"
+        "${file}" "${contents}" "${portable_native_symbol}"
         "portable source mentions a native graphics/platform type")
     endif()
 
@@ -430,10 +435,10 @@ function(_avb0795_scan_files category)
        category STREQUAL "ui" OR category STREQUAL "desktop" OR category STREQUAL "render")
       _avb0795_assert_layer_includes("${file}" "${contents}" "platform/linux")
       _avb0795_assert_no_match("${file}" "${normalized_lower_contents}"
-        "#[ \t]*include[ \t]*[<\"](fontconfig/|gio/|glib[^>\"]*|pipewire/|spa/|x11/|sys/(file|stat)\\.h|unistd\\.h|fcntl\\.h)"
+        "#[ \t]*include[ \t]*[<\"](fontconfig/|gio/|glib[^>\"]*|pipewire/|spa/|x11/|xcb/|sys/(file|stat)\\.h|unistd\\.h|fcntl\\.h)"
         "shared source includes a Linux native header")
       _avb0795_assert_no_match("${file}" "${contents}"
-        "(^|[^A-Za-z0-9_])(FcConfig|FcPattern|FcCharSet|XEvent|GDBusConnection|pw_stream|spa_buffer)([^A-Za-z0-9_]|$)"
+        "(^|[^A-Za-z0-9_])(FcConfig|FcPattern|FcCharSet|XEvent|GDBusConnection|pw_stream|spa_buffer|xcb_[A-Za-z0-9_]+)([^A-Za-z0-9_]|$)"
         "shared source mentions a Linux native contract")
     endif()
 
@@ -533,10 +538,20 @@ function(_avb0795_scan_files category)
       if(linux_relative MATCHES "^platform/linux/(portal_screencast|linux_source_acquisition|detail/acquisition_policy)\\.(hpp|cpp)$")
         list(APPEND allowed_linux_app_headers avb/app/source_acquisition.hpp)
       endif()
-      if(linux_relative MATCHES "^platform/linux/linux_(disabled_hotkey|source_registry|replica_runtime|runtime_factory)\\.hpp$")
+      if(linux_relative MATCHES "^platform/linux/(linux_(disabled_hotkey|source_registry|replica_runtime|runtime_factory)|x11_source_catalog)\\.hpp$")
         list(APPEND allowed_linux_app_headers avb/app/ports.hpp)
       endif()
       _avb0795_assert_app_includes("${file}" "${contents}" ${allowed_linux_app_headers})
+      if(NOT linux_relative STREQUAL "platform/linux/x11_source_catalog.cpp")
+        _avb0795_assert_no_match("${file}" "${contents}"
+          "#[ \t]*include[ \t]*[<\"]xcb/"
+          "XCB native protocol headers belong only to the concrete catalog implementation")
+      endif()
+      if(linux_relative MATCHES "^platform/linux/(detail/cpu_frame_pool|linux_captured_frame)\\.(hpp|cpp)$")
+        _avb0795_assert_no_match("${file}" "${normalized_lower_contents}"
+          "#[ \t]*include[ \t]*[<\"](gio/|glib|pipewire/|spa/|xcb/|x11/|glfw/|vulkan/)"
+          "CPU frame storage depends on native protocol or graphics headers")
+      endif()
       if(NOT linux_relative MATCHES "^platform/linux/(x11_controller_window|x11_overlay_adapter)\\.cpp$")
         _avb0795_assert_no_match("${file}" "${contents}"
           "#[ \t]*include[ \t]*[<\"](X11/|GLFW/glfw3native\\.h)"
@@ -716,7 +731,7 @@ function(_avb0795_run_source_boundary_scan)
         platform/linux/portal_screencast.hpp
         platform/linux/x11_controller_window.hpp platform/linux/x11_overlay_adapter.hpp)
       _avb0795_assert_no_match("${file}" "${contents}"
-        "#[ \t]*include[ \t]*[<\"](X11/|GLFW/glfw3native\\.h)"
+        "#[ \t]*include[ \t]*[<\"](X11/|xcb/|GLFW/glfw3native\\.h)"
         "Linux composition reaches native window protocol outside its adapters")
     endif()
     _avb0795_assert_no_match(

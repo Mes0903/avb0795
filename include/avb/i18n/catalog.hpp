@@ -36,6 +36,7 @@ namespace avb::i18n {
     Refresh,
     SourceType,
     SourceName,
+    SourceIdentifier,
     AutoRefresh,
     AutoRefreshPaused,
     ChooseDisplay,

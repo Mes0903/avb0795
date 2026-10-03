@@ -1,7 +1,7 @@
 /// @file
 /// @brief Return a single immutable slot lease without borrowing the capture owner.
 #include "platform/linux/linux_captured_frame.hpp"
-#include "platform/linux/detail/pipewire_buffer_policy.hpp"
+#include "platform/linux/detail/cpu_frame_pool.hpp"
 #include <utility>
 namespace avb::linux_platform {
 LinuxCapturedFrame::LinuxCapturedFrame(std::shared_ptr<detail::CpuPoolState> pool,

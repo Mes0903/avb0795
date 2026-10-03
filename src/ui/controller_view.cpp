@@ -310,7 +310,8 @@ namespace avb::ui {
                                 ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn(i18n::text(i18n::TextId::SourceName, language).data(),
                                 ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("HWND", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn(i18n::text(i18n::TextId::SourceIdentifier, language).data(),
+                                ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableHeadersRow();
         for (const auto &source : state.sources) {
           ImGui::PushID(source.id.value.c_str());

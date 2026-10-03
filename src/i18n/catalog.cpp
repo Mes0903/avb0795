@@ -48,6 +48,7 @@ namespace avb::i18n {
       {TextId::Refresh, "Refresh", "重新整理", "更新"},
       {TextId::SourceType, "Type", "類型", "種類"},
       {TextId::SourceName, "Name", "名稱", "名前"},
+      {TextId::SourceIdentifier, "Source identifier", "來源識別", "ソース識別子"},
       {TextId::AutoRefresh, "Auto-refresh (5 s)", "自動重新整理（每 5 秒）",
        "自動更新（5 秒）"},
       {TextId::AutoRefreshPaused, "Paused while a source is selected or active",

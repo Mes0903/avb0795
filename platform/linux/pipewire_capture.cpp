@@ -110,7 +110,7 @@ struct PipeWireWorker {
         if (mapped && !neutral) mapping={static_cast<const std::byte *>(d.data),d.maxsize};
       }
       const auto before=self.pool.facts().epoch;
-      const bool accepted=self.pool.ingest(source,mapping,std::chrono::steady_clock::now(),[&] { return pw_stream_queue_buffer(self.stream,buffer); });
+      const bool accepted=detail::ingest_cpu_buffer(self.pool,source,mapping,std::chrono::steady_clock::now(),[&] { return pw_stream_queue_buffer(self.stream,buffer); });
       if (accepted || self.pool.facts().epoch!=before) self.notify();
     }
   }
