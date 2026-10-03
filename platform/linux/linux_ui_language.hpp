@@ -7,8 +7,10 @@
 
 namespace avb::linux_platform {
   /// @brief Resolve a snapshot without mutating process locale or retaining strings.
-  /// First nonempty LC_ALL, LC_MESSAGES, LANG is effective. C/POSIX, including
-  /// codeset forms, forces English; otherwise try ordered LANGUAGE then effective
+  /// First nonempty LC_ALL, LC_MESSAGES, LANG is effective; absent or empty selectors
+  /// imply C, whose untranslated messages must suppress LANGUAGE just like explicit
+  /// C/POSIX. These locales, including codeset forms, force English; otherwise try
+  /// ordered LANGUAGE then effective
   /// locale, stripping codeset/modifier and normalizing underscores privately.
   /// Unsupported/malformed tags fall back to English through the shared matcher.
   /// Caller must coordinate any concurrent environment mutation.

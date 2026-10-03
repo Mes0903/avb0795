@@ -18,7 +18,7 @@ namespace avb::linux_platform {
   }    // namespace
   i18n::Language linux_ui_language()
   {
-    std::string effective;
+    std::string effective{"C"};
     for (const auto *key : {"LC_ALL", "LC_MESSAGES", "LANG"}) {
       if (const auto *value = std::getenv(key); value && *value) {
         effective = value;
@@ -26,7 +26,6 @@ namespace avb::linux_platform {
       }
     }
     const auto normalized = normalize(effective);
-    // LANGUAGE must not override an explicitly selected untranslated C locale.
     if (normalized == "C" || normalized == "POSIX") return i18n::Language::English;
     if (const auto *value = std::getenv("LANGUAGE")) {
       std::string_view preferences{value};
