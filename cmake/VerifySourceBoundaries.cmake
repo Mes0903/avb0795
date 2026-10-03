@@ -131,6 +131,7 @@ function(_avb0795_assert_known_production_targets)
       avb0795_linux_graphics
       avb0795_linux_cpu_frames
       avb0795_linux_x11_catalog
+      avb0795_linux_x11_capture
       avb0795_windows_graphics
       avb0795_desktop
       avb0795
@@ -194,6 +195,14 @@ function(avb0795_assert_target_boundaries)
   if(TARGET avb0795_linux_x11_catalog)
     _avb0795_assert_sources(avb0795_linux_x11_catalog "platform/linux/x11_source_catalog.cpp")
     _avb0795_assert_links(avb0795_linux_x11_catalog avb0795_core PkgConfig::AVB0795_XCB)
+  endif()
+
+  if(TARGET avb0795_linux_x11_capture)
+    _avb0795_assert_sources(avb0795_linux_x11_capture
+      "platform/linux/x11_capture.cpp" "platform/linux/detail/x11_image_policy.cpp")
+    _avb0795_assert_links(avb0795_linux_x11_capture
+      avb0795_core avb0795_linux_cpu_frames avb0795_linux_x11_catalog
+      PkgConfig::AVB0795_XCB Threads::Threads)
   endif()
 
   if(TARGET avb0795_linux)
@@ -542,15 +551,16 @@ function(_avb0795_scan_files category)
         list(APPEND allowed_linux_app_headers avb/app/ports.hpp)
       endif()
       _avb0795_assert_app_includes("${file}" "${contents}" ${allowed_linux_app_headers})
-      if(NOT linux_relative STREQUAL "platform/linux/x11_source_catalog.cpp")
+      if(NOT linux_relative STREQUAL "platform/linux/x11_source_catalog.cpp" AND
+         NOT linux_relative STREQUAL "platform/linux/x11_capture.cpp")
         _avb0795_assert_no_match("${file}" "${contents}"
           "#[ \t]*include[ \t]*[<\"]xcb/"
-          "XCB native protocol headers belong only to the concrete catalog implementation")
+          "XCB native protocol headers belong only to the concrete catalog and capture implementations")
       endif()
-      if(linux_relative MATCHES "^platform/linux/(detail/cpu_frame_pool|linux_captured_frame)\\.(hpp|cpp)$")
+      if(linux_relative MATCHES "^platform/linux/(detail/(cpu_frame_pool|x11_image_policy)|linux_captured_frame)\\.(hpp|cpp)$")
         _avb0795_assert_no_match("${file}" "${normalized_lower_contents}"
           "#[ \t]*include[ \t]*[<\"](gio/|glib|pipewire/|spa/|xcb/|x11/|glfw/|vulkan/)"
-          "CPU frame storage depends on native protocol or graphics headers")
+          "CPU frame storage or image layout depends on native protocol or graphics headers")
       endif()
       if(NOT linux_relative MATCHES "^platform/linux/(x11_controller_window|x11_overlay_adapter)\\.cpp$")
         _avb0795_assert_no_match("${file}" "${contents}"

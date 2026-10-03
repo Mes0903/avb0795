@@ -272,6 +272,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
     PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(avb0795_linux_cpu_frames PUBLIC cxx_std_23)
   target_link_libraries(avb0795_linux_cpu_frames PRIVATE avb0795_core)
+  find_package(Threads REQUIRED)
+  add_library(avb0795_linux_x11_capture
+    ${PROJECT_SOURCE_DIR}/platform/linux/x11_capture.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/detail/x11_image_policy.cpp)
+  target_include_directories(avb0795_linux_x11_capture
+    PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include)
+  target_compile_features(avb0795_linux_x11_capture PUBLIC cxx_std_23)
+  target_link_libraries(avb0795_linux_x11_capture PRIVATE
+    avb0795_core avb0795_linux_cpu_frames avb0795_linux_x11_catalog
+    PkgConfig::AVB0795_XCB Threads::Threads)
   pkg_check_modules(AVB0795_PIPEWIRE REQUIRED IMPORTED_TARGET GLOBAL libpipewire-0.3)
   pkg_check_modules(AVB0795_GIO REQUIRED IMPORTED_TARGET GLOBAL gio-2.0 gio-unix-2.0)
   add_library(avb0795_linux
