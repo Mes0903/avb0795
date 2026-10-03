@@ -1,5 +1,7 @@
 # Replica renderer：影格運送、呈現與取樣
 
+本章保存 WindowsRenderStack 的 Windows 擷取與 D3／Vulkan 生命週期說明。 現在的共用 renderer 與單向平台 bridge 契約見[共用 Vulkan renderer](shared-vulkan-renderer.md)。 Linux 使用 Portal／PipeWire CPU frames、LinuxCpuFrameBridge 與 LinuxReplicaRuntime，實作與實機驗收範圍見 [Linux 指南](../development/linux.md)。 Windows 原生證據與本章運算推導維持其原本範圍
+
 ```mermaid
 flowchart TB
     Runtime[WindowsReplicaRuntime<br/>推進資源世代] -->|持有| Stack[WindowsRenderStack]
@@ -20,7 +22,7 @@ flowchart TB
 
 為了把擷取的視窗影像與選定區域持續畫到複本視窗，renderer 需要運送像素、選擇最新內容、映射來源與目的尺寸，並追蹤每個原生使用者的完成時點。 `WindowsRenderStack` 把這些工作集中在一個由主執行緒推進的擁有者，透過三個固定 `CaptureSlot` 接住影格，再以獨立的 `PresentRecord` 保存呈現租約與該次繪圖的幾何快照
 
-入口是 [windows_render_stack.hpp](../../render/windows_render_stack.hpp)，實作位於 [windows_render_stack.cpp](../../render/windows_render_stack.cpp)
+入口是 [windows_render_stack.hpp](../../platform/windows/windows_render_stack.hpp)，實作位於 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp)
 
 [Windows runtime](windows-runtime-overlay.md) 持有 stack 與 overlay。 Factory 先建立 stack 與 device，再把 `capture_device()` 的借用參考交給 inactive WGC job 建立影格池，接著依 job 的 `initial_allocation()` 建立相符的 slots。 這個順序讓 slots 使用影格池實際採用的尺寸
 
@@ -40,7 +42,7 @@ flowchart TD
     CPU -->|資料：BridgeSelection| Projection
 ```
 
-為了讓同一套呈現流程適用於各種 Windows 圖形組態，renderer 需要先找出可共同存取影像的裝置與記憶體，再選擇運送方式。 橋接（bridge）負責將 D3D11 擷取結果交給 Vulkan，`BridgeCapabilityFacts` 記錄查詢結果，`select_bridge()` 把結果轉成 `BridgeSelection`。 來源是 [bridge_policy.hpp](../../render/bridge_policy.hpp)、[bridge_policy.cpp](../../render/bridge_policy.cpp) 與原生探測所在的 [windows_render_stack.cpp](../../render/windows_render_stack.cpp)
+為了讓同一套呈現流程適用於各種 Windows 圖形組態，renderer 需要先找出可共同存取影像的裝置與記憶體，再選擇運送方式。 橋接（bridge）負責將 D3D11 擷取結果交給 Vulkan，`BridgeCapabilityFacts` 記錄查詢結果，`select_bridge()` 把結果轉成 `BridgeSelection`。 來源是 [bridge_policy.hpp](../../platform/windows/detail/bridge_policy.hpp)、[bridge_policy.cpp](../../platform/windows/detail/bridge_policy.cpp) 與原生探測所在的 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp)
 
 ### 先建立呈現能力，再選擇運送方式
 
@@ -77,7 +79,7 @@ flowchart TB
     Image -->|資料：descriptor 取樣| Submission[Vulkan submission]
 ```
 
-為了經由 CPU 在兩個圖形 API 之間搬運影像，renderer 需要一份 D3 可讀 staging、一份 Vulkan 可映射 upload，以及可由 shader 取樣的 image。 每個 `CaptureSlot` 持有這組資源，固定的 `std::array<CaptureSlot, 3>` 提供有界的在途容量與穩定位址。 主要入口是 [windows_render_stack.cpp](../../render/windows_render_stack.cpp) 的 `create_capture_slot()`、`submit()`、`progress_d3_copy()` 與 `record_commands()`，呼叫契約見 [windows_render_stack.hpp](../../render/windows_render_stack.hpp)
+為了經由 CPU 在兩個圖形 API 之間搬運影像，renderer 需要一份 D3 可讀 staging、一份 Vulkan 可映射 upload，以及可由 shader 取樣的 image。 每個 `CaptureSlot` 持有這組資源，固定的 `std::array<CaptureSlot, 3>` 提供有界的在途容量與穩定位址。 主要入口是 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp) 的 `create_capture_slot()`、`submit()`、`progress_d3_copy()` 與 `record_commands()`，呼叫契約見 [windows_render_stack.hpp](../../platform/windows/windows_render_stack.hpp)
 
 ### 交付 checkout 與完成 D3 複製
 
@@ -132,7 +134,7 @@ flowchart TD
     Retire -->|資料：slot 可再使用| Slot
 ```
 
-為了讓 D3 與 Vulkan 使用同一份影像配置，GPU 互通需要共享 texture、可匯入的 NT handle，以及能排序兩個 API 存取的同步物件。 `query_interop_slot()` 建立 `D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE` texture，`finish_interop_slot()` 完成 Vulkan memory import。 實作與同步命令集中在 [windows_render_stack.cpp](../../render/windows_render_stack.cpp)，fallback 的條件決策在 [bridge_policy.cpp](../../render/bridge_policy.cpp)
+為了讓 D3 與 Vulkan 使用同一份影像配置，GPU 互通需要共享 texture、可匯入的 NT handle，以及能排序兩個 API 存取的同步物件。 `query_interop_slot()` 建立 `D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE` texture，`finish_interop_slot()` 完成 Vulkan memory import。 實作與同步命令集中在 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp)，fallback 的條件決策在 [bridge_policy.cpp](../../platform/windows/detail/bridge_policy.cpp)
 
 ### 配置所有權與跨 API 排序
 
@@ -169,7 +171,7 @@ flowchart TB
     Select -->|控制：退休其餘 ready 內容| Empty[回收容量]
 ```
 
-為了讓較晚完成的舊影格保持正確時間順序，renderer 需要一個與接納先後相同的序號，以及上次成功提交的門檻。 `submit()` 以累計接納數配置 `content_sequence`，`select_render_frame()` 在固定 ring 的候選值中挑選最新內容。 決策演算法在 [graphics_retry_policy.hpp](../../render/graphics_retry_policy.hpp)，原生 slot 的選取與重畫在 [windows_render_stack.cpp](../../render/windows_render_stack.cpp)
+為了讓較晚完成的舊影格保持正確時間順序，renderer 需要一個與接納先後相同的序號，以及上次成功提交的門檻。 `submit()` 以累計接納數配置 `content_sequence`，`select_render_frame()` 在固定 ring 的候選值中挑選最新內容。 決策演算法在 [graphics_retry_policy.hpp](../../render/graphics_retry_policy.hpp)，原生 slot 的選取與重畫在 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp)
 
 ### 最新值選擇與完成後保留
 
@@ -217,7 +219,7 @@ flowchart TD
 
 checkout 表達來源池的租約，D3 query 或 fence 表達複製完成，submission fence 表達 command buffer 完成，maintenance1 present fence 表達呈現租約退休。 acquire fence 則處理取得目的 image 後的回復路徑
 
-來源是 [windows_render_stack.cpp](../../render/windows_render_stack.cpp) 的 `try_present()`、`progress_submission()`、`progress_present_records()` 與 [graphics_retry_policy.hpp](../../render/graphics_retry_policy.hpp) 的結果分類
+來源是 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp) 的 `try_present()`、`progress_submission()`、`progress_present_records()` 與 [graphics_retry_policy.hpp](../../render/graphics_retry_policy.hpp) 的結果分類
 
 ### 各完成證據允許的操作
 
@@ -269,7 +271,7 @@ flowchart TD
     Loss[確認 device loss] -->|資料：獨立 Vulkan 與 D3 loss 事實| Runtime[Runtime 重建 generation]
 ```
 
-為了配合視窗尺寸與 surface 狀態變更，renderer 需要保留仍有使用者的舊 swapchain，同時建構新的呈現目標。 視窗系統整合（WSI）由 active 與 retired `SwapchainState` 分別承擔目前 acquire 與舊資源退休。 政策在 [graphics_retry_policy.hpp](../../render/graphics_retry_policy.hpp)、[graphics_retry_policy.cpp](../../render/graphics_retry_policy.cpp)，owner 與重建在 [windows_render_stack.cpp](../../render/windows_render_stack.cpp)
+為了配合視窗尺寸與 surface 狀態變更，renderer 需要保留仍有使用者的舊 swapchain，同時建構新的呈現目標。 視窗系統整合（WSI）由 active 與 retired `SwapchainState` 分別承擔目前 acquire 與舊資源退休。 政策在 [graphics_retry_policy.hpp](../../render/graphics_retry_policy.hpp)、[graphics_retry_policy.cpp](../../render/graphics_retry_policy.cpp)，owner 與重建在 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp)
 
 ### 先退休 active，再傳入 oldSwapchain
 
@@ -306,7 +308,7 @@ flowchart TB
     Scissor -->|控制：限制寫入範圍| Draw
 ```
 
-為了在複本視窗中完整呈現選區比例，renderer 需要先求出當前 frame 的有效選區，再把該矩形等比例放入目的範圍。 `region_sampling()` 以 effective region 的寬高呼叫 `aspect_fit()`，後者使用整數輸入與 64 位元交叉乘積決定限制軸，回傳置中的 `Viewport`。 原始運算在 [render_math.cpp](../../render/render_math.cpp)，型態在 [render_math.hpp](../../render/render_math.hpp)，Vulkan 設定在 [windows_render_stack.cpp](../../render/windows_render_stack.cpp) 的 `record_commands()`
+為了在複本視窗中完整呈現選區比例，renderer 需要先求出當前 frame 的有效選區，再把該矩形等比例放入目的範圍。 `region_sampling()` 以 effective region 的寬高呼叫 `aspect_fit()`，後者使用整數輸入與 64 位元交叉乘積決定限制軸，回傳置中的 `Viewport`。 原始運算在 [render_math.cpp](../../render/render_math.cpp)，型態在 [render_math.hpp](../../render/render_math.hpp)，Vulkan 設定在 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp) 的 `record_commands()`
 
 ### 來源像素選區與當前內容
 
@@ -393,7 +395,7 @@ flowchart TD
     Attachment -->|資料：encoded SDR| Present[SRGB_NONLINEAR 呈現]
 ```
 
-為了把選區矩形映射到 shader，renderer 需要覆蓋整個 viewport 的幾何，以及把來源選區對齊 allocation 的材質座標。 `replica.vert` 以三個常數頂點產生覆蓋範圍與 local UV，`replica.frag` 依本次裁切參數換算 UV、限制取樣邊界，再使用 slot 的 combined image sampler 讀取像素。 來源是 [replica.vert](../../shaders/replica.vert)、[replica.frag](../../shaders/replica.frag) 與 [windows_render_stack.cpp](../../render/windows_render_stack.cpp) 的 sampler、pipeline 及 `record_commands()`
+為了把選區矩形映射到 shader，renderer 需要覆蓋整個 viewport 的幾何，以及把來源選區對齊 allocation 的材質座標。 `replica.vert` 以三個常數頂點產生覆蓋範圍與 local UV，`replica.frag` 依本次裁切參數換算 UV、限制取樣邊界，再使用 slot 的 combined image sampler 讀取像素。 來源是 [replica.vert](../../shaders/replica.vert)、[replica.frag](../../shaders/replica.frag) 與 [windows_render_stack.cpp](../../platform/windows/windows_render_stack.cpp) 的 sampler、pipeline 及 `record_commands()`
 
 ### 三個頂點覆蓋整個 viewport
 

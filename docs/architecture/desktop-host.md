@@ -30,6 +30,18 @@ flowchart TB
 
 ## 程式組裝與啟動順序
 
+### Linux composition
+
+[Linux entry](../../platform/linux/main.cpp) 在任何設定保存前建立 `umask(0077)`，於 GLFW init 前選定 X11。 它先建立 command queue、Fontconfig 提供的 owning font bytes／face index 與共用 host，再建立 XDG preferences／writer lock、registry、catalog、factory、disabled hotkey 及 acquisition，最後注入共用 Application。 Linux metadata 由 composition 明確提供，沒有 COM 或 Win32 DPI 初始化
+
+Controller setup 注入 [X11ControllerWindow](../../platform/linux/x11_controller_window.hpp)，副本 factory 使用 [X11OverlayAdapter](../../platform/linux/x11_overlay_adapter.hpp) 與共用 renderer。 Wayland session 的呈現透過 XWayland。 Acquisition 只在明確 Start 後開始 Portal 系統選取，UI 仍只接 commands／view state
+
+Quit 持續 tick 至 runtime Stopped 與 acquisition quiescent。 Acquisition 的進展期限只監測其 worker／request／session／callback／wake，runtime 的 producer／GPU 與 host controller 各自提供退休證據。 任一 owner 停滯則沿用 `HostRunResult::abandon_process`，entry 在 owners 仍存在時直接退出，不能以一般析構代替清理。 實機操作狀態見 [Linux 指南](../development/linux.md)
+
+### Windows composition
+
+以下 DPI、COM、Windows services 與 executable-relative 設定路徑描述 Windows entry。 Controller Vulkan、字型 atlas 與事件迴圈由共用 host 持有，平台字型查詢與視窗互動由各自 adapter 注入
+
 ```mermaid
 flowchart TD
     Process[DPI awareness] -->|控制：成功後初始化| COM[COM MTA]
@@ -283,9 +295,11 @@ flowchart TD
 
 Replacement 維持 ImGui 所用的 format 與 render-pass 相容性；實際 image count 與既有 capacity 相同時沿用 backend pipeline。Image count 改變時，前述 capacity migration 在舊 users 退休後重建 Vulkan backend 與 pipeline。Controller recovery episode 記錄起點後 0、100 與 500 ms 三次建構時點。
 
-為了讓完成紀錄帶回 replacement 身分，建立 present 紀錄時將 `recovery_candidate` 寫入 `PresentRecord::confirms_recovery`。 `progress_presents()` 確認該標記、present fence 成功退休及 episode 仍存在後，重設 episode 與次數
+`PresentRecord::confirms_recovery` 記錄目前 episode 的 replacement 歸屬，`counts_as_presented` 另記錄 present 是否回傳 `VK_SUCCESS` 或 `VK_SUBOPTIMAL_KHR`。 `progress_presents()` 只有在兩項事實成立、獨立 present fence 已退休且該 episode 仍存在時，才重設 episode 與次數。 建構成功或失敗操作的 fence 退休皆不足以確認復原
 
-`VK_ERROR_OUT_OF_DATE_KHR` 與 `VK_ERROR_SURFACE_LOST_KHR` 在結果分類中同屬 `Enqueued`，這些紀錄也保留 `confirms_recovery` 標記。 零尺寸 framebuffer 的呈現暫停期間，完成紀錄持續由主迴圈推進
+成功重設時，host 清除其他 outstanding present records 的 confirmation 與 active／retired swapchains 的 candidate 標記，保留每筆 native use、serial、fence、wait semaphore 與 WSI ownership。 舊 episode 的成功 present 若較晚退休，仍正常回收本身使用，但不能重設後來的 episode
+
+`VK_ERROR_OUT_OF_DATE_KHR` 與 `VK_ERROR_SURFACE_LOST_KHR` 的 `Enqueued` 紀錄同樣等待獨立退休證據，不能因此更新成功呈現計數或重設 retry budget。 零尺寸 framebuffer 的呈現暫停期間，完成紀錄持續由主迴圈推進
 
 controller 的 surface loss 轉入 host shutdown，裝置失效也由 host 的退出政策接手。 replica runtime 的 surface 與 device recovery 則有自己的資源世代。 此處共用的結果分類讓兩個 owner 使用相同事實語義，各自採用適合其責任的後續動作
 

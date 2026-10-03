@@ -35,6 +35,24 @@ namespace avb::linux_platform::detail {
 }    // namespace avb::linux_platform::detail
 namespace avb::linux_platform {
   class LinuxRuntimeFactory;
+  /// @brief Read-only scalar evidence from this concrete runtime's normal tick.
+  /// Main-thread copies only: no native owner, pixels, source name or second frame
+  /// consumer is exposed. capture_instance is nonzero and unique within the owning
+  /// factory; Stop/Start creates a new instance. Publication counts accepted pool
+  /// frames, while delivered_stamp is updated only after successful bridge copy.
+  /// Retired presents include retained redraw and cannot stand in for source intake.
+  /// The aggregate adds each renderer cumulative increment once; actual renderer
+  /// replacement resets only that renderer baseline and preserves the lifetime total.
+  /// Producer revision is observed with publication facts, even before the graphics
+  /// ring admits it; graphics epoch is a separate discontinuity. Values
+  /// survive acknowledged Stop, but only stopped certifies this aggregate's release;
+  /// absence of a later snapshot cannot establish cleanup or zero pending work.
+  struct LinuxSourceObservation final {
+    std::uint64_t capture_instance{}, producer_revision{}, graphics_epoch{};
+    std::uint64_t published_source_sequence{}, successful_present_retirements{};
+    render::FrameStamp delivered_stamp{};
+    bool stopped{};
+  };
   /// @brief Main-thread GLFW owner, destroyed only after adapter/surface retirement.
   struct ReplicaWindowDeleter {
     void operator()(GLFWwindow *) const noexcept;
@@ -68,6 +86,10 @@ namespace avb::linux_platform {
     /// @brief Idempotently close admission and initiate cleanup without a join.
     /// Capture callback/thread/wake completion and independent GPU proof remain owed.
     void request_stop() noexcept override;
+    /// @brief Copy bounded diagnostic facts without consuming or controlling capture.
+    /// Read on the owning main thread between ticks. This snapshot neither proves
+    /// changing source pixels nor authorizes retirement of any outstanding owner.
+    [[nodiscard]] LinuxSourceObservation source_observation() const noexcept;
 
   private:
     friend class LinuxRuntimeFactory;
@@ -106,6 +128,9 @@ namespace avb::linux_platform {
     std::function<void()> wake_;
     diagnostics::PerformanceReport *performance_{};
     std::uint64_t observation_instance_{}, producer_revision_{}, ring_serial_{}, graphics_epoch_{1};
+    std::uint64_t published_source_sequence_{}, successful_present_retirements_{}, renderer_presented_baseline_{};
+    std::uint64_t observed_producer_revision_{};
+    render::FrameStamp delivered_stamp_{};
     detail::RetiredContent content_;
     detail::RuntimeOwnershipClock ownership_clock_;
     render::GraphicsRecoveryEpisodeState recovery_episode_;

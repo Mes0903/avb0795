@@ -4,7 +4,7 @@
 flowchart TB
     Entry["CMakeLists.txt<br/>建置組裝入口"] -->|"控制：載入依賴"| Deps["Dependencies.cmake"]
     Entry -->|"控制：add_subdirectory"| Targets["src/CMakeLists.txt<br/>產品 targets"]
-    Entry -->|"控制：Windows shader 生成"| Shader["shaders/CMakeLists.txt"]
+    Entry -->|"控制：graphics shader 生成"| Shader["shaders/CMakeLists.txt"]
     Shader ==>|"資料：嵌入式 SPIR-V"| Targets
     Deps ==>|"資料：固定版本的來源與 targets"| Targets
     Entry -->|"控制：架構檢查"| Boundary["VerifySourceBoundaries.cmake"]
@@ -17,7 +17,7 @@ flowchart TB
 
 為了把原始程式碼組成可執行產品，建置流程需要管理編譯責任、第三方輸入、shader 生成與驗證入口。 CMake 以 target 表達編譯單元及其連結關係，並將產物放進各自的 build tree。 開發工具與測試接著讀取這些明確產物，形成從來源到驗證證據的路線
 
-入口是 [CMakeLists.txt](../../CMakeLists.txt)，產品 target 定義集中在 [src/CMakeLists.txt](../../src/CMakeLists.txt)。 Windows 建置包含原生擷取、算繪與桌面主程式，其他平台可建立可攜的 Core、Application、UI 與在地化 targets。 [架構總覽](README.md)描述執行期間的呼叫，本頁描述編譯與工具執行順序
+入口是 [CMakeLists.txt](../../CMakeLists.txt)，產品 target 定義集中在 [src/CMakeLists.txt](../../src/CMakeLists.txt)。 Windows 與 Linux graphics 建置包含各自原生擷取與 entry，並共用 renderer、DesktopHost、Core、Application、UI 與在地化 targets。 [架構總覽](README.md)描述執行期間的呼叫，本頁描述編譯與工具執行順序
 
 ## Target 與編譯責任
 
@@ -52,6 +52,14 @@ flowchart TB
 - `avb0795_desktop` 持有 controller graphics，使用 Application、UI、GLFW、Vulkan 與 ImGui
 - `avb0795` 在 `main.cpp` 建立具體實例及注入關係
 
+上圖展開 Windows entry 的相依關係。 Linux entry 位於 [platform/linux/main.cpp](../../platform/linux/main.cpp)
+
+`avb0795_linux` 持有 GIO／Portal、PipeWire、registry／acquisition、Fontconfig 與設定服務。 `avb0795_linux_graphics` 持有 X11 interaction、CPU frame bridge、runtime／factory，單向連結 Linux services 與 `avb0795_vulkan_renderer`
+
+共用 renderer 控制 Vulkan transport／submission／presentation，不操作來源原生服務
+
+`AVB0795_BUILD_GRAPHICS` 在 Windows 預設 ON、Linux 預設 OFF。 `linux-desktop` 明確開啟 graphics，GLFW 只建 X11 backend。 `linux-portable` 保持無 Vulkan／GLFW／GIO／PipeWire／Fontconfig 依賴。 Ubuntu 完整開發套件與產品命令見 [Linux 指南](../development/linux.md)
+
 為了讓介面程式碼能建立命令及讀取投影，UI 需要 App 層公開的值契約。 分層 allowlist 准許其使用 `commands.hpp` 與 `controller_view_state.hpp`，編譯連結則落在 Core、在地化及 ImGui。 這讓命令資料與實際 use-case owner 在建置圖上各有清楚位置。 責任檢查實作見 [VerifySourceBoundaries.cmake](../../cmake/VerifySourceBoundaries.cmake)
 
 ## 第三方來源與 Patch 驗證
@@ -67,10 +75,12 @@ flowchart TB
 
 為了重現第三方程式的行為，需要同時確定上游版本與 avb0795 使用的修改內容。 [Dependencies.cmake](../../cmake/Dependencies.cmake) 記錄下載 URL 與 SHA256，並以 FetchContent 管理來源準備。 固定輸入包括 nlohmann/json 3.12.0、Dear ImGui 1.92.9、GLFW 3.4，以及啟用測試時使用的 Catch2 3.8.1
 
-Windows 的兩份 patch 各自服務一個原生契約：
+下列兩份 patch 各自服務一個原生契約：
 
 - [GLFW patch](../../third_party/patches/glfw-3.4-win32-no-own-dc.patch) 調整主要視窗 class 的 DC style，讓產品視窗具備分層視窗與滑鼠穿透所需的 class 相容性
-- [ImGui patch](../../third_party/patches/imgui-1.92.9-vulkan-safe-failure.patch) 補充 Vulkan backend 的失敗處理，讓 DesktopHost 能依自己的提交與退休契約保留資源
+- [ImGui patch](../../third_party/patches/imgui-1.92.9-vulkan-safe-failure.patch) 在兩個平台的 graphics 建置補充 Vulkan backend 失敗處理，讓 DesktopHost 能依自己的提交與退休契約保留資源
+
+GLFW Win32 class patch 與其驗證只在 Windows 啟用。 ImGui widgets patch 保持所有平台啟用，Vulkan safe-failure patch／hash 則隨 graphics 啟用
 
 為了讓離線來源覆寫也遵守同一份契約，建置在來源準備後繼續核對結果。 ImGui backend 使用預期的完整檔案 SHA256，GLFW 使用 [VerifyGlfwPatch.cmake](../../cmake/VerifyGlfwPatch.cmake) 檢查特定 class 片段與 helper class 結構。 原始下載摘要、patch 內容與修改後檢查共同構成依賴輸入證據
 
@@ -85,7 +95,7 @@ flowchart TB
     Embed -->|"控制：驗證 magic 與長度"| Words["uint32_t words"]
     Words ==>|"資料：constexpr arrays"| Cpp["replica_shaders.cpp"]
     Embed ==>|"資料：span 宣告"| Hpp["replica_shaders.hpp"]
-    Cpp -->|"編譯"| Target["avb0795_windows_graphics"]
+    Cpp -->|"編譯"| Target["avb0795_vulkan_renderer"]
     Hpp -->|"include"| Target
 ```
 
@@ -111,7 +121,7 @@ list(APPEND words "0x${byte_3}${byte_2}${byte_1}${byte_0}u")
 
 因此 `03 02 23 07` 會成為 `0x07230203u`。 產生的 `constexpr std::array<std::uint32_t, N>` 擁有指令值，`replica_vertex_shader()`／`replica_fragment_shader()` 傳回 `std::span<const std::uint32_t>` 供 renderer 借用。 陣列具有靜態生命週期，借用 span 可直接用於建立 shader module
 
-`avb0795_replica_shaders` 是這條生成路線的命名 target。 clangd 要解析生成的宣告時，可以執行 `clangd-generated` build preset，產物位於 `build/clangd/generated`。 實際 shader 的座標與取樣演算法見 [Renderer](renderer.md)
+`avb0795_replica_shaders` 是這條生成路線的命名 target。 clangd 要解析生成宣告時，Windows 執行 `clangd-generated`，Linux 執行 `linux-clangd-generated`，產物位於 `build/clangd/generated`。 實際 shader 的座標與取樣演算法見[共用 renderer](shared-vulkan-renderer.md)
 
 ## 架構與測試驗證入口
 
@@ -144,6 +154,12 @@ flowchart TB
 
 `AVB0795_BUILD_TESTS` 控制測試建置，`AVB0795_ENABLE_WINDOWS_INTEGRATION` 控制 hardware targets。 Hardware harness 的同意檢查與退出狀態屬於測試程式，實際執行證據寫入 verification。 [Lua 元件](lua-tooling.md)的 inventory 驗證用 test 名稱、labels 與 command metadata 證明集合符合 profile，CTest 執行結果與人工圖像觀察各自有自己的紀錄
 
+Linux 本機驗證另使用 `AVB0795_BUILD_LINUX_TESTS` 與 `linux-policy` label，硬體由預設 OFF 的 `AVB0795_ENABLE_LINUX_INTEGRATION` 登記，執行另要求精確 runtime opt-in。 硬體 discovery 保持無原生動作，缺少同意回 77
+
+Integration ON 與 policy OFF 可以獨立建置，graphics OFF 則提供明確 configure 診斷
+
+本次新增的全部測試與測試 CMake 接線留在本機工作樹，未隨產品提交。 乾淨產品 checkout 須使用 `AVB0795_BUILD_TESTS=OFF`、`AVB0795_BUILD_LINUX_TESTS=OFF` 與 integration OFF。 空的已提交 Linux selector 不提供本機 18 個新政策 cases 的執行證據。 Windows inventories／原生驗證維持原本範圍，缺少 Windows runner 的新回歸結果仍待驗
+
 ## 編輯器設定與 Windows 資源
 
 ```mermaid
@@ -157,7 +173,9 @@ flowchart LR
     Packaging["Packaging.cmake"] -->|"控制：RC／metadata／install 定義"| Exe
 ```
 
-為了讓 IDE 依照實際編譯環境找到宣告與定義，需要編譯指令資料庫提供 include 路徑、defines、SDK 與 C++23 模式。 [CMakePresets.json](../../CMakePresets.json) 定義 `windows-clangd`，輸出到 `build/clangd`，搭配 [.clangd](../../.clangd) 的背景索引與 include 診斷。 [.clang-format](../../.clang-format) 則提供原始程式碼排版規則。 操作步驟見 [clangd 指南](../development/clangd.md)
+為了讓 IDE 依照實際編譯環境找到宣告與定義，需要編譯指令資料庫提供 include 路徑、defines、SDK 與 C++23 模式。 [CMakePresets.json](../../CMakePresets.json) 定義 host-conditioned 的 `windows-clangd` 與 `linux-clangd`，各自在所屬平台輸出到 `build/clangd`，搭配 [.clangd](../../.clangd) 的背景索引與 include 診斷
+
+[.clang-format](../../.clang-format) 提供原始程式碼排版規則。 操作步驟見 [clangd 指南](../development/clangd.md)
 
 為了讓 Windows 取得圖示、版本與程序 manifest，需要資源編譯器將這些資料嵌入 PE 檔案。 [avb0795.rc](../../resources/windows/avb0795.rc) 引用 ICO 與 manifest，[Packaging.cmake](../../cmake/Packaging.cmake) 將 RC 加到產品 target。 PNG 留作圖示資產，RC 的實際輸入是 ICO 與 manifest
 

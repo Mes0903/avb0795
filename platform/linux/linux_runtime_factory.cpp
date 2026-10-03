@@ -67,9 +67,11 @@ namespace avb::linux_platform {
       if (auto accepted = (*adapter)->apply(settings); !accepted) throw accepted.error();
       // WM visibility is a request. Its visual completion never substitutes for GPU proof.
       glfwShowWindow(window.get());
-      if (performance_ && next_observation_instance_ == std::numeric_limits<std::uint64_t>::max())
+      if (next_observation_instance_ == std::numeric_limits<std::uint64_t>::max())
         throw core::AppError{core::AppErrorCode::RuntimeConstructionFailure};
-      const auto observation = performance_ ? next_observation_instance_++ : 0;
+      // Source observations must distinguish capture restarts even without a
+      // performance report. Failed preparations consume identity rather than reuse it.
+      const auto observation = next_observation_instance_++;
       auto renderer = std::make_unique<render::VulkanRenderer>(window.get(), borrowed->allocation_revision,
                                                                detail::replica_framebuffer(window.get()), render::VulkanStartupRequest{}, performance_, observation);
       renderer->set_source_admission(false);

@@ -27,6 +27,10 @@ namespace avb::render {
   /// finish_tick adds WSI recovery, at most one draw and the final ownership
   /// snapshot. Counts belong to renderer decisions; the facade adds producer
   /// admission/drop counts and independent producer failure facts.
+  /// presented_frames/dropped_frames are cumulative for this renderer's lifetime;
+  /// ticks, ring/content changes and surface repair do not reset them. A replacement
+  /// renderer starts fresh counters; aggregate consumers account for per-renderer deltas.
+  /// In-flight counts are instantaneous outstanding submission/presentation owners.
   struct VulkanTickResult final {
     bool surface_recovery_started{};
     bool surface_recovery_completed{};

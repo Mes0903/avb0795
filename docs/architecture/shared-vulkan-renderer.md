@@ -27,7 +27,11 @@ flowchart LR
 
 為了在 resize、surface recovery 與結束時安全處理呈現中的影像，WSI 操作需要同時檢查 slot image users 與獨立 present records。[`vulkan_wsi.cpp`](../../render/vulkan_wsi.cpp) 集中 swapchain 建立／退休、render-pass 與 framebuffer resources、present proof observation、acquired-image release 及 recovery episode。這些方法存取同一個 `Impl`，將完成證據交回 canonical transitions，並沿用共同的 error／deadline 結果。
 
-本輪交付的 graphics dependency configuration 與原生驗證以 Windows 為範圍，目前來源契約為 BGRA8，畫面驗證使用 SDR。`avb0795_vulkan_renderer` 擁有獨立的 source／link 邊界，連結 core、Vulkan、GLFW 與 diagnostics；Windows facade／bridge 保存 WGC、D3 與 Win32 import。已實作的 UI cadence、frame／present pools、CPU padding 與 opt-in report 共同支援本輪效能觀測。Linux Portal／PipeWire runtime、ROI-sized transport、GPU early-submit 與 HDR 是後續工作；最終配對量測的狀態見 [效能觀測指南](../development/vulkan-performance.md#本階段驗證範圍)。
+`avb0795_vulkan_renderer` 已在 Windows 與 Linux graphics 建置中共用，來源契約為 BGRA8／SDR。 它連結 core、Vulkan、GLFW 與 diagnostics，來源原生互動留在平台 owners。 Windows facade／bridge 保存 WGC、D3 與 Win32 import。 既有 Windows 配對效能量測仍維持[效能觀測指南](../development/vulkan-performance.md#本階段驗證範圍)的實際範圍。 ROI-sized transport、GPU early-submit 與 HDR 尚未實作
+
+Linux 的 [PipeWireCapture](../../platform/linux/pipewire_capture.hpp) 把可映射 BGRA／BGRx buffer 正規化到三個 owning CPU slots，再由 [LinuxCpuFrameBridge](../../platform/linux/linux_cpu_frame_bridge.hpp) 同步交付。 Bridge 借用只到 CPU copy 回傳，renderer retained image 不借用已歸還的原生 buffer。 [LinuxReplicaRuntime](../../platform/linux/linux_replica_runtime.hpp) 串接 source、overlay、renderer 與獨立 drain，renderer 不含 Portal／PipeWire／X11 操作
+
+Producer allocation revision 控制 ring generation，runtime graphics epoch 控制 device recovery，兩者分別發行。 Source publication sequence、成功 bridge delivery 的 `FrameStamp` 與退休 presents 各自提供不同觀察。 Retained redraw 沿用來源 stamp，不能增加來源序號。 Linux 底層與真正桌面驗收的界線見 [Linux 指南](../development/linux.md)
 
 Controller 的 frame／present 容量由 `DesktopHost` 的獨立 Vulkan owner 管理，詳見 [Controller Vulkan resources](controller-vulkan-resources.md)。兩個 owners 共用值政策，各自根據完成證據操作自己的 native handles。
 

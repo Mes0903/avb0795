@@ -186,8 +186,10 @@ namespace avb::desktop {
       bool uploads_font{};
     };
 
-    /// Retain present fence, consumed wait semaphore and WSI identity until the
-    /// presentation engine's completion can be observed on the host.
+    /// @brief Retain one controller present's independent proof and recovery attribution.
+    /// Its enqueue outcome governs successful-presentation accounting on retirement.
+    /// Main-thread confirmation belongs only to the current recovery episode;
+    /// invalidating it never releases the native use, fence, semaphore or WSI lease.
     struct PresentRecord final {
       render::PresentUseState use;
       VkFence fence{VK_NULL_HANDLE};
@@ -231,7 +233,8 @@ namespace avb::desktop {
       bool upload_in_flight{};
     };
 
-    /// Controller-local retries, reset only by a replacement's retired present.
+    /// @brief Controller-local retries, reset only by the current episode's successful
+    /// replacement present after its independent fence retires.
     struct RecoveryEpisode final {
       render::GraphicsRecoveryEpisodeState state{};
       std::chrono::steady_clock::time_point started_at{};
@@ -390,8 +393,10 @@ namespace avb::desktop {
     /// and release acquired images whose presentation never enqueued.
     void progress_frames(std::chrono::steady_clock::time_point now,
                          bool draining);
-    /// Poll present fences before releasing their wait semaphores and WSI leases;
-    /// only a replacement present's retirement resets its retry episode.
+    /// @brief Retire controller present proofs separately from successful presentation.
+    /// Each completed fence permits its own native use to retire, including WSI failure.
+    /// Only successful/suboptimal replacement work attributed to the current episode
+    /// confirms recovery; reset invalidates other confirmations, retaining their proofs.
     void progress_presents(std::chrono::steady_clock::time_point now,
                            bool draining);
     /// Use bounded 0/100/500 ms construction attempts after active image use
@@ -2618,7 +2623,9 @@ namespace avb::desktop {
       const bool confirms_recovery = record.confirms_recovery;
       if (record.counts_as_presented) observe_performance(PerformanceCounter::PresentRetired);
       made_progress_ = true;
-      if (confirms_recovery && recovery_episode_) {
+      // Failed/uncertain enqueues also retire fences; only a successful current-
+      // episode replacement confirms recovery and renews the construction budget.
+      if (record.counts_as_presented && confirms_recovery && recovery_episode_) {
         recovery_episode_->state =
           render::advance_graphics_recovery_episode(
             recovery_episode_->state,
@@ -2629,6 +2636,11 @@ namespace avb::desktop {
         }
         if (active_swapchain_) {
           active_swapchain_->recovery_candidate = false;
+        }
+        // Other presents can outlive this reset and a later replacement. Revoke
+        // only their confirmation, never their independent native ownership proof.
+        for (auto &pending : presents_) {
+          pending.confirms_recovery = false;
         }
       }
       if (!recycle_present({index, record.use.serial}, render::PresentUsePhase::PresentPending) &&

@@ -288,6 +288,7 @@ namespace avb::linux_platform {
         }
       }
       renderer_ = std::move(candidate);
+      renderer_presented_baseline_ = 0;    // A new renderer restarts its cumulative retirement count.
       ring_serial_ = serial;
       producer_revision_ = facts.revision;
       graphics_epoch_ = *decision.candidate_generation;
@@ -323,6 +324,8 @@ namespace avb::linux_platform {
       if (native.region_finished) complete_selection();
       if (capture_) {
         producer = capture_->progress(now);
+        published_source_sequence_ = producer.frame.sequence;
+        observed_producer_revision_ = producer.frame.revision;
         earliest(result.next_wake, producer.next_wake);
       }
       if (native.failure) fail(*native.failure);
@@ -376,8 +379,10 @@ namespace avb::linux_platform {
               else
                 fail(delivered.error());
             }
-            else if (*delivered)
+            else if (*delivered) {
+              delivered_stamp_ = {retry_frame_->sequence(), retry_frame_->intake_observed_at()};
               retry_frame_.reset();
+            }
           }
           else
             renderer_->request_redraw();
@@ -397,6 +402,13 @@ namespace avb::linux_platform {
         // just repair construction. Renderer draining/loss state governs that
         // cleanup; aggregate device replacement remains gated separately.
         renderer_->finish_tick(graphics, now, !stop_requested_ && !source_lost_ && !terminal_failure_ && !device_recovering_ && !reconfiguring_);
+        // finish_tick reports this renderer's cumulative successful fence retirements.
+        // Repeated polls and ring/content changes add no new retirement; only an
+        // installed replacement resets the baseline, preserving the runtime total.
+        if (graphics.presented_frames > renderer_presented_baseline_) {
+          successful_present_retirements_ += graphics.presented_frames - renderer_presented_baseline_;
+          renderer_presented_baseline_ = graphics.presented_frames;
+        }
         earliest(result.next_wake, graphics.next_deadline);
         if (graphics.vulkan_device_lost) begin_device_recovery(now);
         if (graphics.terminal_error && !graphics.vulkan_device_lost) {
@@ -535,5 +547,10 @@ namespace avb::linux_platform {
       }
     }
     return result;
+  }
+  LinuxSourceObservation LinuxReplicaRuntime::source_observation() const noexcept
+  {
+    return {observation_instance_, observed_producer_revision_, graphics_epoch_,
+            published_source_sequence_, successful_present_retirements_, delivered_stamp_, stopped_};
   }
 }    // namespace avb::linux_platform
