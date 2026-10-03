@@ -3,7 +3,7 @@
 ///
 /// The stack establishes borrowed command/window lifetimes. Native operations
 /// remain in the concrete adapters; this entry only wires values/services and
-/// reports fixed startup failures. Capture is unavailable at this milestone.
+/// reports fixed startup failures. Capture starts only through the injected acquisition service.
 #include "avb/app/app_command_queue.hpp"
 #include "avb/app/application.hpp"
 #include "avb/app/config_store.hpp"
@@ -13,7 +13,10 @@
 #include "platform/linux/linux_disabled_hotkey.hpp"
 #include "platform/linux/linux_preferences.hpp"
 #include "platform/linux/linux_ui_language.hpp"
-#include "platform/linux/linux_unavailable_services.hpp"
+#include "platform/linux/linux_source_registry.hpp"
+#include "platform/linux/linux_runtime_factory.hpp"
+#include "platform/linux/linux_source_acquisition.hpp"
+#include "platform/linux/portal_screencast.hpp"
 #include "platform/linux/x11_controller_window.hpp"
 #include "platform/linux/x11_overlay_adapter.hpp"
 
@@ -53,7 +56,8 @@ namespace {
   /// @brief Construct the synchronous controller graph in borrow-lifetime order.
   /// GLFW is initialized on this main thread. The queue outlives the host's
   /// retained command sink; the preference lock outlives all persistence calls.
-  /// Source/hotkey services create no workers or asynchronous wake borrowers.
+  /// Source services are initially inactive. Host remains alive through every
+  /// producer, Portal and source-service wake retirement acknowledgment.
   /// Startup failure unwinds only never-submitted host resources. After run,
   /// ordinary destruction is permitted solely by a non-abandon host result;
   /// uncertain submitted owners remain in scope until the non-unwinding exit.
@@ -101,21 +105,23 @@ namespace {
       report_error("preferences writer lock/startup", preferences.error());
       return 6;
     }
-    linux_platform::LinuxUnavailableSourceCatalog source_catalog;
-    linux_platform::LinuxUnavailableRuntimeFactory runtime_factory;
+    linux_platform::LinuxSourceRegistry registry;
+    linux_platform::LinuxSourceCatalog source_catalog{registry};
+    linux_platform::LinuxSourceAcquisition acquisition{registry, {}, [&host] { host.wake(); }};
+    linux_platform::LinuxRuntimeFactory runtime_factory{registry, [&host] { host.wake(); }};
     linux_platform::LinuxDisabledHotkey hotkey;
     app::ConfigStore store{linux_platform::linux_atomic_replace};
-    // Window facts are observations, while these explicit intermediate policies
-    // prohibit capture/authorization even if the stored preferences request them.
-    capabilities.display_capture = false;
-    capabilities.window_capture = false;
+    // Startup discovery observes Portal interface capabilities without a chooser
+    // or worker; source types absent from that observation stay disabled.
+    const auto portal = linux_platform::probe_portal_capabilities();
+    capabilities.display_capture = portal && (portal->available_source_types & 1u);
+    capabilities.window_capture = portal && (portal->available_source_types & 2u);
     capabilities.global_hotkey = false;
     capabilities.capture_exclusion = false;
     capabilities.browser_capture_keep_alive = false;
     capabilities.source_selection_method = core::SourceSelectionMethod::SystemPicker;
     app::Application application{
-      commands, source_catalog, runtime_factory, hotkey, store, preferences->path(),
-      capabilities, host.controller_exclusion(), linux_platform::linux_ui_language};
+      commands, source_catalog, runtime_factory, hotkey, store, preferences->path(), capabilities, host.controller_exclusion(), linux_platform::linux_ui_language, {}, &acquisition};
     const auto result = host.run(application);
     if (result.abandon_process) {
       // Returning would release owners whose completion has not been proven.
@@ -132,7 +138,7 @@ namespace {
 /// Keep umask 0077 for all persistence, including future retry saves. GLFW remains
 /// initialized until normal reverse destruction ends; an abandon result never
 /// returns here. Missing X11/XWayland is fatal without another backend attempt.
-/// Startup exceptions are contained only for this synchronous, capture-free graph.
+/// Startup exceptions are contained only for this synchronous, initially inactive graph.
 int main()
 {
   umask(0077);

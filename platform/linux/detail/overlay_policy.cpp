@@ -98,7 +98,9 @@ namespace avb::linux_platform::detail {
       return;
     }
     if (s.present_sequence <= sequence_) return;
-    if (active_ && dragging_ && snapshot_ && (snapshot_->content != s.content || snapshot_->framebuffer != s.framebuffer || snapshot_->viewport != s.viewport || !s.selection_full_view || client_ != client)) cancel();
+    // A content edge ends even an armed gesture. View-only changes before press
+    // still belong to the requested full-view transition and must keep it armed.
+    if (active_ && snapshot_ && (snapshot_->content != s.content || (dragging_ && (snapshot_->framebuffer != s.framebuffer || snapshot_->viewport != s.viewport || !s.selection_full_view || client_ != client)))) cancel();
     sequence_ = s.present_sequence;
     snapshot_ = s;
     client_ = client;

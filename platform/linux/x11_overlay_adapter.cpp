@@ -336,7 +336,9 @@ namespace avb::linux_platform {
       if (!selection.terminal() || !selection_override) return;
       auto restored = settings;
       restored.selecting_region = false;
-      auto r = transaction(restored, false);
+      // Completion ends the accepted transient request as well as its native
+      // override. A later apply(true) must see false and arm a fresh gesture.
+      auto r = transaction(restored);
       selection_override = false;
       if (!r)
         record_failure(core::AppError{core::AppErrorCode::RuntimeStateLost, r.error().native_detail});

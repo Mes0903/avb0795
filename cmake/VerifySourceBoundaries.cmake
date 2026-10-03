@@ -201,7 +201,7 @@ function(avb0795_assert_target_boundaries)
   endif()
 
   if(TARGET avb0795_linux_graphics)
-    _avb0795_assert_sources(avb0795_linux_graphics "platform/linux/linux_cpu_frame_bridge.cpp" "platform/linux/detail/overlay_policy.cpp" "platform/linux/x11_controller_window.cpp" "platform/linux/x11_overlay_adapter.cpp")
+    _avb0795_assert_sources(avb0795_linux_graphics "platform/linux/linux_replica_runtime.cpp" "platform/linux/linux_runtime_factory.cpp" "platform/linux/linux_cpu_frame_bridge.cpp" "platform/linux/detail/overlay_policy.cpp" "platform/linux/x11_controller_window.cpp" "platform/linux/x11_overlay_adapter.cpp")
     _avb0795_assert_links(avb0795_linux_graphics avb0795_vulkan_renderer avb0795_linux glfw X11::X11 X11::Xext)
   endif()
 
@@ -533,7 +533,7 @@ function(_avb0795_scan_files category)
       if(linux_relative MATCHES "^platform/linux/(portal_screencast|linux_source_acquisition|detail/acquisition_policy)\\.(hpp|cpp)$")
         list(APPEND allowed_linux_app_headers avb/app/source_acquisition.hpp)
       endif()
-      if(linux_relative MATCHES "^platform/linux/linux_(disabled_hotkey|unavailable_services|source_registry)\\.hpp$")
+      if(linux_relative MATCHES "^platform/linux/linux_(disabled_hotkey|source_registry|replica_runtime|runtime_factory)\\.hpp$")
         list(APPEND allowed_linux_app_headers avb/app/ports.hpp)
       endif()
       _avb0795_assert_app_includes("${file}" "${contents}" ${allowed_linux_app_headers})
@@ -545,6 +545,9 @@ function(_avb0795_scan_files category)
 
       _avb0795_assert_layer_includes("${file}" "${contents}" "ui")
       set(allowed_linux_render_headers)
+      if(linux_relative MATCHES "^platform/linux/linux_(replica_runtime|runtime_factory)\\.(hpp|cpp)$")
+        list(APPEND allowed_linux_render_headers render/graphics_retry_policy.hpp render/replica_presentation.hpp render/vulkan_renderer.hpp)
+      endif()
       if(linux_relative MATCHES "^platform/linux/linux_cpu_frame_bridge\\.(hpp|cpp)$")
         list(APPEND allowed_linux_render_headers render/vulkan_input.hpp render/vulkan_renderer.hpp)
       endif()
@@ -687,7 +690,7 @@ function(_avb0795_run_source_boundary_scan)
 
   _avb0795_collect_sources(linux_files "platform/linux")
   # Only this exact file owns Linux composition. All other adapters retain their
-  # narrow include/owner rules, including the two temporary port implementations.
+  # narrow include/owner rules, including registry, acquisition and concrete runtime owners.
   list(REMOVE_ITEM linux_files "${AVB0795_SOURCE_ROOT}/platform/linux/main.cpp")
   _avb0795_scan_files(linux ${linux_files})
 
@@ -708,7 +711,9 @@ function(_avb0795_run_source_boundary_scan)
       _avb0795_assert_layer_includes("${file}" "${contents}" "platform/linux"
         platform/linux/controller_font.hpp platform/linux/linux_atomic_replace.hpp
         platform/linux/linux_disabled_hotkey.hpp platform/linux/linux_preferences.hpp
-        platform/linux/linux_ui_language.hpp platform/linux/linux_unavailable_services.hpp
+        platform/linux/linux_ui_language.hpp platform/linux/linux_source_registry.hpp
+        platform/linux/linux_runtime_factory.hpp platform/linux/linux_source_acquisition.hpp
+        platform/linux/portal_screencast.hpp
         platform/linux/x11_controller_window.hpp platform/linux/x11_overlay_adapter.hpp)
       _avb0795_assert_no_match("${file}" "${contents}"
         "#[ \t]*include[ \t]*[<\"](X11/|GLFW/glfw3native\\.h)"

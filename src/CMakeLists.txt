@@ -276,7 +276,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
   target_include_directories(avb0795_linux
     PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include
   )
-  add_library(avb0795_linux_graphics ${PROJECT_SOURCE_DIR}/platform/linux/linux_cpu_frame_bridge.cpp
+  add_library(avb0795_linux_graphics ${PROJECT_SOURCE_DIR}/platform/linux/linux_replica_runtime.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/linux_runtime_factory.cpp
+    ${PROJECT_SOURCE_DIR}/platform/linux/linux_cpu_frame_bridge.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/detail/overlay_policy.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/x11_controller_window.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/x11_overlay_adapter.cpp)

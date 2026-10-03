@@ -31,8 +31,10 @@ namespace avb::linux_platform::detail {
     core::ReplicaSettings &accepted, const core::ReplicaSettings &, SettingsOperations) noexcept;
   /// @brief Fixed gesture mapping from already retired full-view presentations.
   /// Zero geometry discards sequence history so replacement renderers can restart
-  /// at one. Geometry changes cancel instead of remapping endpoints. Native owners
-  /// must restore temporary styles before publishing a terminal result.
+  /// at one. Content changes end armed and dragging selections; view-only changes
+  /// before press preserve the pending full-view transition. Dragging geometry
+  /// changes cancel instead of remapping endpoints. Native owners must commit
+  /// restored accepted preferences before publishing a terminal result.
   class SelectionMapping {
   public:
     void begin() noexcept;
