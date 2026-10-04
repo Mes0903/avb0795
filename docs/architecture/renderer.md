@@ -1,6 +1,6 @@
 # Replica renderer：影格運送、呈現與取樣
 
-本章保存 WindowsRenderStack 的 Windows 擷取與 D3／Vulkan 生命週期說明。 現在的共用 renderer 與單向平台 bridge 契約見[共用 Vulkan renderer](shared-vulkan-renderer.md)。 Linux 使用 Portal／PipeWire CPU frames、LinuxCpuFrameBridge 與 LinuxReplicaRuntime，實作與實機驗收範圍見 [Linux 指南](../development/linux.md)。 Windows 原生證據與本章運算推導維持其原本範圍
+本章保存 WindowsRenderStack 的 Windows 擷取與 D3／Vulkan 生命週期說明。 現在的共用 renderer 與單向平台 bridge 契約見[共用 Vulkan renderer](shared-vulkan-renderer.md)。 Linux 使用 direct X11 owning CPU frames、LinuxCpuFrameBridge 與 LinuxReplicaRuntime，實作與實機驗收範圍見 [Linux 指南](../development/linux.md)。 Windows 原生證據與本章運算推導維持其原本範圍
 
 ```mermaid
 flowchart TB

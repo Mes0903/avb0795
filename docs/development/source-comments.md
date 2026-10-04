@@ -67,6 +67,10 @@ language-tag validator。這些是產品政策，不能只從函式名稱推知
 thread-safe 或可安全解構。例如 [mailbox](../../include/avb/core/latest_value_mailbox.hpp)
 明確區分「停止接受新值」與「所有並行呼叫都已結束」
 
+### Linux 來源與 retirement 的 unit 範例
+
+[X11Capture](../../platform/linux/x11_capture.hpp) 的註解集中解釋 inactive preparation、private checked connection、exact revision ACK、最多一個 native reply，以及 callback／worker 完成前保留 owner 的原因。 [LinuxRuntimeFactory](../../platform/linux/linux_runtime_factory.hpp) 說明 catalog／wake 借用與完整 preparation 後才能 activation；[runtime](../../platform/linux/linux_replica_runtime.hpp) 把 publication、delivery stamp、retired presents 與 aggregate Stopped 分開。 讀者能由這些契約判斷可否接受影格、啟動或釋放資源，無須逐欄翻譯型別
+
 ## 4. Doxygen 格式保持簡單
 
 第一方 C++ 使用英文，避免每段中英並列造成重複維護。檔案說明分開寫：

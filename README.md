@@ -1,7 +1,7 @@
 # avb0795
 
 avb0795 displays a selected window or display in an always-on-top replica window.
-The Windows implementation and a Linux Portal/PipeWire implementation share the
+The Windows implementation and a direct X11 Linux implementation share the
 application, UI and Vulkan renderer. Linux desktop capture and interaction
 acceptance is still pending; see the [Linux development guide](docs/development/linux.md).
 
@@ -27,13 +27,15 @@ the application's normal shutdown and capture-drain flow. Controller minimizatio
 and source-window minimization have separate roles. The browser-source behavior
 is described below.
 
-Linux controller and replica windows use GLFW X11; GNOME Wayland requires
-XWayland for rendering. Both devices require Vulkan 1.3 and enabled
+Linux uses the ImGui source catalog: Refresh, select a window or display, then
+Start. No system sharing dialog is required. Controller and replica windows use
+GLFW X11. On GNOME Wayland, XWayland permits sources from the same X server; native
+Wayland windows and the complete Wayland desktop are deferred. Both devices require Vulkan 1.3 and enabled
 `VK_KHR_swapchain_maintenance1` or `VK_EXT_swapchain_maintenance1` present fences.
 Linux global hotkeys, capture exclusion and browser keep-alive are disabled in
 this first version. Use the controller to restore Editable or Stop after
-PassThrough or opacity 0. Genuine GNOME Xorg capture and the full Wayland/Chrome
-operation matrix remain unverified.
+PassThrough or opacity 0. Genuine GNOME Xorg capture, background Chrome and the full desktop operation
+matrix remain unverified.
 
 ## Replica opacity and source region
 
@@ -61,7 +63,7 @@ Windows 使用執行檔旁的路徑，Linux 使用上述 XDG 路徑
 
 ## Screenshots and screen sharing
 
-The controller and replica windows are capturable by default. Use your usual screenshot or screen-sharing tool to include them. On Windows, window-source discovery filters windows owned by avb0795's current process. On Linux, the Portal controls source selection.
+The controller and replica windows are capturable by default. Use your usual screenshot or screen-sharing tool to include them. On Windows, window-source discovery filters windows owned by avb0795's current process. On Linux, the catalog excludes the exact owned controller and replica drawables; other windows from the same process remain eligible.
 
 When capturing an entire display, a replica on that display can appear inside its own captured image and produce a recursive mirror. Select a source window or place the replica on another display to keep that feedback out of the captured area.
 

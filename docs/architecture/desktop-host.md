@@ -32,11 +32,11 @@ flowchart TB
 
 ### Linux composition
 
-[Linux entry](../../platform/linux/main.cpp) 在任何設定保存前建立 `umask(0077)`，於 GLFW init 前選定 X11。 它先建立 command queue、Fontconfig 提供的 owning font bytes／face index 與共用 host，再建立 XDG preferences／writer lock、registry、catalog、factory、disabled hotkey 及 acquisition，最後注入共用 Application。 Linux metadata 由 composition 明確提供，沒有 COM 或 Win32 DPI 初始化
+[Linux entry](../../platform/linux/main.cpp) 在任何設定保存前建立 `umask(0077)`，於 GLFW init 前選定 X11。 Command queue、Fontconfig owning bytes／face index 與 source catalog 先建立；catalog 先於 host，存活到所有 controller／runtime exclusions 退休。 Host 建立後再組裝 XDG preferences／writer lock、factory、disabled hotkey 與共用 Application。 Linux metadata 由 composition 提供
 
-Controller setup 注入 [X11ControllerWindow](../../platform/linux/x11_controller_window.hpp)，副本 factory 使用 [X11OverlayAdapter](../../platform/linux/x11_overlay_adapter.hpp) 與共用 renderer。 Wayland session 的呈現透過 XWayland。 Acquisition 只在明確 Start 後開始 Portal 系統選取，UI 仍只接 commands／view state
+Controller setup 注入 [X11ControllerWindow](../../platform/linux/x11_controller_window.hpp)，factory 使用 [X11OverlayAdapter](../../platform/linux/x11_overlay_adapter.hpp)、inactive X11 capture 與共用 renderer。 在 hidden window 階段登記 exact owned drawable，互動 probe 只提供穿透、resize、置頂及 opacity，來源 catalog 決定 discovery 能力。 ImGui 發出 Refresh／Select／Start；Application 仲裁 session，Start 才由 factory 在完整 preparation／exact ring ACK／同一 source identity 再驗證後啟動 worker。 沒有 Portal acquisition 或額外系統選取步驟
 
-Quit 持續 tick 至 runtime Stopped 與 acquisition quiescent。 Acquisition 的進展期限只監測其 worker／request／session／callback／wake，runtime 的 producer／GPU 與 host controller 各自提供退休證據。 任一 owner 停滯則沿用 `HostRunResult::abandon_process`，entry 在 owners 仍存在時直接退出，不能以一般析構代替清理。 實機操作狀態見 [Linux 指南](../development/linux.md)
+Quit 持續 tick 至 runtime Stopped，取得 producer worker／callback／wake 及獨立 GPU retirement，controller host 另提供自己的 graphics 退休證據。 任一 owner 停滯沿用 `HostRunResult::abandon_process`，entry 在 owners 仍存在時直接退出，不能以普通析構代替清理。 Wayland session 中的 GLFW 視窗透過 XWayland；來源只限同 server 的 X 視窗。 實機範圍見 [Linux 指南](../development/linux.md)
 
 ### Windows composition
 

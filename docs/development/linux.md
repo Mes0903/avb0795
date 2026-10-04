@@ -1,36 +1,34 @@
 # Linux 開發與桌面驗收
 
-Linux 版本沿用共用 Application、UI 與 Vulkan renderer。 來源由 ScreenCast Portal 授權，再經 PipeWire 的 CPU BGRA／BGRx 路線送入副本。 Controller 與副本固定使用 GLFW X11，在 GNOME Wayland session 中透過 XWayland 呈現
+Linux 使用直接 X11 來源，沿用共用 Application、ImGui UI、CPU frame bridge 與 Vulkan renderer。 在 controller 重新整理來源清單、選取 Window 或 Display，再按 Start。 不需要系統分享選單。 重新整理與選取只觀察來源，Start 才啟動擷取
 
-目前已完成 Linux 產品實作及無桌面政策驗證。 真實 Portal 到副本的完整擷取、背景 Chrome 的新影格與移動內容、實體視窗操作，以及真正 GNOME Xorg session 的驗收仍待完成。 建置成功與跳過硬體測試各自保留原本的證據範圍
+首要驗收環境為 Ubuntu／GNOME 的真正 Xorg session。 GLFW controller 與副本使用 X11。 在 Wayland session 中透過 XWayland 呈現，來源範圍限同一 X server 的 X 視窗。 原生 Wayland 視窗與整個 Wayland 桌面尚未支援。 真正 GNOME Xorg、使用者背景 Chrome 與完整操作矩陣仍待驗。 自有 X11 動畫視窗的實驗不代替這些結果
 
 ## Ubuntu 開發依賴
 
-需要 CMake 3.28 以上、Ninja、pkg-config 與能編譯 C++23 的編譯器和標準函式庫。 建置會實際使用 `std::expected`、`std::format` 與 `std::ios::noreplace`。 本機已使用 GCC 15.2 建置，其他工具鏈仍須各自驗證
-
-完整開發套件清單如下，安裝由開發者在自己的環境執行：
+需要 CMake 3.28 以上、Ninja、pkg-config、Git，以及能編譯 C++23 的編譯器和標準函式庫。 建置實際使用 `std::expected`、`std::format` 與 `std::ios::noreplace`。 本機使用 GCC 15.2，其他工具鏈須各自驗證。 開發者在自己的環境安裝：
 
 ```bash
-sudo apt install build-essential cmake ninja-build pkg-config \
-  libvulkan-dev glslc libglib2.0-dev libpipewire-0.3-dev \
-  libfontconfig1-dev fonts-noto-cjk \
+sudo apt install build-essential cmake ninja-build pkg-config git \
+  libvulkan-dev glslc libfontconfig1-dev fonts-noto-cjk \
   libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
-  libxi-dev libxfixes-dev libxext-dev
+  libxi-dev libxfixes-dev libxext-dev \
+  libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev
 ```
 
-`libx11-dev` 提供 X11 與 XKB headers。 Xrandr、Xinerama、Xcursor、Xi 是固定 GLFW 3.4 的開發依賴。 Xfixes 與 Xext／Shape 供 Linux 原生互動使用。 GIO 2.0／gio-unix 2.0 由 GLib 開發套件提供，PipeWire 的 pkg-config 模組名為 `libpipewire-0.3`
+Xlib／XKB、Xrandr、Xinerama、Xcursor、Xi 供 GLFW 使用。 Xfixes 與 Xext／Shape 供原生視窗互動使用。 來源 catalog／capture 使用獨立 XCB connections，pkg-config 模組為 `xcb`、`xcb-composite`、`xcb-randr`。 Window 需要真正 EWMH client list 與 Composite 0.2 以上
 
-桌面執行另需可用的 `xdg-desktop-portal`、GNOME Portal backend、PipeWire、XWayland，以及相容的 Vulkan loader／GPU driver。 Fontconfig 必須找到涵蓋英文、繁體中文與日文 UI 字元的 Noto CJK 字型，程式會把 TTC face index 與 owning bytes 一起交給共用 host
+Display 讀 root，RandR 能力決定 monitor／layout 觀察。 原生 TrueColor 24／32-bit、支援的 32-bit 像素與 RGB masks 正規化為 opaque BGRA8。 不支援格式回報錯誤
 
-Controller 與副本各自建立 Vulkan 1.3 device，並要求實際啟用 `VK_KHR_swapchain_maintenance1` 或 `VK_EXT_swapchain_maintenance1` 的 present fences。 CPU 傳輸仍需符合這個 GPU／driver 門檻。 列出 extension、找到 runtime library 或使用軟體裝置，各自都不足以證明實體 GPU 呈現成功
+執行需要有效的 X11 display／授權、相容的 Vulkan loader／driver，以及 Fontconfig 能找到的 Noto CJK 字型。 Wayland session 額外需要 XWayland，但這不擴大可擷取的來源範圍。 本產品接線不查找或連結 GIO／PipeWire，不啟動 ScreenCast Portal，也沒有 Portal fallback
 
-第三方來源固定為 nlohmann/json 3.12.0、GLFW 3.4、Dear ImGui 1.92.9。 Catch2 3.8.1 僅供本機測試使用。 來源摘要與 patch 檢查由 [Dependencies.cmake](../../cmake/Dependencies.cmake) 保持一致
+Controller 與副本各自建立 Vulkan 1.3 device，要求實際啟用 `VK_KHR_swapchain_maintenance1` 或 `VK_EXT_swapchain_maintenance1` 的 present fences。 CPU transport 仍須符合此門檻。 Extension 列表、軟體 WSI 成功與實體 GPU 驗收各有不同證據範圍。 不能由套件版本推定實際選用的 device
 
-若依賴由本機 SDK 提供，須讓 `PATH`、`CMAKE_PREFIX_PATH`、`LD_LIBRARY_PATH` 與 `PKG_CONFIG_PATH` 指向該 SDK。 沿用已查核的 SDK `.pc` relocation 與 `PKG_CONFIG_ARGN=--dont-define-prefix`，不設定涵蓋系統 GIO 的 `PKG_CONFIG_SYSROOT_DIR`。 本機 SDK 與其環境腳本由開發者另行準備
+固定第三方來源為 nlohmann/json 3.12.0、GLFW 3.4 與 Dear ImGui 1.92.9。 Catch2 3.8.1 僅供本機測試。 [Dependencies.cmake](../../cmake/Dependencies.cmake) 核對來源摘要與 patches。 本機 SDK 另行準備，透過 `PATH`、`CMAKE_PREFIX_PATH`、`LD_LIBRARY_PATH`、`PKG_CONFIG_PATH` 選用。 SDK `.pc` relocation 必須正確，不以廣泛 sysroot／include fallback 隱藏相依錯誤
 
 ## 產品建置與編輯器
 
-提交的產品來源排除了本次新增的全部測試與其 CMake 接線。 乾淨 checkout 用以下命令建立產品，避免把不存在的本機測試清單當成執行成功：
+本次新增測試與 tests CMake 接線未隨產品提交。 乾淨 checkout 明確關閉測試來建置產品：
 
 ```bash
 cmake --preset linux-desktop \
@@ -42,23 +40,31 @@ cmake --build build/linux-desktop --target verify_source_boundaries
 build/linux-desktop/src/avb0795
 ```
 
-啟動須使用目前使用者自己的桌面 session、有效的 `DISPLAY` 與 session D-Bus。 GNOME Wayland 也需要 XWayland。 程式在 GLFW init 前明確選擇 X11，缺少 display 時回報啟動診斷。 不得藉由切換桌面或自動改用未完成的原生 Wayland 視窗來略過缺少的能力
+在使用者自己的桌面啟動，保留有效 `DISPLAY` 與 X11 授權。 Entry 在 GLFW init 前選定 X11。 缺少 display 明確回報啟動失敗。 本輪不切換 session，也不改用原生 Wayland backend
 
-`linux-portable` 建立無 graphics 的共用函式庫，`linux-desktop` 建立 Linux 產品及共用 graphics，兩者使用獨立 Ninja Debug build trees。 編輯器使用 `cmake --preset linux-clangd` 與 `cmake --build --preset linux-clangd-generated`，詳見 [clangd 指南](clangd.md)。 Linux packaging 仍屬後續工作
+`linux-portable` 建立無 graphics 的共用函式庫，`linux-desktop` 建立 Linux 產品與共用 graphics，各有獨立 build tree。 編輯器執行 `cmake --preset linux-clangd` 與 `cmake --build --preset linux-clangd-generated`，實際 CDB／hover／導覽見 [clangd 指南](clangd.md)。 Packaging 尚待後續工作
+
+## 責任與資源生命週期
+
+UI 只發 commands／讀 view state，Application 決定來源與 session。 Linux catalog 保存 opaque SourceId 對應的不可變 observation 與 validity token，factory 在完整準備前後重新 resolve 同一 identity。 Capture worker 使用自己的 checked XCB watches，不依賴主執行緒及時刷新。 controller／replica 只依精確自有 drawable 排除，同 PID 的其他來源不一併隱藏
+
+Window 使用 Composite automatic redirect／named pixmap。 Display 使用 root／monitor region。 每個 worker 最多一個 pending GetImage，reply 先經格式與 epoch 驗證，再寫三個 owning CPU slots。 Resize 要先退休舊 leases／writers、建立新 allocation 並得到 exact revision ACK，才恢復交付。 Bridge 同步複製到 renderer-owned image，沒有第二個 capture consumer。 SHM／DMA-BUF 留待後續設計
+
+Stop 關閉 admission，tick 持續推進 producer callback／worker／wake 與獨立 GPU submission／presentation retirement。 只有 aggregate `Stopped` 才允許普通析構。 Deadline、命令接受或來源序號不提供 release proof。 停滯沿用保留 owners 的 non-unwinding process exit。 Shared renderer 不操作 X11 來源，frontend 不持原生硬體 authority
 
 ## 設定與操作限制
 
-設定路徑為 `$XDG_CONFIG_HOME/avb0795/avb0795.config`。 只有絕對的 `XDG_CONFIG_HOME` 有效，其他情況使用 `$HOME/.config/avb0795/avb0795.config`。 程式使用 `umask(0077)`，自有目錄為 0700，新檔案為 0600，並持有 writer lock。 第二個 writer 明確失敗。 Linux 不讀 Windows 執行檔旁的 legacy JSON
+設定為 `$XDG_CONFIG_HOME/avb0795/avb0795.config`。 只有絕對 XDG 路徑有效，否則使用 `$HOME/.config/avb0795/avb0795.config`。 Entry 使用 `umask(0077)`，自有目錄 0700、新檔案 0600，並持 writer lock。 第二 writer 明確失敗。 Linux 不讀 Windows executable-relative legacy JSON
 
-跟隨系統語言時，Linux 使用有效 locale 與 `LANGUAGE`、`LC_ALL`、`LC_MESSAGES`、`LANG` 的既定優先序，C／POSIX 或無支援語言回英文。 偏好 JSON schema 與三語 UI 共用，實際字形及重新啟動後的保存仍須桌面驗收
+系統語言依 `LANGUAGE`、`LC_ALL`、`LC_MESSAGES`、`LANG` 的既定有效 locale 政策選取，C／POSIX 或未支援語言使用英文。 三語 UI／偏好 schema 共用，實際字形與重新啟動保存仍須桌面驗收
 
-首版停用全域快捷鍵、擷取排除及 browser keep-alive，保留已保存偏好。 副本為 PassThrough 或 opacity 0 時，使用 controller 恢復 Editable 或 Stop。 不支援視窗 opacity 時，有效 opacity 為 100，保存的偏好不被覆寫
+全域快捷鍵、擷取排除與 browser keep-alive 停用，但保留已保存偏好。 PassThrough 或 opacity 0 時由 controller 恢復 Editable 或 Stop。 不支援 opacity 時有效值為 100，不覆寫偏好。 Always-on-top、resize、穿透與 opacity 都由真正 WM 的能力／結果決定
 
-被遮住的視窗、背景分頁與真正最小化各自有不同條件。 首版不承諾真正最小化的 Chrome 持續 live。 驗收保持使用者既有 Chrome 視窗與播放設定，不改 flags、不切換分頁、不重新播放，也不自動最小化或關閉它
+背景被遮住、背景分頁、其他 workspace 與真正最小化各自不同。 不承諾最小化 Chrome 持續 live。 驗收保持使用者原有 Chrome／播放設定，不改 flags、不切換分頁、不重新播放、不重啟或關閉它
 
-## 本機驗證與硬體同意
+## 本機驗證與執行 gate
 
-完整本機工作樹保留六個 portable cases、18 個新增 Linux 政策 cases，以及唯一的自有來源硬體 case，共 25 個。 這些新增測試與登記接線未隨產品提交。 以下命令只適用於保留該本機測試內容的驗證工作樹：
+完整本機工作樹的預設清單為 22 個：六個原 core cases，加十三個 Linux 與三個 shared-render policy cases。 唯一 opt-in hardware case 加入後共 23 個，新增非 core 共十七個。 新測試及其登記不在產品 commit。 以下僅適用於保留它們的驗證工作樹：
 
 ```bash
 cmake --preset linux-portable
@@ -68,10 +74,10 @@ cmake -DBUILD_DIRECTORY=build/linux-portable -DINVENTORY_PROFILE=portable-core \
   -P cmake/VerifyTestInventory.cmake
 cmake --preset linux-desktop
 cmake --build --preset linux-desktop
-ctest --test-dir build/linux-desktop -LE linux-hardware --output-on-failure
+ctest --test-dir build/linux-desktop --output-on-failure
 ```
 
-硬體登記預設 OFF，只有顯式 `AVB0795_ENABLE_LINUX_INTEGRATION=ON` 才出現 `linux-hardware` case。 執行前另要求精確的 `AVB0795_LINUX_HARDWARE_TESTS=1`，缺少、空值或其他值皆在原生啟動前回傳 77。 Discovery／列清單不開啟視窗、bus、chooser 或 GPU
+Integration 登記預設 OFF，與 policy opt-in 獨立，但必須有 graphics。 執行另要求精確 `AVB0795_LINUX_HARDWARE_TESTS=1`。 缺少／其他值在 native startup 前回 77。 Catch discovery 不開視窗或 GPU。 77／純 skip 不算驗收通過：
 
 ```bash
 cmake --preset linux-desktop -DAVB0795_ENABLE_LINUX_INTEGRATION=ON
@@ -81,20 +87,18 @@ AVB0795_LINUX_HARDWARE_TESTS=1 ctest --test-dir build/linux-desktop \
   -L linux-hardware --output-on-failure
 ```
 
-唯一硬體 case 要求在真正 Portal 中選取它自己的動畫視窗，暫時比對已知變動像素、接受來源序號／intake 與成功退休的 presents。 停止並確認 producer quiescent 後，以 renderer 已複製的影像裁切重畫，確認新呈現不增加來源序號。 它涵蓋底層 production owners，完整 Application／controller 與 Chrome 操作另行驗收
+Skip 需要獨立的能力缺少證據與正常 cleanup。 Native probe 的 false 或 factory `UnsupportedGraphics` 也可能包含查詢失敗、記憶體不足或 device loss，測試會明確 fail，不把模糊結果轉為 77；不另建 fault-injection framework。
 
-取消或缺少能力只在證明清理完成後記為 skipped。 Catch 的純 skip 4 轉為 77，assertion failure 保留失敗。 CTest 的「100% tests passed」可能包含 skipped，必須查閱實際 case 結果。 Runner timeout、強制終止或 abandoned 都不提供正常 drain 證據
+唯一 case `linux hardware: owned X11 moving source and retained redraw` 在真正 WM 中建立自己的動畫來源，用真正 catalog／factory／runtime 擷取。 獨立讀自有 replica 像素，分開核對 publication、delivery／intake、移動 phases 與退休 presents，再驗證 resize、SourceLost 及 ordinary Stop／Stopped。 不讀使用者視窗，也不在使用者 root 安裝模擬 EWMH
+
+Retained redraw 使用既有 caller-owned wake callback，單次延後返回不超過一秒，明確屬人為 notification 時序。 非零起點 crop 須匹配新 region，並排除目前 window geometry 下的 full-view 假設。 閉合 ticks 要求完整來源 stamp／identities 不變、獨立像素改變與 aggregate 退休數增加。 每條 cleanup 先解除延遲，再 Stop，保留 callback 借用直到 Stopped。 這不代替正常 App UI、背景 Chrome 或實體 GPU 的驗收
 
 ## GNOME session 與 Chrome 驗收
 
-Wayland／XWayland 與真正 GNOME Xorg 各自記錄 Ubuntu、kernel、GNOME／Mutter、Portal frontend／backend、PipeWire、XWayland、實際建立的 GPU／driver、來源 backend 與清理結果。 套件版本屬安裝資料，GPU 身分須來自實際建立的 device。 Chrome backend 未獨立確認時記為 unknown
+Xorg 與 Wayland／XWayland 分別記錄 Ubuntu、kernel、GNOME／Mutter、X server、實際 GPU／driver、來源 backend 與清理結果。 XWayland 結果只適用於同 server 的 X 視窗，不證明真正 Xorg、native Wayland 或完整 Wayland 螢幕。 Chrome backend 未獨立確認時記 unknown
 
-Chrome 必須經真正的 window chooser 選到使用者既有播放視窗。 確認副本呈現移動內容、來源非前景且被普通不透明視窗遮住後，開始獨立 steady-clock 60 秒觀察，固定 60 個一秒區間。 事先固定至少 55 個區間同時有來源發布與 delivery 進展，最大 delivered intake 間隔不超過 5 秒。 來源 instance、producer revision 或 graphics epoch 改變即記為不連續，不能重設起點製造成功
+原 Chrome 必須實際出現在 X11 catalog，經正常 ImGui 選取／Start。 非前景並由普通不透明視窗遮住後，觀察固定 steady-clock 60 秒／六十個一秒 bins。 至少 55 bins 同時有 publication 與 delivery 進展，最大 delivered intake 間隔 ≤5 秒。 instance／revision／graphics epoch 改變不能重設起點製造通過。 序號須搭配獨立動態內容比對，畫面、使用者像素與標題不存入紀錄
 
-來源發布 sequence、bridge delivery 的 `FrameStamp` 與退休 presents 分別記錄。 前兩者證明新來源及實際交付，presents 包含 retained redraw。 序號進展還須搭配人工移動內容比對，畫面、像素樣本與視窗標題不寫入紀錄。 這個 60 秒觀察與 performance report 的 10 秒 warmup 加 60 秒量測各自獨立
+依序操作 resize、crop／Esc、FPS、zoom、border、opacity 0／50／100、PassThrough→controller Editable／Stop、Stop／Start 及 Quit。 命令接受不代替實體輸入／WM 結果。 Quit 必須正常完成 producer 與 GPU 退休，Chrome 持續開啟。 沒有真正 Xorg／可識別 X11 Chrome／Windows runner 時，各項保留待驗
 
-接著逐項操作來源 resize、crop／Esc、FPS、opacity 0／50／100、border、wheel zoom、Editable／PassThrough／controller 恢復、普通 Stop／Start 與 Quit。 命令接受不能代替實體輸入及 compositor 視覺結果。 Quit 須取得 acquisition quiescence 與 runtime／GPU 的獨立退休證據，Chrome 持續開啟
-
-目前沒有真正 GNOME Xorg 與 Windows runner 的完整紀錄，保留待驗。 XWayland 不替代 Xorg。 若真正 Xorg Portal 擷取失敗，先記錄失敗並停止 X11 支援聲明，再另行設計 Xorg capture adapter
-
-原生責任可沿[共用 renderer](../architecture/shared-vulkan-renderer.md)、[桌面 host](../architecture/desktop-host.md) 與[建置責任](../architecture/build-and-validation.md)閱讀
+原生責任見[共用 renderer](../architecture/shared-vulkan-renderer.md)、[桌面 host](../architecture/desktop-host.md)與[建置責任](../architecture/build-and-validation.md)。 Unit Doxygen 的目的、借用與 WHY 寫法見[註解指南](source-comments.md)

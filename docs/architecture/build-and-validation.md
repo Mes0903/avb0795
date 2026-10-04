@@ -54,11 +54,11 @@ flowchart TB
 
 上圖展開 Windows entry 的相依關係。 Linux entry 位於 [platform/linux/main.cpp](../../platform/linux/main.cpp)
 
-`avb0795_linux` 持有 GIO／Portal、PipeWire、registry／acquisition、Fontconfig 與設定服務。 `avb0795_linux_graphics` 持有 X11 interaction、CPU frame bridge、runtime／factory，單向連結 Linux services 與 `avb0795_vulkan_renderer`
+`avb0795_linux` 持有 Fontconfig、XDG 設定與語言服務。 `avb0795_linux_x11_catalog` 管理來源 observations，`avb0795_linux_x11_capture` 持有 private XCB worker／native replies，`avb0795_linux_cpu_frames` 持有三槽 CPU storage。 `avb0795_linux_graphics` 組裝 X11 interaction、CPU frame bridge、runtime／factory，單向連結上述 owners 與 `avb0795_vulkan_renderer`。 產品不查找 GIO／PipeWire 或編入歷史 Portal／registry／acquisition units
 
 共用 renderer 控制 Vulkan transport／submission／presentation，不操作來源原生服務
 
-`AVB0795_BUILD_GRAPHICS` 在 Windows 預設 ON、Linux 預設 OFF。 `linux-desktop` 明確開啟 graphics，GLFW 只建 X11 backend。 `linux-portable` 保持無 Vulkan／GLFW／GIO／PipeWire／Fontconfig 依賴。 Ubuntu 完整開發套件與產品命令見 [Linux 指南](../development/linux.md)
+`AVB0795_BUILD_GRAPHICS` 在 Windows 預設 ON、Linux 預設 OFF。 `linux-desktop` 明確開啟 graphics，GLFW 只建 X11 backend。 `linux-portable` 保持無 Vulkan／GLFW／X11／Fontconfig 依賴。 Ubuntu 完整開發套件與產品命令見 [Linux 指南](../development/linux.md)
 
 為了讓介面程式碼能建立命令及讀取投影，UI 需要 App 層公開的值契約。 分層 allowlist 准許其使用 `commands.hpp` 與 `controller_view_state.hpp`，編譯連結則落在 Core、在地化及 ImGui。 這讓命令資料與實際 use-case owner 在建置圖上各有清楚位置。 責任檢查實作見 [VerifySourceBoundaries.cmake](../../cmake/VerifySourceBoundaries.cmake)
 
@@ -154,11 +154,11 @@ flowchart TB
 
 `AVB0795_BUILD_TESTS` 控制測試建置，`AVB0795_ENABLE_WINDOWS_INTEGRATION` 控制 hardware targets。 Hardware harness 的同意檢查與退出狀態屬於測試程式，實際執行證據寫入 verification。 [Lua 元件](lua-tooling.md)的 inventory 驗證用 test 名稱、labels 與 command metadata 證明集合符合 profile，CTest 執行結果與人工圖像觀察各自有自己的紀錄
 
-Linux 本機驗證另使用 `AVB0795_BUILD_LINUX_TESTS` 與 `linux-policy` label，硬體由預設 OFF 的 `AVB0795_ENABLE_LINUX_INTEGRATION` 登記，執行另要求精確 runtime opt-in。 硬體 discovery 保持無原生動作，缺少同意回 77
+Linux 本機驗證另使用 `AVB0795_BUILD_LINUX_TESTS` 與 `linux-policy` label。 預設有六 core 加十六 policy（十三 Linux／三 shared-render），唯一 direct X11 hardware case 登記後共 23，新增非 core 共十七。 硬體由預設 OFF 的 `AVB0795_ENABLE_LINUX_INTEGRATION` 登記，執行另要求精確 `AVB0795_LINUX_HARDWARE_TESTS=1`。 Discovery 保持無原生動作，缺 gate 回 77，skip 不算通過
 
 Integration ON 與 policy OFF 可以獨立建置，graphics OFF 則提供明確 configure 診斷
 
-本次新增的全部測試與測試 CMake 接線留在本機工作樹，未隨產品提交。 乾淨產品 checkout 須使用 `AVB0795_BUILD_TESTS=OFF`、`AVB0795_BUILD_LINUX_TESTS=OFF` 與 integration OFF。 空的已提交 Linux selector 不提供本機 18 個新政策 cases 的執行證據。 Windows inventories／原生驗證維持原本範圍，缺少 Windows runner 的新回歸結果仍待驗
+本次新增的全部測試與測試 CMake 接線留在本機工作樹，未隨產品提交。 乾淨產品 checkout 須使用 `AVB0795_BUILD_TESTS=OFF`、`AVB0795_BUILD_LINUX_TESTS=OFF` 與 integration OFF。 已提交 checkout 不含本機新增 cases 的登記，不能提供上述測試清單的執行證據。 Windows inventories／原生驗證維持原本範圍，缺少 Windows runner 的新回歸結果仍待驗
 
 ## 編輯器設定與 Windows 資源
 

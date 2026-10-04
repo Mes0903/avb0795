@@ -39,7 +39,7 @@ cmake --build --preset clangd-generated
 
 ### Linux
 
-Linux 需要能編譯專案 C++23 標準函式庫介面的 compiler、clangd、CMake 3.28 以上、Ninja、Git，以及 Vulkan 1.3 與 `glslc`。 X11 開發檔須包含 XKB、Xrandr、Xinerama、Xcursor、Xi、Xfixes 與 Xext（Shape）。 GLFW 固定建置 X11 backend，Wayland session 的視窗呈現使用 XWayland
+Linux 需要能編譯專案 C++23 標準函式庫介面的 compiler、clangd、CMake 3.28 以上、Ninja、Git，以及 Vulkan 1.3 與 `glslc`。 X11 開發檔須包含 XKB、Xrandr、Xinerama、Xcursor、Xi、Xfixes、Xext（Shape）與 XCB core／Composite／RandR；完整清單見 [Linux 指南](linux.md)。 GLFW 固定建置 X11 backend，Wayland session 的視窗呈現使用 XWayland
 
 ```bash
 c++ --version
@@ -58,7 +58,7 @@ SDK 路徑、compiler 選擇與必要的本機 flags 放在環境變數、命令
 
 若 clangd 無法取得 GCC 的 system headers，僅對該 compiler 的可信精確絕對路徑設定 `--query-driver`。 例如 database 使用 `/usr/bin/c++` 時，參數為 `--query-driver=/usr/bin/c++`
 
-保留 `.clangd` 的 background index 與 include diagnostics 設定，檢查 server log 是否出現 unknown key 或 YAML 診斷。 Doxygen hover 使用來源註解，不加入 clangd 21 不支援的 `Documentation.CommentFormat` 設定。 Shader build 與 clangd 導覽都不會執行 GPU capability probe
+保留 `.clangd` 的 background index 與 include diagnostics 設定，檢查 server log 是否出現 unknown key 或 YAML 診斷。 Doxygen hover 使用來源註解，不加入 clangd 21 不支援的 `Documentation.CommentFormat` 設定。 目前 production database 應包含 direct catalog／capture／runtime／factory／Linux entry，沒有退休的 Portal／PipeWire units。 Shader build 與 clangd 導覽都不會執行 GPU capability probe
 
 ## 2. 編輯器連線
 
@@ -119,6 +119,12 @@ flowchart LR
 另外有 17 個 `bugprone-unused-return-value` warnings，分布於 `application.cpp`、`overlay_window.cpp` 與 `wgc_hardware_test.cpp`；本次沒有把它們消音，也未將 warnings 直接判定為功能缺陷。**0 errors 不等於 0 warnings**，完整的行號與訊息留在本機 `build/clangd-lsp-audit.json`；該檔與 audit helper 是可丟棄的驗證產物，不是新增的產品測試
 
 已實際驗證四種導覽：`ConfigStore::load` declaration → definition、呼叫點 → declaration、`select_sdr_surface_format` declaration → definition、`Extent` 使用點 → struct definition；另確認 `ConfigStore` Doxygen 出現在 hover。這是直接操作 clangd LSP 的結果，尚未代替你操作 IDE UI，也不代表已逐一測過每個 symbol
+
+### Linux direct X11 查核（2026-10-04）
+
+使用真正 `linux-clangd` database、clangd 21.1.8、GCC 15.2 與精確可信 `--query-driver=/usr/bin/c++`，在 catalog／capture／image policy 及 runtime／factory／entry／controller 的分階段查核中取得 AST、unit Doxygen hover 與具體 definitions。 最後一輪四個 changed production units 的 semantic diagnostics 為零 errors／warnings，configuration diagnostics 為零；五個實質 hover 與三個 definitions 已確認。 這是 LSP 證據，不代替 IDE UI 或 desktop capture 驗收
+
+原始 server log 保留兩個 clang driver discovery errors；後續實際 GCC system include extraction 成功。 Semantic／configuration diagnostics 為零不表示原始 log 全無 error records，不新增 PATH shim 或 fallback includes 隱藏這項差異。 Historical Windows 掃描維持上節原範圍
 
 ## 5. 排查
 

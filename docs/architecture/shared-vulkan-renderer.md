@@ -29,7 +29,7 @@ flowchart LR
 
 `avb0795_vulkan_renderer` 已在 Windows 與 Linux graphics 建置中共用，來源契約為 BGRA8／SDR。 它連結 core、Vulkan、GLFW 與 diagnostics，來源原生互動留在平台 owners。 Windows facade／bridge 保存 WGC、D3 與 Win32 import。 既有 Windows 配對效能量測仍維持[效能觀測指南](../development/vulkan-performance.md#本階段驗證範圍)的實際範圍。 ROI-sized transport、GPU early-submit 與 HDR 尚未實作
 
-Linux 的 [PipeWireCapture](../../platform/linux/pipewire_capture.hpp) 把可映射 BGRA／BGRx buffer 正規化到三個 owning CPU slots，再由 [LinuxCpuFrameBridge](../../platform/linux/linux_cpu_frame_bridge.hpp) 同步交付。 Bridge 借用只到 CPU copy 回傳，renderer retained image 不借用已歸還的原生 buffer。 [LinuxReplicaRuntime](../../platform/linux/linux_replica_runtime.hpp) 串接 source、overlay、renderer 與獨立 drain，renderer 不含 Portal／PipeWire／X11 操作
+Linux 的 [X11Capture](../../platform/linux/x11_capture.hpp) 透過 private checked XCB connection 擷取 Window named pixmap 或 Display root region，把支援的原生格式正規化為 opaque BGRA8，寫入三個 owning CPU slots。 [LinuxCpuFrameBridge](../../platform/linux/linux_cpu_frame_bridge.hpp) 同步交付；借用只到 CPU copy 回傳，renderer retained image 不持有 native reply 或已歸還 CPU lease。 [LinuxReplicaRuntime](../../platform/linux/linux_replica_runtime.hpp) 串接 capture、overlay、renderer 與各自的 retirement；renderer 不操作 X11 來源。 Producer allocation exact ACK、resource epoch 與 graphics epoch 各自維持原責任，不把 capture sequence 當 GPU release proof
 
 Producer allocation revision 控制 ring generation，runtime graphics epoch 控制 device recovery，兩者分別發行。 Source publication sequence、成功 bridge delivery 的 `FrameStamp` 與退休 presents 各自提供不同觀察。 Retained redraw 沿用來源 stamp，不能增加來源序號。 Linux 底層與真正桌面驗收的界線見 [Linux 指南](../development/linux.md)
 

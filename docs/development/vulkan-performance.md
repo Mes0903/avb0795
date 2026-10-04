@@ -127,6 +127,8 @@ ImGui 的 scalar widget patch 將 temporary text export 綁定至當次 active e
 
 ## 本階段驗證範圍
 
+以下保留 2026-09 Windows 效能工作的範圍與當時的後續設計。 其中 Portal／PipeWire 是歷史規劃；目前 Linux 已改為 direct X11，產品接線與獨立驗收狀態見 [Linux 指南](linux.md)，不以這份 Windows 量測代替 Linux 證據
+
 ```mermaid
 flowchart LR
     Delivered[已實作的 Windows boundary<br/>cadence / pools / CPU padding / opt-in report] -->|證據：Task 6 已保存| Checkpoints[full 15 / hardware 3<br/>validation 0 / snapshot / B4–B6]
