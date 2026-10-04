@@ -282,19 +282,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
   target_link_libraries(avb0795_linux_x11_capture PRIVATE
     avb0795_core avb0795_linux_cpu_frames avb0795_linux_x11_catalog
     PkgConfig::AVB0795_XCB Threads::Threads)
-  pkg_check_modules(AVB0795_PIPEWIRE REQUIRED IMPORTED_TARGET GLOBAL libpipewire-0.3)
-  pkg_check_modules(AVB0795_GIO REQUIRED IMPORTED_TARGET GLOBAL gio-2.0 gio-unix-2.0)
   add_library(avb0795_linux
     ${PROJECT_SOURCE_DIR}/platform/linux/linux_preferences.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/linux_atomic_replace.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/linux_ui_language.cpp
     ${PROJECT_SOURCE_DIR}/platform/linux/controller_font.cpp
-    ${PROJECT_SOURCE_DIR}/platform/linux/detail/acquisition_policy.cpp
-    ${PROJECT_SOURCE_DIR}/platform/linux/linux_source_registry.cpp
-    ${PROJECT_SOURCE_DIR}/platform/linux/linux_source_acquisition.cpp
-    ${PROJECT_SOURCE_DIR}/platform/linux/portal_screencast.cpp
-    ${PROJECT_SOURCE_DIR}/platform/linux/pipewire_capture.cpp
-    ${PROJECT_SOURCE_DIR}/platform/linux/detail/pipewire_buffer_policy.cpp
   )
   target_include_directories(avb0795_linux
     PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include
@@ -308,15 +300,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AVB0795_BUILD_GRAPHICS)
   target_include_directories(avb0795_linux_graphics PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include)
   target_compile_features(avb0795_linux_graphics PUBLIC cxx_std_23)
   find_package(X11 REQUIRED)
-  target_link_libraries(avb0795_linux_graphics PRIVATE avb0795_vulkan_renderer avb0795_linux glfw X11::X11 X11::Xext)
+  target_link_libraries(avb0795_linux_graphics PRIVATE
+    avb0795_vulkan_renderer avb0795_linux avb0795_linux_cpu_frames
+    avb0795_linux_x11_capture avb0795_linux_x11_catalog
+    glfw X11::X11 X11::Xext)
   target_compile_features(avb0795_linux PUBLIC cxx_std_23)
   target_link_libraries(avb0795_linux
-    PRIVATE avb0795_core avb0795_i18n avb0795_linux_cpu_frames PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO PkgConfig::AVB0795_PIPEWIRE
+    PRIVATE avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG
   )
   add_executable(avb0795 ${PROJECT_SOURCE_DIR}/platform/linux/main.cpp)
   # The concrete capability attachment's public presentation values use Vulkan
   # types; do not expose all replica-renderer dependencies through the adapter.
   target_link_libraries(avb0795 PRIVATE
-    avb0795_app avb0795_desktop avb0795_linux avb0795_linux_graphics glfw Vulkan::Vulkan)
+    avb0795_app avb0795_desktop avb0795_linux avb0795_linux_graphics
+    avb0795_linux_x11_catalog glfw Vulkan::Vulkan)
   target_compile_features(avb0795 PRIVATE cxx_std_23)
 endif()

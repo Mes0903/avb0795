@@ -210,20 +210,14 @@ function(avb0795_assert_target_boundaries)
       "platform/linux/linux_preferences.cpp"
       "platform/linux/linux_atomic_replace.cpp"
       "platform/linux/linux_ui_language.cpp"
-      "platform/linux/controller_font.cpp"
-      "platform/linux/detail/acquisition_policy.cpp"
-      "platform/linux/linux_source_registry.cpp"
-      "platform/linux/linux_source_acquisition.cpp"
-      "platform/linux/portal_screencast.cpp"
-      "platform/linux/pipewire_capture.cpp"
-      "platform/linux/detail/pipewire_buffer_policy.cpp")
+      "platform/linux/controller_font.cpp")
     _avb0795_assert_links(avb0795_linux
-      avb0795_core avb0795_i18n avb0795_linux_cpu_frames PkgConfig::AVB0795_FONTCONFIG PkgConfig::AVB0795_GIO PkgConfig::AVB0795_PIPEWIRE)
+      avb0795_core avb0795_i18n PkgConfig::AVB0795_FONTCONFIG)
   endif()
 
   if(TARGET avb0795_linux_graphics)
     _avb0795_assert_sources(avb0795_linux_graphics "platform/linux/linux_replica_runtime.cpp" "platform/linux/linux_runtime_factory.cpp" "platform/linux/linux_cpu_frame_bridge.cpp" "platform/linux/detail/overlay_policy.cpp" "platform/linux/x11_controller_window.cpp" "platform/linux/x11_overlay_adapter.cpp")
-    _avb0795_assert_links(avb0795_linux_graphics avb0795_vulkan_renderer avb0795_linux glfw X11::X11 X11::Xext)
+    _avb0795_assert_links(avb0795_linux_graphics avb0795_vulkan_renderer avb0795_linux avb0795_linux_cpu_frames avb0795_linux_x11_capture avb0795_linux_x11_catalog glfw X11::X11 X11::Xext)
   endif()
 
   if(TARGET avb0795_windows)
@@ -316,7 +310,7 @@ function(avb0795_assert_target_boundaries)
       elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         _avb0795_assert_sources("${product_target}" "platform/linux/main.cpp")
         _avb0795_assert_links("${product_target}"
-          avb0795_app avb0795_desktop avb0795_linux avb0795_linux_graphics glfw Vulkan::Vulkan)
+          avb0795_app avb0795_desktop avb0795_linux avb0795_linux_graphics avb0795_linux_x11_catalog glfw Vulkan::Vulkan)
       else()
         _avb0795_boundary_failure("${product_target} has no supported platform composition")
       endif()
@@ -551,6 +545,11 @@ function(_avb0795_scan_files category)
         list(APPEND allowed_linux_app_headers avb/app/ports.hpp)
       endif()
       _avb0795_assert_app_includes("${file}" "${contents}" ${allowed_linux_app_headers})
+      if(linux_relative MATCHES "^platform/linux/x11_(controller_window|overlay_adapter)\\.(hpp|cpp)$")
+        _avb0795_assert_no_match("${file}" "${contents}"
+          "[.>]source_selection_method[ \t\r\n]*="
+          "Linux window interaction adapter assigns source-selection authority")
+      endif()
       if(NOT linux_relative STREQUAL "platform/linux/x11_source_catalog.cpp" AND
          NOT linux_relative STREQUAL "platform/linux/x11_capture.cpp")
         _avb0795_assert_no_match("${file}" "${contents}"
@@ -736,9 +735,8 @@ function(_avb0795_run_source_boundary_scan)
       _avb0795_assert_layer_includes("${file}" "${contents}" "platform/linux"
         platform/linux/controller_font.hpp platform/linux/linux_atomic_replace.hpp
         platform/linux/linux_disabled_hotkey.hpp platform/linux/linux_preferences.hpp
-        platform/linux/linux_ui_language.hpp platform/linux/linux_source_registry.hpp
-        platform/linux/linux_runtime_factory.hpp platform/linux/linux_source_acquisition.hpp
-        platform/linux/portal_screencast.hpp
+        platform/linux/linux_ui_language.hpp platform/linux/x11_source_catalog.hpp
+        platform/linux/linux_runtime_factory.hpp
         platform/linux/x11_controller_window.hpp platform/linux/x11_overlay_adapter.hpp)
       _avb0795_assert_no_match("${file}" "${contents}"
         "#[ \t]*include[ \t]*[<\"](X11/|xcb/|GLFW/glfw3native\\.h)"

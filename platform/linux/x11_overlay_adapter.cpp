@@ -370,7 +370,6 @@ namespace avb::linux_platform {
     bool probe()
     {
       caps.window_opacity = false;
-      caps.source_selection_method = core::SourceSelectionMethod::SystemPicker;
       // Probe only prerequisites and property acceptance, never visual compositor behavior.
       const bool interactive = detail::interactive_supported(window);
       Trap trap(display);

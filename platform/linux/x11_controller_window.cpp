@@ -10,7 +10,7 @@
 #include <X11/Xutil.h>
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
+#include <limits>
 #include <thread>
 #include <unordered_map>
 namespace avb::linux_platform {
@@ -183,6 +183,9 @@ namespace avb::linux_platform {
   /// @brief Stable owner-thread receiver reached through the host/ImGui predecessor chain.
   /// It never replaces host user storage; detachment erases lookup before restoring
   /// the callback so a destroyed receiver cannot remain reachable by native input.
+  /// WM cancellation is advisory: its checked result cannot change release handling.
+  /// Physical release ends the local gesture even if the WM rejects cancellation;
+  /// this interaction owner has no authority to transition capture/runtime state.
   struct X11ControllerWindow::Impl {
     GLFWwindow *window{};
     std::thread::id thread{std::this_thread::get_id()};
@@ -209,7 +212,8 @@ namespace avb::linux_platform {
             if (direction >= 0) self->gesturing = detail::moveresize(w, direction, x, y).has_value();
           }
           else if (action == GLFW_RELEASE && self->gesturing) {
-            (void) detail::moveresize(w, 11, x, y);
+            const auto cancellation = detail::moveresize(w, 11, x, y);
+            (void) cancellation;
             self->gesturing = false;
           }
         }
@@ -247,13 +251,13 @@ namespace avb::linux_platform {
     impl_->right = std::isfinite(r) ? std::clamp(r, 0.f, 1.f) : 0;
     impl_->bottom = std::isfinite(b) ? std::clamp(b, 0.f, 1.f) : 0;
   }
-  std::expected<std::string, core::AppError> portal_parent_identifier(GLFWwindow *w)
+  std::expected<std::uint32_t, core::AppError> owned_x11_drawable(GLFWwindow *window) noexcept
   {
-    if (!w || glfwGetPlatform() != GLFW_PLATFORM_X11) return std::unexpected(core::AppError{core::AppErrorCode::RuntimeConstructionFailure});
-    const auto xid = glfwGetX11Window(w);
-    if (!xid) return std::unexpected(core::AppError{core::AppErrorCode::RuntimeConstructionFailure});
-    char value[64]{};
-    std::snprintf(value, sizeof(value), "x11:%lx", xid);
-    return std::string(value);
+    if (!window || glfwGetPlatform() != GLFW_PLATFORM_X11)
+      return std::unexpected(core::AppError{core::AppErrorCode::RuntimeConstructionFailure});
+    const auto drawable = glfwGetX11Window(window);
+    if (!drawable || drawable > std::numeric_limits<std::uint32_t>::max())
+      return std::unexpected(core::AppError{core::AppErrorCode::RuntimeConstructionFailure});
+    return static_cast<std::uint32_t>(drawable);
   }
 }    // namespace avb::linux_platform

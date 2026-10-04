@@ -32,6 +32,10 @@ namespace avb::linux_platform {
     std::expected<void, core::AppError> apply(const core::ReplicaSettings &) noexcept;
     void set_presentation(render::PresentationSnapshot) noexcept;
     [[nodiscard]] X11OverlayEvents take_events() noexcept;
+    /// @brief Report only window-interaction prerequisites for this borrowed window.
+    /// Only pass_through, borderless_resize, always_on_top and window_opacity are
+    /// meaningful. Composition obtains capture and selection capabilities from
+    /// its source catalog independently; this broad value supplies no source authority.
     [[nodiscard]] core::PlatformCapabilities capabilities() const noexcept;
     [[nodiscard]] std::optional<core::PixelRegion> selection_preview() const noexcept;
     X11OverlayAdapter(const X11OverlayAdapter &) = delete;

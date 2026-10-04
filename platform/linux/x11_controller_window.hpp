@@ -6,7 +6,7 @@
 #include "avb/desktop/controller_window_interaction.hpp"
 #include <expected>
 #include <memory>
-#include <string>
+#include <cstdint>
 struct GLFWwindow;
 namespace avb::linux_platform {
   /// @brief Attach caption/grip callbacks without taking ownership or using the host user pointer.
@@ -24,8 +24,12 @@ namespace avb::linux_platform {
     explicit X11ControllerWindow(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
   };
-  /// @brief Format only the caller-owned initialized X11 window for a Portal parent.
-  [[nodiscard]] std::expected<std::string, core::AppError> portal_parent_identifier(GLFWwindow *);
+  /// @brief Read the exact caller-owned X11 drawable without taking native authority.
+  /// @pre GLFW is initialized for X11 and this call runs on its owning main thread.
+  /// The caller keeps the window alive through the query and registers this ID
+  /// with its catalog before exposure. Registration and capture remain caller
+  /// responsibilities; the exclusion lifetime follows the window's native Destroy.
+  [[nodiscard]] std::expected<std::uint32_t, core::AppError> owned_x11_drawable(GLFWwindow *) noexcept;
   namespace detail {
     /// @brief Native WM capability and gesture operations shared only by Linux adapters.
     /// No GLFW event dispatch occurs inside their narrow protocol error scopes.

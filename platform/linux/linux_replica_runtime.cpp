@@ -22,6 +22,15 @@ namespace avb::linux_platform {
     }
   }    // namespace
   namespace detail {
+    std::optional<core::AppError> capture_terminal_failure(const CpuPoolFacts &facts) noexcept
+    {
+      if (facts.error) {
+        if (facts.error->code == core::AppErrorCode::SourceUnavailable) return {};
+        return lost(*facts.error);
+      }
+      if (facts.lost) return core::AppError{core::AppErrorCode::RuntimeStateLost};
+      return {};
+    }
     bool RetiredContent::observe(const render::PresentationSnapshot snapshot) noexcept
     {
       if (!snapshot.content.width || !snapshot.content.height || !snapshot.framebuffer.width ||
@@ -84,19 +93,22 @@ namespace avb::linux_platform {
     }
   }    // namespace detail
   void ReplicaWindowDeleter::operator()(GLFWwindow *window) const noexcept { glfwDestroyWindow(window); }
-  LinuxReplicaRuntime::LinuxReplicaRuntime(ConstructionToken, ReplicaWindow window, std::unique_ptr<X11OverlayAdapter> adapter, std::unique_ptr<render::VulkanRenderer> renderer, core::ReplicaSettings settings, std::uint64_t revision, std::uint64_t ring_serial, std::function<void()> wake, diagnostics::PerformanceReport *performance, std::uint64_t observation) noexcept
-      : window_{std::move(window)}, adapter_{std::move(adapter)}, renderer_{std::move(renderer)}, settings_{settings}, scheduler_{settings.fps_cap, std::chrono::steady_clock::now()}, wake_{std::move(wake)}, performance_{performance}, observation_instance_{observation}, producer_revision_{revision}, ring_serial_{ring_serial} {}
+  LinuxReplicaRuntime::LinuxReplicaRuntime(ConstructionToken, ReplicaWindow window, std::unique_ptr<X11OverlayAdapter> adapter, std::unique_ptr<render::VulkanRenderer> renderer, std::unique_ptr<X11Capture> capture, core::ReplicaSettings settings, std::uint64_t revision, std::uint64_t ring_serial, std::function<void()> wake, diagnostics::PerformanceReport *performance, std::uint64_t observation) noexcept
+      : window_{std::move(window)}, adapter_{std::move(adapter)}, renderer_{std::move(renderer)}, capture_{std::move(capture)}, settings_{settings}, scheduler_{settings.fps_cap, std::chrono::steady_clock::now()}, wake_{std::move(wake)}, performance_{performance}, observation_instance_{observation}, producer_revision_{revision}, ring_serial_{ring_serial} {}
   LinuxReplicaRuntime::~LinuxReplicaRuntime()
   {
     // Unpublished owners have never submitted. A published owner must already
     // have reported Stopped; unwinding unknown native ownership is never cleanup.
     if (published_ && !stopped_) std::terminate();
   }
-  void LinuxReplicaRuntime::attach_capture(std::unique_ptr<PipeWireCapture> capture) noexcept
+  std::expected<void, core::AppError> LinuxReplicaRuntime::activate_capture() noexcept
   {
-    capture_ = std::move(capture);
+    if (published_ || !capture_ || !renderer_)
+      return std::unexpected(core::AppError{core::AppErrorCode::RuntimeConstructionFailure});
+    if (auto started = capture_->start(); !started) return started;
     published_ = true;
     renderer_->set_source_admission(true);
+    return {};
   }
   std::expected<void, core::AppError> LinuxReplicaRuntime::apply(const core::ReplicaSettings &candidate) noexcept
   {
@@ -313,7 +325,7 @@ namespace avb::linux_platform {
     auto emit = [&](app::RuntimeEvent event) noexcept { if (event_count<result.events.size()) result.events[event_count++]=event; };
     render::DrainProgress progress = render::DrainProgress::None;
     render::VulkanTickResult graphics;
-    PipeWireProgress producer;
+    X11CaptureProgress producer;
     X11OverlayEvents native;
     std::optional<Time> fps_deadline;
     bool scheduled_work{};
@@ -329,8 +341,12 @@ namespace avb::linux_platform {
         earliest(result.next_wake, producer.next_wake);
       }
       if (native.failure) fail(*native.failure);
+      // Producer-local failures have no Vulkan provenance. Classify terminal
+      // causes before generic disconnection so deadline cannot emit SourceLost.
+      if (!stop_requested_)
+        if (auto failure = detail::capture_terminal_failure(producer.frame)) fail(*failure);
       if (producer.frame.lost || producer.frame.error) {
-        if (!source_lost_ && !stop_requested_) {
+        if (!source_lost_ && !stop_requested_ && !terminal_failure_) {
           source_lost_ = true;
           device_recovering_ = false;
           reconfiguring_ = false;
@@ -373,7 +389,7 @@ namespace avb::linux_platform {
             if (!delivered) {
               retry_frame_.reset();
               // Only the renderer's typed Vulkan loss latch authorizes device loss.
-              // Numeric PipeWire/native error codes never enter a VkResult classifier.
+              // Numeric producer/native error codes never enter a VkResult classifier.
               if (renderer_->vulkan_device_lost())
                 begin_device_recovery(now);
               else

@@ -6,11 +6,16 @@
 #include "render/graphics_retry_policy.hpp"
 #include "render/replica_presentation.hpp"
 #include "avb/core/frame_scheduler.hpp"
-#include "platform/linux/pipewire_capture.hpp"
+#include "platform/linux/x11_capture.hpp"
 #include "platform/linux/x11_overlay_adapter.hpp"
 #include "render/vulkan_renderer.hpp"
 #include <functional>
 namespace avb::linux_platform::detail {
+  /// @brief Normalize terminal producer diagnostics before generic source-loss handling.
+  /// Healthy facts and known SourceUnavailable remain outside Failed. Every other
+  /// cause, including loss without a cause, becomes RuntimeStateLost while retaining
+  /// native_detail. This decision grants no worker, lease or graphics release proof.
+  [[nodiscard]] std::optional<core::AppError> capture_terminal_failure(const CpuPoolFacts &) noexcept;
   /// @brief Main-thread source bounds certified only by retired current presentation.
   /// The renderer filters stale presentation sequences. This scalar owner neither
   /// polls fences nor accepts producer dimensions as displayed geometry.
@@ -71,10 +76,11 @@ namespace avb::linux_platform {
     };
 
   public:
-    /// @brief Prepare all runtime storage before capture transfer using factory passkey.
-    /// Dependencies arrive unpublished and without submissions; destruction is then
-    /// safe even if registry commit fails. Only attach_capture may publish this owner.
-    LinuxReplicaRuntime(ConstructionToken, ReplicaWindow, std::unique_ptr<X11OverlayAdapter>, std::unique_ptr<render::VulkanRenderer>, core::ReplicaSettings, std::uint64_t revision, std::uint64_t ring_serial, std::function<void()> wake, diagnostics::PerformanceReport *, std::uint64_t observation_instance) noexcept;
+    /// @brief Own complete inactive dependencies through the factory passkey.
+    /// Callable copies and allocation occur before entry. Capture has not started
+    /// and graphics have not submitted, so unpublished destruction is safe. Only
+    /// factory activation may enter the retained published lifetime contract.
+    LinuxReplicaRuntime(ConstructionToken, ReplicaWindow, std::unique_ptr<X11OverlayAdapter>, std::unique_ptr<render::VulkanRenderer>, std::unique_ptr<X11Capture>, core::ReplicaSettings, std::uint64_t revision, std::uint64_t ring_serial, std::function<void()> wake, diagnostics::PerformanceReport *, std::uint64_t observation_instance) noexcept;
     ~LinuxReplicaRuntime() override;
     /// @brief Accept native requests before the no-throw renderer/settings commit.
     /// Ordinary rejection preserves verified settings; unknown rollback starts drain.
@@ -93,9 +99,11 @@ namespace avb::linux_platform {
 
   private:
     friend class LinuxRuntimeFactory;
-    /// @brief No-throw final attachment after registry has bound the exact first frame.
-    /// No settings copy, acknowledgment or allocation may follow this transfer.
-    void attach_capture(std::unique_ptr<PipeWireCapture>) noexcept;
+    /// @brief Activate only a complete inactive owner after exact ring acknowledgment.
+    /// Failure retains an inactive capture with no live worker. Success publishes
+    /// ownership and admission without allocation; only nonthrowing factory work
+    /// may follow, and subsequent worker failure must pass through tick/drain.
+    [[nodiscard]] std::expected<void, core::AppError> activate_capture() noexcept;
     /// @brief Withdraw displayed geometry and restore transient selection preferences.
     /// Zero snapshots reset adapter sequence history across renderer replacements.
     void invalidate_mapping() noexcept;
@@ -121,7 +129,7 @@ namespace avb::linux_platform {
     ReplicaWindow window_;
     std::unique_ptr<X11OverlayAdapter> adapter_;
     std::unique_ptr<render::VulkanRenderer> renderer_;
-    std::unique_ptr<PipeWireCapture> capture_;
+    std::unique_ptr<X11Capture> capture_;
     std::optional<LinuxCapturedFrame> retry_frame_;
     core::ReplicaSettings settings_;
     core::FrameScheduler scheduler_;
